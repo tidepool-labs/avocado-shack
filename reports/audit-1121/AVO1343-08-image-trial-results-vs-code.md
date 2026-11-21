@@ -59,12 +59,13 @@ T3 breakdown by stored `kind`, using `ok` for pass/fail and `code` for the reaso
 | README claim | Stored outcome and verdict |
 |---|---|
 | “12/12 calls returned an edit” (line 13) | T2 `/*/call`: `"ok"` × 12. Agrees; not a gate verdict. |
-| “12/12 real edits kept; 42/43 deliberate bad outputs rejected” (line 14); “The deliberate bad outputs (43, from the real high edits), all rejected except one” (line 38) | T3 main alone has `ok: true` × 13 and `ok: false` × 36; after separating 12 `real-*`, that's **36/37** `bad-*` rejected. The named companion has `ok: false` and `code: "colour"` × 6. Combined: **42/43** rejected; **12/12** real kept. Not a count error when both cited files are included. Main `/38` is `kind: "bad-blanked"`, `name: "produce"`, `ok: true`, `code: "ok"`. The README's explanation of that pass is historical (lines 47–48); pixels not inspected. |
+| “12/12 real edits kept; 42/43 deliberate bad outputs rejected” (line 14); “The deliberate bad outputs (43, from the real high edits), all rejected except one” (line 38) | T3 main alone has `ok: true` × 13 and `ok: false` × 36; after separating 12 `real-*`, that's **36/37** `bad-*` rejected. The named companion has `ok: false` and `code: "colour"` × 6. Combined: **42/43** rejected; **12/12** real kept. Agrees when both files are included. |
+| “5 blanked labels (every word read on the edit painted over with label paper), rejected as text.” (`reports/hass-image-1/README.md:40`) | **Disagrees for this group.** `t3-results.json` records five `"kind": "bad-blanked"` cases, but only four have `"ok": false, "code": "text"` (`/16`, `/22`, `/32`, `/43`). The fifth has `"name": "produce", "ok": true, "code": "ok"` (`/38`). The README itself names `produce-bad-blanked` as the one pass and says there was no label (`README.md:47–48`; pixels not inspected). So five were tried, four were rejected as text, and one passed. That exception is already counted in the correct **42/43** total. |
 | “2/2” (line 15) | Both T4 objects have `"pass": true`. Agrees. |
 | “6/6 runs finish” and “6/6 clean” (lines 16–17) | T5 `"yes": "approved"` and `"privacy": { … "clean": true }` each occur six times. Agrees. Two `"code": "api"` are polish failures, not failed runs. |
 | “22/22” (line 12) | T1 cites a stub test command, not a JSON case file; no stored JSON count to compare, and the suite was not run for this audit. |
 
-No verified README **count** disagrees with the JSON. The T5 “real call took 19 to 28 s” (README:21–22) is not independently recoverable from these rows: `polish_wait_seconds` and `decision.seconds` give 31.4/20.6 s for the two on runs, which README:58–59 describes as **call plus gate**. These are different measures; do not treat them as a contradictory count or as a pure call-time receipt.
+The T5 “real call took 19 to 28 s” (README:21–22) is not independently recoverable from these rows: `polish_wait_seconds` and `decision.seconds` give 31.4/20.6 s for the two on runs, which README:58–59 describes as **call plus gate**. These are different measures; do not treat them as a contradictory count or as a pure call-time receipt.
 
 ## R4. Gaps, in priority order
 

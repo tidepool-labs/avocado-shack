@@ -5,6 +5,7 @@
     python3 hass/social_draft.py --maker KEY
     python3 hass/social_draft.py --recap EVENT_ID
     python3 hass/social_draft.py --notice
+    python3 hass/social_draft.py --today
 
 Prints one JSON object. Success: {"draft": true, "image", "alt", "caption", "illustration", "availability"} (illustration: true unless the image is an installed owner photo, HOME_IMAGE_RE; availability: the card word the website shows for the product on the shop day, sitegen.availability_label, e.g. "Sold out", "Limited", "Available today", "Last confirmed Monday, November 2", or null) built only from the product's
 stored name, description, image, imageAlt and its maker's name and place (caption <= 2200 characters, at most
@@ -35,6 +36,13 @@ its days in words ("through Thursday, November 26", "from Monday, November 23 th
 day), the store name, "<street>, <town>.", then fixed #AvocadoShack #MorroBay. Refusal (exit 1): "cannot read content" |
 "no notice on the website" (none, not yet shown or already ended) | "notice record incomplete" | "store record incomplete" |
 "free text has a hashtag or account name" | "caption too long".
+--today prints {"draft": true, "caption"}: "In at the Shack today", the names (site order, at most 12, then "and more") of the active products
+whose "yes" or "limited" word Michael confirmed ON the saved shelf-check day (their own available_on equals it), the store name,
+"<street>, <town>.", then fixed #AvocadoShack #MorroBay; only when that check is Pacific today (SHOP-1: an old check is never today's).
+Refusal (exit 1): "cannot read content" | "Your last shelf check was not recorded; send today's shelf check first." |
+"Your last shelf check was <day>; send today's shelf check first." (older or future) | "No products were marked Available today or
+Limited in today's shelf check." | "product record incomplete" | "store record incomplete" | "free text has a hashtag or account name" |
+"caption too long". No photo, price, count or description is added.
 Read-only: nothing is posted, scheduled, written or sent, and the module imports no network code.
 """
 from __future__ import annotations
@@ -48,7 +56,7 @@ from pathlib import Path
 
 if __package__ in (None, ""): sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hass.content_model import CATEGORIES, CONTENT_DIR, HOME_IMAGE_RE, INVISIBLE_RE, SITE_DIR, ContentError, load_content, notice_days, shop_today  # noqa: E402
+from hass.content_model import CATEGORIES, CONTENT_DIR, HOME_IMAGE_RE, INVISIBLE_RE, SITE_DIR, ContentError, checked_on, iso_day, load_content, notice_days, shop_today  # noqa: E402
 from hass.ops import hikes  # noqa: E402
 from hass import sitegen  # noqa: E402
 
@@ -210,6 +218,32 @@ def build_notice(content, now: datetime) -> dict:
     return refuse("caption too long") if len(caption) > MAX_CAPTION else {"draft": True, "caption": caption}
 
 
+def build_today(content, now: datetime) -> dict:
+    """AV1104-08: {"draft": True, "caption"} naming the active products whose yes/limited word Michael confirmed on the saved shelf-check
+    day, only when that day is the Pacific day of the aware ``now`` (SHOP-1: an old check is never posted as today's); else a refusal."""
+    from hass.sitegen import _day_text  # the site's own day words; not imported at module load (sitegen is large)
+    def refuse(reason): return {"draft": False, "reason": reason}
+    store, products = getattr(content, "store", None), getattr(content, "products", None)
+    if not isinstance(store, dict) or not isinstance(products, list) or not all(isinstance(p, dict) for p in products):
+        return refuse("cannot read content")
+    if "selection_checked_on" not in store: return refuse("Your last shelf check was not recorded; send today's shelf check first.")
+    check = checked_on(store)
+    if check is None: return refuse("cannot read content")
+    if check != shop_today(now): return refuse(f"Your last shelf check was {_day_text(check)}; send today's shelf check first.")  # older or future
+    # a product counts only when its OWN word was dated on that check: a later check does not refresh what it did not name
+    named = [p for p in products if p.get("status") == "active" and p.get("available") in ("yes", "limited") and iso_day(p.get("available_on")) == check]
+    if not named: return refuse("No products were marked Available today or Limited in today's shelf check.")
+    shown = named[:12]  # products.json order, equal names on different ids both kept
+    names = [p.get("name") for p in shown]
+    if not all(_line(n) for n in names): return refuse("product record incomplete")
+    name, street, town = store.get("name"), store.get("streetAddress"), store.get("town")
+    if not all(_line(v) for v in (name, street, town)): return refuse("store record incomplete")
+    if any(_TAG_RE.search(t) for t in (*names, name, street, town)): return refuse("free text has a hashtag or account name")
+    listing = ", ".join(names + (["and more"] if len(named) > 12 else []))
+    caption = f"In at the Shack today\n{listing}\n{name}\n{street}, {town}.\n\n{STORE_TAGS}"
+    return refuse("caption too long") if len(caption) > MAX_CAPTION else {"draft": True, "caption": caption}
+
+
 def _aware_clock(text: str) -> datetime:
     """argparse type for the hidden --now: an ISO timestamp that carries a timezone offset (never guessed)."""
     try: value = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -219,13 +253,14 @@ def _aware_clock(text: str) -> datetime:
 
 
 def main(argv=None, content_dir: Path = CONTENT_DIR, site_dir: Path = SITE_DIR) -> int:
-    parser = argparse.ArgumentParser(description="Print a local DRAFT Instagram post for one active product or hike, a maker introduction or the home notice (posts nothing).")
+    parser = argparse.ArgumentParser(description="Print a local DRAFT Instagram post for one active product or hike, a maker introduction, the home notice or today's checked products (posts nothing).")
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("product_id", nargs="?")
     which.add_argument("--hike", metavar="ID")
     which.add_argument("--maker", metavar="KEY")
     which.add_argument("--recap", metavar="ID")
     which.add_argument("--notice", action="store_true")
+    which.add_argument("--today", action="store_true")
     parser.add_argument("--now", type=_aware_clock, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)  # --now: tests only
     try: content = load_content(content_dir)
@@ -234,6 +269,7 @@ def main(argv=None, content_dir: Path = CONTENT_DIR, site_dir: Path = SITE_DIR) 
     elif args.maker is not None: result = build_maker(content, args.maker)
     elif args.recap is not None: result = build_recap(content, args.recap)
     elif args.notice: result = build_notice(content, args.now or datetime.now(timezone.utc))
+    elif args.today: result = build_today(content, args.now or datetime.now(timezone.utc))
     elif args.hike is not None: result = build_hike(content, args.hike, args.now or datetime.now(timezone.utc))
     else: result = build(content, args.product_id, site_dir, today=shop_today(args.now or datetime.now(timezone.utc)))
     print(json.dumps(result, ensure_ascii=False, indent=2))

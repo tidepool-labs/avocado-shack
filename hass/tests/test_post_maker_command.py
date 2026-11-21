@@ -211,7 +211,8 @@ class PostMakerTests(StoreMixin, ConversationTestCase):
     def test_help_and_commands_maker_example(self):
         plain = voice.plain(conversation.help_detail("post"))  # AV1052-12: the full post lines are in `help post`
         self.assertEqual(plain, "post Hass avocado - a caption to copy for a product\npost maker fixture-farm - a caption to copy for a maker\n"
-                                "post notice - a caption for the home page notice")  # AV1104-07 adds the notice line
+                                "post notice - a caption for the home page notice\n"  # AV1104-07 adds the notice line
+                                "post today - a caption for what you checked today")  # AV1104-08 adds the today line
         for line in plain.splitlines(): self.assertLessEqual(len(line), 70)
         for bad in ("<id>", "<$>", "<code>"): self.assertNotIn(bad, plain)
         [(_, example, row)] = [r for r in rows(DOC.read_text("utf-8")) if r[0].startswith("`post maker")]

@@ -161,6 +161,7 @@ class ReportsPack:
         """AV1322-07 (F07 prepare half): social_draft's caption for one active product plus its site photo, from the
         writer worktree content. Read-only: nothing is posted, scheduled, written or drafted; works while paused."""
         photo = None
+        if pid.strip().lower() == "today": return self._post_today()  # AV1104-08: the whole argument; before the product-id fallback
         if pid.strip().lower() == "notice": return self._post_notice()  # AV1104-07: the whole argument; before the product-id fallback
         if pid.lower().split(None, 1)[:1] == ["maker"]: return self._post_maker(pid[5:].strip())  # AV1937-10: before the product-id fallback
         if pid.lower().split(None, 1)[:1] == ["hike"]: return self._post_hike(pid[4:].strip())
@@ -215,6 +216,20 @@ class ReportsPack:
         if out["draft"] or out["reason"] == "no notice on the website": return self._post_caption(out, NOTICE_NONE)
         self._problem("could-not-do", "post-refused")
         return self._post_caption(out, q(f"Cannot draft a notice post: {out['reason']}."))
+
+    def _post_today(self) -> str:
+        """AV1104-08 (F07/SHOP-1): social_draft.build_today's caption for the products Michael's shelf check marked Available today or
+        Limited, only when that check is Pacific today. Read-only: nothing is posted, scheduled, stored or drafted; works while paused."""
+        try:
+            out = social_draft.build_today(load_content(editor_mod._load(str(self.sdir))[2] / "hass" / "content"), self._now())
+            if not out["draft"] and out["reason"] == "cannot read content": raise OSError
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, editor_mod.UnsafeState, ContentError):
+            self._problem("error", "shop-list-unreadable")
+            return self._post_caption({"draft": False}, MAKER_CANT_READ)
+        if out["draft"]: return self._post_caption(out, "")
+        if out["reason"].endswith("."): return self._post_caption(out, out["reason"])  # the three complete-sentence reasons, verbatim
+        self._problem("could-not-do", "post-refused")
+        return self._post_caption(out, q(f"Cannot draft a today post: {out['reason']}."))
 
     def _post_maker(self, key) -> str:
         """AV1937-10 (F07): social_draft.build_maker's caption for one maker key, exactly as the builder wrote it, in chat.

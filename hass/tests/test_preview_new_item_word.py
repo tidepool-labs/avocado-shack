@@ -23,7 +23,6 @@ from hass.skills import testkit
 from hass.tests.test_editor import git
 from hass.tests.test_skills_item_add import CONTENT, FULL
 
-TODAY = shop_today()  # the page ages words with the browser's own Pacific day, so the draft is made on the real one
 PHOTO = "reports/hass/newitem-1/synthetic/jar-white-sheet.jpg"
 
 
@@ -36,8 +35,10 @@ class NewItemWordCase(unittest.TestCase):
         self.scratch = testkit.Scratch({}, {"item.add": ia.ITEM_ADD}, photos=[PHOTO])
         self.addCleanup(self.scratch.close)
         self.scratch.now = datetime.now(timezone.utc)
+        # Sample the browser's Pacific day with the draft clock, not at test discovery.
+        self.today = shop_today(self.scratch.now)
         plan = ia.plan_add({**FULL, "maker": "Cal Poly", "place": None},
-                           SimpleNamespace(today=TODAY.isoformat(), next_product_id="photo-product-175", content=CONTENT,
+                           SimpleNamespace(today=self.today.isoformat(), next_product_id="photo-product-175", content=CONTENT,
                                            texts=["new honey", "skip"]))
         out = self.scratch.editor.prepare(plan)
         self.assertEqual(out["result"], "ok", out)
@@ -47,7 +48,7 @@ class NewItemWordCase(unittest.TestCase):
         self.assertEqual(self.rendered["result"], "ok", self.rendered)
 
     def target(self, record):
-        return preview.target_for(record, TODAY, store=self.rendered["store"])
+        return preview.target_for(record, self.today, store=self.rendered["store"])
 
 
 class TargetTests(NewItemWordCase):
@@ -73,13 +74,13 @@ class TargetTests(NewItemWordCase):
     def test_an_add_record_that_does_carry_a_word_expects_it(self):
         record = {"collection": "products", "key": "p-1", "before": None,
                   "after": {"id": "p-1", "name": "Avocados", "status": "active", "description": "Ripe.",
-                            "available": "no", "available_on": TODAY.isoformat()}}
-        self.assertEqual(preview.target_for(record, TODAY, store={"selection_checked_on": TODAY.isoformat()})["availability"], "Sold out")
+                            "available": "no", "available_on": self.today.isoformat()}}
+        self.assertEqual(preview.target_for(record, self.today, store={"selection_checked_on": self.today.isoformat()})["availability"], "Sold out")
 
     def test_a_record_without_a_before_key_keeps_todays_shape(self):
         record = {"collection": "products", "key": "p-1",
                   "after": {"id": "p-1", "name": "Avocados", "status": "active", "description": "Ripe."}}
-        self.assertIn("availability", preview.target_for(record, TODAY, store={"selection_checked_on": TODAY.isoformat()}))
+        self.assertIn("availability", preview.target_for(record, self.today, store={"selection_checked_on": self.today.isoformat()}))
 
 
 @unittest.skipUnless(os.environ.get("PLAYWRIGHT_MODULE"), "PLAYWRIGHT_MODULE is not set")

@@ -1514,8 +1514,21 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
             return None
         disposition = None
         if command and command[0] == "status":
-            self._reply(f"The listing {active['job_id']} is still open.\n" + self._status(now, self._paused()),
-                        long_ok=True, ids_ok=True)
+            jid, state = active["job_id"], active["state"]
+            line = f"The listing {jid} is still open."
+            if state == "card_out":
+                tag = f"{jid}-{active['current_version']}"
+                line = f"Card {tag} is waiting for your yes (reply yes {tag}, or tell me what to change)."
+            elif state == "asking":
+                # Replay the rendered prompt, including any template substitutions.
+                prompt = jobs.one("SELECT o.text FROM npp_questions q JOIN outbox o ON o.id=q.asked_outbox_id "
+                                  "WHERE q.job_id=? AND q.state='open' AND o.chat=? ORDER BY o.id DESC LIMIT 1",
+                                  jid, active["chat"])
+                if prompt:
+                    line = f"Waiting for your answer: {prompt[0]}"
+            elif state in ("working", "editing"):
+                line = f"I'm still drawing the card for listing {jid}."
+            self._reply(line + "\n" + self._status(now, self._paused()), long_ok=True, ids_ok=True)
             disposition = "status"
         elif (text.casefold() in ("yes", "no") and
               (disposition := jobs.answer(active, msg, text.casefold() == "yes", accepted, now)) is not None):

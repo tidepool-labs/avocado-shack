@@ -473,9 +473,32 @@ def make_worker(cfg, store, *, editor=None, build=None, clock=_now, stage=stagel
         try: conv.answer_reader = (cloud_codex.reader(answer_reader.AnswerReader, itp, think=itp["fallback"].get("think")) if itp.get("api") == "codex" else
                                    answer_reader.AnswerReader(itp["url"], itp["model"], timeout=itp.get("timeout", 30), api=itp.get("api", "ollama"), think=itp.get("think")))
         except (KeyError, ValueError): conv.answer_reader = None  # none set up: an odd answer is asked again, never guessed
-    if cfg.get("clover") is not None:  # HASS-CLOVER-2: the owner's till questions, read from the private cache only (no token here)
+    if (settings := cfg.get("clover")) is not None:
         from hass.clover.chat import TillDesk
-        conv.till = TillDesk(cfg["state"], cfg["clover"])
+        engine = None
+        if settings.get("writeMode") is not None:
+            from hass.clover import credential, dryrun
+            from hass.clover.chat import BundleEngine
+            from hass.clover.config import from_settings
+
+            clover = from_settings(settings)
+            rehearsal = clover.write_mode == "dry-run"
+            factory = dryrun.make_client_factory(clover, credential.load_token, dry_run=rehearsal)
+            owner = conv.settings
+            chat_id = owner["ownerChat"]
+            mike_keys = owner.get("chatKeys", {}).get(chat_id, owner["ownerKeys"])
+            mike = min(mike_keys), chat_id
+            engine_clock = lambda: clock().timestamp()
+            if rehearsal:
+                engine = dryrun.DryRunEngine(cfg["state"], clover, factory, mike=mike, clock=engine_clock)
+                # A waiting rehearsal code must never become a live approval after a mode switch.
+                engine.journal.path = engine.journal.path.with_name("rehearsal.sqlite3")
+            else:
+                engine = BundleEngine(cfg["state"], clover, factory, mike=mike, clock=engine_clock)
+            engine.owners.update((key, chat_id) for key in mike_keys)
+            if owner.get("gOwner") is True:  # validated gIsOwner in conversation settings
+                engine.owners.update((key, owner["gChat"]) for key in owner["gKeys"])
+        conv.till = TillDesk(cfg["state"], settings, engine=engine)
     rx = receiver.Receiver(state=inbox_mod.Inbox(cfg["state"], clock=clock), settings=conv,
                            apply=cfg["approvals"] in ("private", "live"))
     return Worker(conv, rx, store, worktree, build, clock, Path(cfg["state"]).resolve() / "screenshots" if cfg["pictures"] else None, stage)
@@ -537,10 +560,17 @@ def _run(args, root, clock):
         except ValueError: raise Refuse({"result": "start-point-refused"}) from None
         return {"result": "ok", "start_at": args.at}
     cfg, key = _ready(args, root, need_start=args.cmd != "check")
-    if args.cmd == "check":  # HASS-CLOVER-2: the Clover block and its token file, by stat only (the token is never opened here)
+    if args.cmd == "check":  # Clover token files are checked by stat only.
         clover = clover_state(cfg)
-        if clover not in ("ok", "not configured"): raise Refuse({"result": "clover", "clover": clover})
-        return {"result": "ok", "clover": clover}
+        write_mode = cfg.get("clover", {}).get("writeMode")
+        if clover == "ok" and write_mode == "live":
+            from hass.clover.credential import inspect
+            clover = inspect(cfg["clover"]["writeTokenFile"]) or "ok"
+        output = {"clover": clover}
+        if write_mode is not None:
+            output["writeMode"] = write_mode
+        if clover not in ("ok", "not configured"): raise Refuse({"result": "clover", **output})
+        return {"result": "ok", **output}
     host_dir = Path(args.host).resolve().parent
     stage = stagelog.StageLog(host_dir / "stages.jsonl")  # HASS-FAST-1: read-only stage times, ids hashed, no text
     if args.cmd == "work":

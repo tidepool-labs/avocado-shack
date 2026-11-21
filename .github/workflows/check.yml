@@ -9,8 +9,7 @@ name: check
 #   quick           syntax + commerce unit tests, plans the hass tests (hass/tests/ci_shards.py plan)
 #                   and, on the affected tier, runs the affected hass test modules itself
 #   hass shard N    full tier only: one stable shard of hass/tests (HASS_SHARD_JOBS shards, default 4)
-#   site community  catalog + community checks against a loopback server on an OS-assigned port
-#   site static     the publishable build on a plain static host, every page checked
+#   site            catalog + community loopback checks and the published static-site check
 #   check           re-derives the plan, proves every planned module ran exactly once (shard union ==
 #                   module list, test count == plan), and reprints any failing shard's unittest output
 #
@@ -51,7 +50,7 @@ env:
   # version here and in docs/hass/PILLOW-HOST.md (the host install); change both together.
   PILLOW_VERSION: "12.0.0"
   # Hass shard jobs on the full tier. The suite is ~1150 s of measured module time (hass/tests/ci_weights.json),
-  # so 4 shards are ~290 s each; 4 shards + quick + 2 site jobs are 7 concurrent hosted jobs (the free
+  # so 4 shards are ~290 s each; 4 shards + quick + site are 6 concurrent hosted jobs (the free
   # public-repo limit is 20). Retune with the repo variable HASS_SHARD_JOBS (1-8) without a code change.
   HASS_SHARD_JOBS: ${{ vars.HASS_SHARD_JOBS || 4 }}
 
@@ -197,15 +196,11 @@ jobs:
         run: if [ -n "${AVO_CI_TMPDIR:-}" ]; then rm -rf "$AVO_CI_TMPDIR"; fi
 
   site:
-    name: site ${{ matrix.part }}
+    name: site
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # Measured inside the old single job: catalog + community 5.7 min, static site 3.8 min.
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [community, static]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -220,6 +215,7 @@ jobs:
           node-version: "22"
 
       - uses: ./.github/actions/test-env
+        id: site-env
 
       # community-ui-qa.cjs also reads the normal site at PREVIEW_URL (read-only;
       # it asserts the sample RSVP makes no POST), so one temp-DB server backs
@@ -228,12 +224,13 @@ jobs:
       # atomically, and the server prints the port it actually bound. (The old "first port nothing
       # answers on" scan raced when two jobs probed the same port before either bound it.)
       - name: Catalog + community checks (loopback server, temporary databases)
-        if: matrix.part == 'community'
         run: |
-          export QA_OUT_DIR="$RUNNER_TEMP/qa"
+          TMPDIR="$(mktemp -d "${AVO_CI_TMPDIR:?}/community.XXXXXX")"
+          export TMPDIR
+          export QA_OUT_DIR="$TMPDIR/qa"
           mkdir -p "$QA_OUT_DIR"
-          log="$RUNNER_TEMP/server.log"
-          AVOSHACK_COMMUNITY_DB="$RUNNER_TEMP/site.sqlite3" \
+          log="$TMPDIR/server.log"
+          AVOSHACK_COMMUNITY_DB="$TMPDIR/site.sqlite3" \
             python3 -u storefront-mockup/community-server.py --port 0 >"$log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
@@ -254,9 +251,14 @@ jobs:
 
       # AVO-LAUNCH-1: the publishable build (allowlist only) on a plain static host, every page checked.
       - name: Static published site check
-        if: matrix.part == 'static'
+        # Keep independent diagnostics after a community failure, but require successful setup.
+        if: ${{ !cancelled() && steps.site-env.outcome == 'success' }}
         run: |
-          site="$(mktemp -d "$RUNNER_TEMP/published-site.XXXXXX")"
+          TMPDIR="$(mktemp -d "${AVO_CI_TMPDIR:?}/static.XXXXXX")"
+          export TMPDIR
+          export QA_OUT_DIR="$TMPDIR/qa"
+          mkdir -p "$QA_OUT_DIR"
+          site="$(mktemp -d "$TMPDIR/published-site.XXXXXX")"
           python3 hass/sitegen.py --publish "$site"
           node storefront-mockup/static-site-qa.cjs "$site"
 

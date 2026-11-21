@@ -306,6 +306,31 @@ class NppReviewExportTests(unittest.TestCase):
             with self.subTest(canary=canary):
                 self.assertNotIn(canary.encode(), rendered)
 
+    def test_c8_evidence_name_redaction(self):
+        # C8: schema-valid names used to bypass the export's privacy redactor.
+        canaries = ("75.41", "listing.example.invalid", "usd", "three-fifty", "listing.xn--fixture-9za")
+        for field in ("fallbacks", "failed_checks", "drifted_steps"):
+            with self.subTest(field=field):
+                doc = Evidence()
+                for name in (*canaries, "label-local"):
+                    if field == "fallbacks":
+                        doc.fallback(name)
+                    elif field == "failed_checks":
+                        doc.check(name, "fail")
+                    else:
+                        doc.model(name, "sample-pin", "sample-other")
+                self.receipt(evidence=doc.doc())
+                result = self.run_cli("--force")
+                self.assert_pass(result, 0, 1)
+                summary = self.jobs()["feed"]["summary"]
+                self.assertEqual(summary["evidence"], "recorded")
+                self.assertIn("label-local", summary[field])
+                output = self.out.read_text() + result.stdout + result.stderr
+                for name in canaries:
+                    with self.subTest(name=name):
+                        self.assertNotIn(name, output)
+                self.assertEqual(summary[field], ["[redacted]"] * len(canaries) + ["label-local"])
+
 
 if __name__ == "__main__":
     unittest.main()

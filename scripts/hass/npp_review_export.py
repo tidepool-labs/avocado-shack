@@ -141,6 +141,13 @@ def _segment_seconds(segment):
 EVIDENCE_FACTS = ("stages", "fallbacks", "drifted_steps", "failed_checks", "approval_role")
 
 
+def _review_names(names):
+    # Schema-valid identifiers can still be private. Treat any dotted name as
+    # ambiguous here: even a hostname missed by the prose redactor (e.g. an
+    # ASCII-encoded IDN) must not pass through. Keep one entry per distinct name.
+    return sorted("[redacted]" if "." in name or redact(name) != name else name for name in set(names))
+
+
 def _evidence_summary(row):
     """Return (summary fields, status) from validated evidence only; never a partial record."""
     doc = row.get("evidence")
@@ -155,9 +162,9 @@ def _evidence_summary(row):
     return dict(
         stages=[dict(stage=s["stage"], ms=round(s["ended_ms"] - s["started_ms"], 3), outcome=s["outcome"])
                 for s in doc["stages"]],
-        fallbacks=sorted(set(doc["fallbacks"])),
-        drifted_steps=sorted({m["step"] for m in doc["models"] if m["drift"]}),
-        failed_checks=sorted({c["name"] for c in doc["checks"] if c["verdict"] == "fail"}),
+        fallbacks=_review_names(doc["fallbacks"]),
+        drifted_steps=_review_names(m["step"] for m in doc["models"] if m["drift"]),
+        failed_checks=_review_names(c["name"] for c in doc["checks"] if c["verdict"] == "fail"),
         approval_role=doc["approval"]["role"] if doc["approval"] else None,
     ), "recorded"
 

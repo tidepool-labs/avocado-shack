@@ -63,8 +63,8 @@ Reproduce from the pinned checkout root (read-only; no tests launched):
 
 ```sh
 wc -l hass/skills/*.py
-git grep -n -E '(^[[:space:]]*(from|import).*hass\.skills|^[[:space:]]*from hass import.*\bskills\b)' -- 'hass/tests/*.py'
-git grep -n -E 'registry_skills|load_skills\(|run_file\(|run_rows\(|run_chain\(|SkillCase|\.Chat\(' -- 'hass/tests/*.py'
+git grep -n -E '(^[[:space:]]*(from|import).*hass[.]skills|^[[:space:]]*from hass import.*(^|[^[:alnum:]_])skills([^[:alnum:]_]|$))' -- 'hass/tests/*.py'
+git grep -n -E 'registry_skills|load_skills[(]|run_file[(]|run_rows[(]|run_chain[(]|SkillCase|[.]Chat[(]' -- 'hass/tests/*.py'
 git ls-files 'hass/tests/fixtures/skills/*/*.jsonl' 'hass/tests/fixtures/skills-acceptance/*.jsonl'
 ```
 

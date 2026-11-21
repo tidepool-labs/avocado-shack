@@ -25,8 +25,8 @@ class Number:
     digits: bool
 
 
-def values(text):
-    """Return numeric readings with offsets. `three fifty` has both money and count readings."""
+def values(text, *, finance_clause=False):
+    """Read numbers with offsets; outside a finance clause, also screen ambiguous component readings."""
     found = []
     for m in _NUMBER.finditer(text):
         amounts: set[int | Decimal]
@@ -43,6 +43,8 @@ def values(text):
             left, right = (intake._word_number(w) for w in re.split('[ -]+', token))
             amounts = set() if left is None or right is None else {left, right}
             if left is not None and right is not None and left < 10 and right >= 10:
+                if finance_clause:
+                    amounts.clear()  # a single shorthand money value, not independent quantities
                 amounts.update({left * 100 + right, Decimal(left) + Decimal(right) / 100})
         found.append(Number(*m.span(), frozenset(amounts), digits))
     return tuple(found)
@@ -99,9 +101,8 @@ class Finance:
     has_qty: bool = False
 
 
-# Preserve offsets while applying the real intake parser to the caption and its independent clauses.
-_CLAUSE_BREAK = re.compile(r'[;\n]+|(?<!\d),|,(?!\d)|\s+(?:and\s+(?=(?:sell(?:ing)?|bought|paid|\d)\b)|/\s*(?=sell(?:ing)?\b))', re.I)
-_BASIS = re.compile(r'(?:/\s*|\s+(?:(?:per|a)\s+)?)(each|items?|lb|lbs|pounds?|baskets?)$', re.I)
+_BASIS = re.compile(r'(?:(?:/\s*|\s+(?:per|a)\s+)([a-z]+)|\s+(each|apiece|items?|lbs?|pounds?|baskets?))$', re.I)
+_COST_CUE = re.compile(r'\b(?:bought|purchased|paid|costs?|wholesale)\b', re.I)
 
 
 def finance(caption, *, answer_unit=None, local_answers=None):
@@ -115,12 +116,8 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     costs = {a['cost'] for a in (parsed, extra) if 'cost' in a}
     counts = {a['qty'] for a in (parsed, extra) if 'qty' in a}
     prices, public_parts = [], []
-    start = 0
-    for cut in (*_CLAUSE_BREAK.finditer(caption), None):
-        end = cut.start() if cut else len(caption)
-        part = caption[start:end].strip().rstrip('.!').strip()
-        if cut and cut[0].strip() == '/' and part.startswith('$'):
-            part = 'cost ' + part  # existing intake's shorthand "$3 / sell $5 each"
+    for start, end, clause in intake.caption_spans(caption):
+        part = clause.strip().rstrip('.!').strip()
         remainder, atoms = intake.caption_answers(part)
         if quantity := re.fullmatch(r'(?:got|have|qty|quantity|stock)\s*:?\s+(.+)', part, re.I):
             count = intake._parse_qty(quantity[1])
@@ -130,11 +127,14 @@ def finance(caption, *, answer_unit=None, local_answers=None):
             costs.add(atoms['cost'])
         if 'qty' in atoms:
             counts.add(atoms['qty'])
-        basis = _BASIS.search(part)
-        unit = ('each' if basis[1].lower() in {'each', 'item', 'items'} else
-                'per lb' if basis[1].lower() in {'lb', 'lbs', 'pound', 'pounds'} else None) if basis else answer_unit
+        priced = re.sub(r'\s+retail$', '', part, flags=re.I) if part.startswith('$') else part
+        basis = _BASIS.search(priced)
+        unit = answer_unit
+        if basis:
+            stated = (basis[1] or basis[2]).lower()
+            unit = 'each' if stated == 'apiece' else {'item': 'each', 'pound': 'per lb'}.get(intake._parse_sold_by(stated) or '')
         amount = atoms.get('price')
-        if cut is None and start == 0 and answer_unit and not ({'price', 'cost'} & atoms.keys()):
+        if start == 0 and end == len(caption) and answer_unit and not ({'price', 'cost'} & atoms.keys()):
             direct = part[:basis.start()].strip() if basis else part
             if found := intake._parse_money(direct):
                 amount, remainder = found, ''
@@ -144,14 +144,14 @@ def finance(caption, *, answer_unit=None, local_answers=None):
             prices.append((f'{amount} {unit}', (start, end)))
         if remainder:
             public_parts.append(remainder)
-        if cut:
-            start = cut.end()
+
     private = {n for cost in costs for n in (Decimal(cost), Decimal(cost) * 100)} | counts
     public = '; '.join(public_parts)
     unresolved = intake.unresolved_finance(public)
     if unresolved:
         # Unparsed finance is never a public span, even on reader failure.
-        private.update(n for v in values(public) for n in v.amounts)
+        private.update(n for part in public_parts if intake.unresolved_finance(part)
+                       for v in values(part, finance_clause=bool(_COST_CUE.search(part))) for n in v.amounts)
     price, span = prices[0] if len(prices) == 1 and not unresolved else (None, None)
     if price is None or not valid_selling_price(price) or (parsed.get('price') is not None and not price.startswith(parsed['price'] + ' ')):
         price, span = None, None

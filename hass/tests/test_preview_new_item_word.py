@@ -35,6 +35,7 @@ class NewItemWordCase(unittest.TestCase):
         self.scratch = testkit.Scratch({}, {"item.add": ia.ITEM_ADD}, photos=[PHOTO])
         self.addCleanup(self.scratch.close)
         self.scratch.now = datetime.now(timezone.utc)
+        # Sample the browser's Pacific day with the draft clock, not at test discovery.
         self.today = shop_today(self.scratch.now)
         plan = ia.plan_add({**FULL, "maker": "Cal Poly", "place": None},
                            SimpleNamespace(today=self.today.isoformat(), next_product_id="photo-product-175", content=CONTENT,

@@ -491,3 +491,26 @@ cap-exempt but cannot overwrite a later till edit. Default cap is 20 per Pacific
 day. At the separately reviewed write go-live set `dailyWriteCap: 5`; the first
 live write must be **TESTITEM**, watched by G. This fixture PR neither installs
 credentials nor changes host.json, services, chat routes or the live till.
+
+## M4b: writeMode and count sentences
+
+Set `writeMode` inside the private host's `clover` block. Omit it to keep
+cache-backed questions and no write engine. Use `"dry-run"` for rehearsal: the
+engine uses the read token and records the proposed Clover calls locally without
+sending a write. Rehearsal codes and receipts are kept in a separate private
+journal and are not live approvals. When set, `host.py check` reports `writeMode`
+as `dry-run` or `live` alongside `clover`; when unset, the output has no
+`writeMode` key. It checks the read token by file metadata, and the write token
+too in live mode. It does not open either token.
+
+`"live"` is an attended operator setting, not a default. It also requires
+`writes: true`, `liveApproved: true` and a separate `writeTokenFile`, even in
+sandbox. The service loads that token only when the live engine needs a client.
+Mike is the owner; G's own private chat is eligible only with `gIsOwner`.
+Complete the attended rehearsal and the write go-live checklist before enabling
+live mode. Remove `writeMode` to return to read-only on the next worker start.
+
+For a supported count sentence such as `set Example mug to 12`, review the exact
+before/after count and reply with the preview's `yes <code>`. The M4b goal is to
+support everyday count sentences too; this host switch does not change the parser,
+approval rules or undo. Prices, counts and rehearsal records stay finance-local.

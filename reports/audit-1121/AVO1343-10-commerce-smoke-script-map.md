@@ -143,8 +143,8 @@ git ls-tree -r --name-only origin/main -- commerce/scripts
 git ls-tree -r --name-only origin/main -- commerce/gateway commerce/backend/src/api commerce/astra .github
 git show origin/main:commerce/package.json
 git show origin/main:.github/workflows/check.yml
-git grep -n -o -E 'scripts/[a-z-]+\.mjs|\./[a-z-]+-smoke\.mjs' origin/main -- commerce/gateway commerce/scripts .github ':(glob)**/package.json'
-git grep -n -o -E 'fetch\(|\b(Pool|Client|EmbeddedPostgres)\b|\.(query|connect)\(|config\.json' origin/main -- commerce/scripts
+git grep -n -o -E 'scripts/[a-z-]+[.]mjs|[.]/[a-z-]+-smoke[.]mjs' origin/main -- commerce/gateway commerce/scripts .github ':(glob)**/package.json'
+git grep -n -o -E 'fetch[(]|\b(Pool|Client|EmbeddedPostgres)\b|[.](query|connect)[(]|config[.]json' origin/main -- commerce/scripts
 git grep -n -o -E "app\.(get|post|put|patch|delete)\('/[^']+'|scheduledSpecialRoutes|function (GET|POST)|op==='[^']+'" origin/main -- commerce/gateway/server.mjs commerce/gateway/scheduled-special-routes.mjs commerce/astra/server.mjs commerce/backend/src/api
 git log --oneline origin/main -- commerce/gateway commerce/scripts
 ```

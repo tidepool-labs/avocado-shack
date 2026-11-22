@@ -316,6 +316,18 @@ class FindingsTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in self.rows()][-2:], ["F-2099-W03-3", "F-2099-W03-4"])
         self.assertEqual(len(self.rows()), len({(row["class"], row["summary"], row["week"]) for row in self.rows()}))
 
+    def test_import_rejects_oversized_stage_duration_without_traceback(self):
+        self.add()
+        original = self.ledger.read_bytes()
+        for duration in (10**400, -(10**400)):
+            with self.subTest(duration=duration):
+                path = self.export(self.job_row("abcd", slow=True),
+                                   self.job_row("feed", slow=True, stages=[dict(stage="S1", ms=duration)]))
+                result = subprocess.run(self.command("import", "--export", str(path), "--week", WEEK),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "FAIL bad-export\n", ""))
+                self.assertEqual(self.ledger.read_bytes(), original)
+
     def test_c8_redacted_only(self):
         # C8: only the job id, the named summary facts and a matched guard key build a summary; raw or extra
         # fields, unredacted names and unmatched text never reach the ledger, and a bad export is refused whole.

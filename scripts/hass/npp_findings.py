@@ -202,7 +202,7 @@ def draft_findings(path, week):
                 raise ValueError
             for key, stage, failure_class, summary in found:
                 drafts.setdefault(key, (stage, failure_class, summary))
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError, OverflowError):
         raise LedgerError("bad-export") from None
     for stage, failure_class, summary in drafts.values():
         validate_add(week, stage, failure_class, summary)  # backstop: never store an unsafe draft

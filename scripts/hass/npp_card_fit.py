@@ -64,7 +64,8 @@ def png_problems(path, width, scale):
         return ['unreadable']
     problems = []
     signature = media.KINDS['png']
-    if not head.startswith(signature) or head[len(signature):len(signature) + 8] != b'\x00\x00\x00\x0dIHDR':
+    if (len(head) < HEADER or not head.startswith(signature)
+            or head[len(signature):len(signature) + 8] != b'\x00\x00\x00\x0dIHDR'):
         problems.append('not-png')
     else:
         drawn = struct.unpack('>I', head[16:20])[0]

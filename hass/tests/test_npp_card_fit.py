@@ -89,6 +89,16 @@ class CardFitTests(unittest.TestCase):
         path = self.write('card.png', b'\xff\xd8\xff' + png(CARD)[3:])
         self.assert_fail(['FAIL not-png'], '--png', path)
 
+    def test_c2_truncated_header_fails_and_directory_continues(self):
+        complete = png(CARD)
+        for length in range(16, 24):
+            with self.subTest(length=length):
+                path = self.write('card-01.png', complete[:length])
+                self.assert_fail(['FAIL not-png'], '--png', path)
+                self.write('card-02.png', complete)
+                self.assert_fail(['FAIL card-01.png not-png', 'PASS card-02.png',
+                                  'checked 2 passed 1 failed 1 with-text 0'], '--dir', self.dir)
+
     def test_c2_fail_wrong_width(self):
         for width in (WIDEST + 1, 1280, WIDEST // 2):
             with self.subTest(width=width):

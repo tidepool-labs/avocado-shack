@@ -1,0 +1,40 @@
+{
+  "assets_sha256": "89657cd2c1379358e945ca5caad0b27a1d7e48a40edd9c7d3088dc2afda89691",
+  "cases_sha256": "9c8d75a46f5aee4d6c5c6a314ae95ede23db5e3baea74f508cfbe731734e1e6a",
+  "models": {
+    "copy_select": [
+      "gpt-6.2-sol",
+      "low"
+    ],
+    "edit_map": [
+      "gpt-6.2-sol",
+      "low"
+    ],
+    "identify": [
+      "gpt-6.2-sol",
+      "low"
+    ],
+    "judge": [
+      "gpt-6.2-sol",
+      "medium"
+    ],
+    "picture": [
+      "openai-codex:gpt-image-2-high",
+      null
+    ],
+    "research_extract": [
+      "gpt-6.2-sol",
+      "low"
+    ],
+    "research_verify": [
+      "gpt-6.2-sol",
+      "low"
+    ]
+  },
+  "pins_sha256": "7b00db1b05bd1f02d7b452d4a3affd7818c1fe3fa77aa55701506790d8098ebf",
+  "renderer_commit": null,
+  "runner_version": 1,
+  "tape_files": {
+    "s2.json": "b55ae96f242eba4fd9988739ccad69cf4acbc240f82dab893fa5546b5ee1ed37"
+  }
+}

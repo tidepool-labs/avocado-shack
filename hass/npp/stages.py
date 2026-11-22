@@ -166,17 +166,22 @@ class ProductionStages(Stages):
         sha = work.request['attachments'][0]
         settings = self.c.settings
         source = picture.read_text(self._photo(sha))
+        source_text = ' '.join((source or '').split())
         words, person = listing['labelWords'], listing['personOrScreen']
         if sha != listing['photo']:
             current = {} if local else self.identifier.read(self._photo(s) for s in work.request['attachments']).evidence or {}
             words, person = current.get('label_words', ()), current.get('has_person_or_screen')
+        # A typed net size may equal private inventory. Bind that exact printed
+        # phrase independently to this source photo, not to the caption's count.
+        elif (size := listing.get('size')) and copy.SIZE.fullmatch(size) and private_numbers.literal_spans(source_text, [size]):
+            words = [*words, size]
         if not local and settings.get('houseRender') is True and photo_polish.enabled(settings):
             # Only the runner launches polish. Leave time for S5 and S8 before the cap.
             end = time.monotonic() + max(0, min(self._remaining(work) - 26, self.pinned[0]['steps']['picture']['hard_s']))
             while time.monotonic() < end and photo_polish.decision(settings['mediaRoot'], sha) is None:
                 time.sleep(min(0.2, max(0, end - time.monotonic())))
         frozen = picture.choose(settings, sha, has_person_or_screen=person, label_words=words,
-                                source_label_words=[word for word in words if private_numbers.literal_spans(source or '', [word])],
+                                source_label_words=[word for word in words if private_numbers.literal_spans(source_text, [word])],
                                 private_numbers_clear=lambda text, allowed: not private_numbers.picture_problem(text, source, allowed, private),
                                 ocr=picture.read_text)
         return frozen, sha, source, words

@@ -24,7 +24,7 @@
           "from": "mike",
           "text": "ridge roast dark coffee, cost 14, selling 14 each, got 12 bags",
           "photos": [
-            "npp:coffee.jpg"
+            "npp:coffee-size.jpg"
           ]
         },
         {
@@ -56,7 +56,7 @@
           "from": "mike",
           "text": "ridge roast dark coffee, cost fourteen, selling fourteen each, got twelve bags",
           "photos": [
-            "npp:coffee.jpg"
+            "npp:coffee-size.jpg"
           ]
         },
         {
@@ -83,8 +83,22 @@
   "inputs": {
     "polish": {
       "source": "file",
-      "file": "npp:edits/coffee-good.png",
+      "file": "npp:edits/coffee-size-good.png",
       "latency_s": 22
+    },
+    "stubs": {
+      "identify": {
+        "is_product": true,
+        "kind": "food",
+        "item": "dark roast coffee",
+        "brand_on_label": "Ridge Roast",
+        "size_text": "12 OZ",
+        "label_words": ["Ridge Roast", "Dark roast", "whole beans"],
+        "visible_claims": [],
+        "category_guess": "pantry",
+        "has_person_or_screen": false,
+        "confidence": {"item": 0.97, "brand": 0.97}
+      }
     },
     "private": {
       "cost": "14",

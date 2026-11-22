@@ -54,8 +54,14 @@
     "replies": [
       {
         "turn": 0,
+        "count": 0,
+        "kind": "none"
+      },
+      {
+        "turn": 1,
         "count": 1,
-        "kind": "card"
+        "kind": "card",
+        "answers_turn": 0
       },
       {
         "turn": 2,

@@ -669,6 +669,10 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                     fx.transport.fail = False
                 text = spec.get('text')
                 outcome = None
+                prior_job = fx.job()
+                polish_ready = bool(index == 1 and 'polish_settled_before_answer' in view['expect'] and
+                                    prior_job and prior_job['photo_sha'] and
+                                    photo_polish.decision(fx.root, prior_job['photo_sha']))
                 if text is not None:
                     row = fx.job()
                     current[:] = [photo_bytes(ref) for ref in spec.get('photos', [])]
@@ -688,7 +692,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                 settle()
                 version = fx.version(fx.job()['current_version']) if fx.job() and fx.job()['current_version'] else None
                 posted = fx.conv.npp_posted(version['change_id']) if outcome == 'approved' and version and version['change_id'] else None
-                observed.append(dict(turn=index, result=outcome, before=before, posted=posted))
+                observed.append(dict(turn=index, result=outcome, before=before, posted=posted, polish_ready=polish_ready))
 
             clock.at(spec['at_s'], 0, play)
             # Pump between turns, including while polish is in flight. A restart invalidates queued work.
@@ -715,18 +719,24 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             'commits': int(git(fx.repo.wt, 'rev-list', '--count', f'{fx.base}..HEAD')),
             'cards': len(fx.transport.cards),
         }
+        card_rows = list(fx.transport.cards.items())
+        turn_by_reply = {r['reply_outbox_id']: r['provider_id'] for r in db.execute(
+            'SELECT reply_outbox_id, provider_id FROM npp_turns WHERE reply_outbox_id IS NOT NULL')}
         for index, entry in enumerate(observed):
             a, b, c = entry['before']
             x, y, z = observed[index + 1]['before'] if index + 1 < len(observed) else (
                 len(fx.transport.texts), len(fx.transport.cards), len(fx.transport.previews))
             entry['texts'] = fx.transport.texts[a:x]
-            entry['cards'] = [v[0] for v in list(fx.transport.cards.values())[b:y]]
+            entry['cards'] = [v[0] for _, v in card_rows[b:y]]
+            entry['card_reply_providers'] = [turn_by_reply.get(row) for row, _ in card_rows[b:y]]
             entry['previews'] = [v[0] for v in fx.transport.previews[c:z]]
         calls.update(world.calls)
         failures.extend(world.violations)
         gaps = []
         if not missing:
             failures += check_conversation(view['expect'], observed, state, calls, bodies, pinned[2])
+            if 'polish_settled_before_answer' in view['expect'] and observed[1]['polish_ready'] != view['expect']['polish_settled_before_answer']:
+                failures.append('polish did not settle before the price answer')
             failures += check_card(view, fx, state, versions, photo_polish.decision(fx.root, row['photo_sha']) if row and row['photo_sha'] else None, gaps)
         return failures, {'observed': observed, 'state': state, 'calls': dict(calls), 'missing': sorted(set(missing)), 'gaps': gaps}
     finally:
@@ -753,6 +763,8 @@ def check_conversation(expect, observed, state, calls, bodies, replies):
     bad = []
     for want in expect.get("replies", []):
         seen = observed[want['turn']]
+        if 'answers_turn' in want and seen['card_reply_providers'] != [f"fixture-{want['answers_turn']}"]:
+            bad.append(f"turn {want['turn']}: card does not answer owner turn {want['answers_turn']}")
         kinds = [(text, reply_kind(text, replies)) for text in seen['texts']]
         kinds += [(text, 'card') for text in seen['cards']]
         # Sandbox acknowledgement is expected instead of an actual live send. Check
@@ -869,12 +881,80 @@ def check_card(view, fx, state, versions, decision, gaps):
     if 'install_path_re' in want and not re.search(want['install_path_re'], latest.get('image_path') or ''):
         bad.append('installed image path did not match the fixture pattern')
 
+    if 'segment2_started_at_s' in want:
+        from hass.tests.test_conversation import T0
+        answer = db.execute('SELECT started_by, accepted_at, deadline_at FROM npp_segments '
+                            'ORDER BY segment_id LIMIT 1 OFFSET 1').fetchone()
+        when = T0 + timedelta(seconds=want['segment2_started_at_s'])
+        cap = fx.conv.npp.pins['segment']['cap_s']
+        same('segment 2 starts from the answer with a fresh cap', tuple(answer) if answer else None,
+             ('fixture-1', when.isoformat(), (when + timedelta(seconds=cap)).isoformat()))
+
+    contradiction = view['id'] == 31 and want.get('listing') == {'maker_panel': False}
+    follows_edit = view['id'] in (19, 32) or contradiction
+
+    def version_record(version):
+        found = fx.conv.editor.show(version.get('change_id') or '')
+        return found.get('change') or found.get('draft') or {}
+
+    def committed_product(version):
+        record = version_record(version)
+        pid = next((r['key'] for r in record.get('records', []) if r['collection'] == 'products'), None)
+        return fx.repo.product(pid) if pid else {}
+
+    if follows_edit and 'edit_keeps' in want and not bad:
+        drafts = [version_record(versions.get(n, {})) for n in (1, 2)]
+        def frozen_fields(draft, version):
+            records = draft.get('records', [])
+            product = next((r['after'] for r in records if r['collection'] == 'products'), {})
+            maker = next((r['after'] for r in records if r['collection'] == 'makers'), {})
+            return {**product, 'origin': (product.get('supplier'), product.get('producerKey')),
+                    'maker_panel': maker, 'story': maker.get('story'), 'picture_bytes': version.get('image_sha256')}
+        before, after = [frozen_fields(draft, versions.get(n, {})) for n, draft in enumerate(drafts, 1)]
+        if not before.get('name') or not after.get('name'):
+            bad.append('missing frozen product records for edit comparison')
+        for field in want['edit_keeps']:
+            same(f'edit preserves {field}', after.get(field), before.get(field))
+
+    if view['id'] == 32 and len(approved) == 1:
+        from decimal import Decimal
+        from hass.npp import picture, private_numbers
+        product = committed_product(approved[0])
+        size = want['listing']['label_size_kept']
+        same('equal price retained in committed price field', product.get('sellingPrice'), want['listing']['price'].removeprefix('$') + ' each')
+        path = fx.repo.wt / 'storefront-mockup' / approved[0]['image_path']
+        read = picture.read_text(path.read_bytes()) if path.is_file() else None
+        same('equal label size retained in committed picture', bool(private_numbers.literal_spans(
+            ' '.join((read or '').split()), [size])), True)
+        private = tuple(Decimal(value) for value in view['inputs']['private'].values())
+        for field in ('name', 'description', 'imageAlt'):
+            text = product.get(field, '')
+            permit = private_numbers.literal_spans(text, [size]) if field == 'name' else ()
+            same(f'committed {field} excludes unbound private numbers', private_numbers.problem(text, private, permitted=permit), None)
+        # Each form must produce the same expected price/size and pass the
+        # real image and card-DOM gates before it can record an approval.
+
+    if contradiction and len(approved) == 1:
+        product = committed_product(approved[0])
+        same('conflicting maker panel is omitted', bool(product and not product.get('producerKey')), True)
+        public = json.dumps(product) + '\n' + '\n'.join(row[0] for row in fx.transport.cards.values())
+        for term in want.get('public_lacks', ()):
+            same('conflicting maker is absent from public fields and card', term.casefold() in public.casefold(), False)
+
     # Never report a fixture green when its declared contract has no observer.
     covered = {'state', 'replies', 'total_replies', 'draft_rows', 'approval_rows', 'commits', 'calls',
                'checks', 'cards_sent', 'variant', 'versions', 'undo', 'polish_decision', 'approved_version',
                'approved_draft_hash', 'sent_at_null_until_s', 'v1_delivered_after_retry', 'v1_needs_fresh_yes',
                'frozen_sha_equals_committed_file', 'preview_sha_equals_frozen_equals_committed', 'picture_line',
                'install_path_re', 'cloud_bodies_lack_digits_from', 'research'}
+    if 'segment2_started_at_s' in want and want.get('segment_cap_measured_from') == 'answer':
+        covered.update({'polish_settled_before_answer', 'segment2_started_at_s', 'segment_cap_measured_from'})
+    if follows_edit:
+        covered.add('edit_keeps')
+    if view['id'] == 32 and len(approved) == 1:
+        covered.update({'listing', 'private_in_public', 'same_result_for_spoken_and_digit_forms'})
+    if contradiction and len(approved) == 1:
+        covered.update({'listing', 'public_lacks'})
     if unsupported := want.keys() - covered:
         gaps.append('unobserved expectations: ' + ', '.join(sorted(unsupported)))
     return bad

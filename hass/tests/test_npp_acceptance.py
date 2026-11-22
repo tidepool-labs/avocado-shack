@@ -257,10 +257,10 @@ class RunnerTests(unittest.TestCase):
                          {"maker": "Miners", "town": "Paso Robles", "url": "https://minersfigs.example/about"})
         self.assertEqual(run_npp.owner_seed(view_of(13)), {"maker": "", "town": "", "url": ""})
 
-    def test_the_known_seed_gap_is_named_not_hidden(self):
-        # Contract: production's seed reader cannot start research from the cases' wording; the runner says so (`gap`).
+    def test_the_production_seed_passes_and_third_party_facts_are_refused(self):
+        # A production parser that drops the town must not be masked by the isolated research stub.
         row, = run_npp.run_case(38)
-        self.assertEqual(row["layers"]["seed"], "gap")
+        self.assertEqual((row["layers"]["seed"], row["layers"]["research"]), ("pass", "pass"))
 
     def test_record_mode_is_private_host_only_and_capped(self):
         # Contract (design 3.4): --record re-records on the private host only, within --max-codex/--max-images.

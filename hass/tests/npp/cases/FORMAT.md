@@ -29,6 +29,9 @@ and no story.
 | `expect` | what must hold; keys listed in `x-expect-keys` of the schema. `checks` names the section 3.2 checks that must pass; `calls` counts model, search and fetch calls (a number, or `[min, max]`); `versions` lists each version's `delivered` and `approved` state; `edit_keeps` names the fields v2 copies unchanged from v1 (an edit never starts a second picture edit); `undo` (`{"draft": "hide", "commits": 1}`) says the reply to `undo` is a proposal of the hide (reply kind `undo_draft`) and the commit count stays 1 until its own yes |
 | `settle_until_s` | run the clock to this time before asserting |
 
+`expect.replies[].turn` is the replay step where a send is first observed. For a delayed card,
+`answers_turn` separately checks the owner turn to which its outbox row is durably bound.
+
 Photos are `npp:<file>` (this folder's `photos/`) or `chaos:<file>` (`hass/tests/chaos/photos/`). They are synthetic or
 product-only: no person and no chat, except the deliberate drawn phone screen of case 28b. Costs, quantities and prices are
 invented fixture values.

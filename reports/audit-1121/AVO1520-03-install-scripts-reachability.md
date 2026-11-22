@@ -107,6 +107,8 @@ Paths in the first column are relative to `scripts/hass/`. “Writes” means a 
 
 Run in a checkout of the snapshot above. These commands read source/metadata only. For the source inspections, use `git show <audited-ref>:<path>` and the cited line numbers; no module imports are required.
 
+Copy commands from the Markdown code blocks, not from a JSON-escaped representation. In the single-quoted extended regexes, `[.]` matches a literal dot, and each literal parenthesis uses one backslash.
+
 **A. Inventory and first docstring lines**
 
 ```sh
@@ -118,20 +120,20 @@ git grep -n -E '^"""[^" ]' origin/main -- 'scripts/hass/install_*.py'
 **B. Find caller candidates, then verify how each matching test loads or runs its target.** Ignore self-names, synthetic fixtures, unrelated functions like `install_locked`, and the wildcard read in `install_tools_checkout.py`. The name scan is bounded to the tracked source/prose paths below; it does not infer external or computed callers from a negative literal search.
 
 ```sh
-git grep -n -o -E 'install_[*a-z0-9_]+(\.py)?' origin/main -- '*.py' '*.sh' '*.md' '*.txt' '*.yaml' '*.yml' '*.toml' '*.json' '*.service' ':(exclude)commerce/**' ':(exclude)storefront-mockup/**' ':(exclude,glob)**/*credential*' ':(exclude,glob)**/*token*' ':(exclude,glob)**/*secret*' ':(exclude,glob)**/host.json'
-git grep -nE 'from scripts|exec_module|spec_from_file_location|subprocess\.(run|check_output)|str\((SCRIPT|CLI)\)' origin/main -- 'hass/tests/test_install_*.py'
+git grep -n -o -E 'install_[*a-z0-9_]+([.]py)?' origin/main -- '*.py' '*.sh' '*.md' '*.txt' '*.yaml' '*.yml' '*.toml' '*.json' '*.service' ':(exclude)commerce/**' ':(exclude)storefront-mockup/**' ':(exclude,glob)**/*credential*' ':(exclude,glob)**/*token*' ':(exclude,glob)**/*secret*' ':(exclude,glob)**/host.json'
+git grep -nE 'from scripts|exec_module|spec_from_file_location|subprocess[.](run|check_output)|str\((SCRIPT|CLI)\)' origin/main -- 'hass/tests/test_install_*.py'
 ```
 
 **C. Compare the docs' script tokens to tracked source names**
 
 ```sh
-git grep -n -o -E 'install_[a-z0-9_]+(\.py)?' origin/main -- docs/hass/INSTALL-LIVE-FIX-2.md docs/hass/MAC_RUNBOOK.md docs/hass/MAC_MINI_FINAL_STEPS.md
-git grep -n -o -E '[A-Za-z0-9_.-]+\.(py|sh|plist)(\.template)?' origin/main -- docs/hass/INSTALL-LIVE-FIX-2.md docs/hass/MAC_RUNBOOK.md docs/hass/MAC_MINI_FINAL_STEPS.md
+git grep -n -o -E 'install_[a-z0-9_]+([.]py)?' origin/main -- docs/hass/INSTALL-LIVE-FIX-2.md docs/hass/MAC_RUNBOOK.md docs/hass/MAC_MINI_FINAL_STEPS.md
+git grep -n -o -E '[A-Za-z0-9_.-]+[.](py|sh|plist)([.]template)?' origin/main -- docs/hass/INSTALL-LIVE-FIX-2.md docs/hass/MAC_RUNBOOK.md docs/hass/MAC_MINI_FINAL_STEPS.md
 git ls-tree -r --name-only origin/main -- scripts/hass mac hass/acceptance.py hass/editor.py hass/host.py hass/inbox.py hass/publish_live.py
 ```
 
 **D. Find I/O and service candidates, then read the enclosing functions and the local constructors named in R3.** A keyword hit alone is not a file write or live call.
 
 ```sh
-git grep -nE 'write_text|write_bytes|\.write\(|\.open\(|open\(|mkdir|TemporaryDirectory|subprocess|\.replace\(|unlink|chmod|shutil|sqlite3|launchctl|systemctl|urlopen|socket' origin/main -- 'scripts/hass/install_*.py'
+git grep -nE 'write_text|write_bytes|[.]write\(|[.]open\(|open\(|mkdir|TemporaryDirectory|subprocess|[.]replace\(|unlink|chmod|shutil|sqlite3|launchctl|systemctl|urlopen|socket' origin/main -- 'scripts/hass/install_*.py'
 ```

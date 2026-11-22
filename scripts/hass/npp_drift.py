@@ -48,9 +48,9 @@ def load_pins(checkout):
     steps = json.loads(data).get("steps")
     if not isinstance(steps, dict):
         raise ValueError("pins without steps")
-    # A step without a string model id is not pinned.
+    # A step without a nonempty string model id is not pinned.
     return {step: entry["model"] for step, entry in steps.items()
-            if isinstance(entry, dict) and isinstance(entry.get("model"), str)}
+            if isinstance(entry, dict) and isinstance(entry.get("model"), str) and entry["model"]}
 
 
 def read_receipt(path, since):

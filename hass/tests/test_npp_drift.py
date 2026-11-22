@@ -101,6 +101,15 @@ class NppDriftTests(unittest.TestCase):
         self.receipt("c0e1", doc=None, evidence=None)
         self.assertIn("NOTE no-evidence c0e1", self.run_cli()[1])
 
+    def test_empty_model_is_unpinned_even_when_returned_id_is_null(self):
+        self.pins(dict(schema=1, steps=STEPS | dict(identify=dict(model=""))))
+        self.receipt("d00d", [("identify", "model-a", None)])
+        self.assertEqual(self.run_cli(), (1, [
+            "step identify calls=1 drifted=0 pinned=- returned=-",
+            "FAIL unpinned identify",
+            "FAIL npp_drift identify",
+        ]))
+
     def test_c3_pins(self):
         # C3: pins come from --repo's pins.json, not from the pinned value written in the evidence.
         self.receipt("d00d", [("identify", "model-old", "model-new"), ("copy_select", "model-a", "model-a")])

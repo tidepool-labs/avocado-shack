@@ -81,15 +81,15 @@ The three **same name** JSON results in R1 are also never written to their track
 
 ### Reproduce the read-only checks
 
-Run from the repo root, substituting the pinned SHA for `origin/main` if main has advanced. Inspect the whole matched call and follow wrappers; a `.screenshot` match without a path is not a file. The fixed-name absence and PNG-input queries were both empty (no matches). The only contrast report path listed by the last command is the Markdown file.
+Run from the repo root. Inspect the whole matched call and follow wrappers; a `.screenshot` match without a path is not a file. The pinned inventory returns seven QA JSON names and 31 PNG/JPG names. The unmatched-name source scan, product PNG query, and fixed-name absence query each return no matches (exit 1, not a command error). The last command lists only the contrast Markdown report.
 
 ```sh
-git rev-parse origin/main
-git ls-files ':(top,glob)storefront-mockup/*-qa.*'
-git grep -nE 'screenshot\(|\.toFile\(|writeFile(Sync)?\(|write_(text|bytes)\(|saveAs\(|\.launch\(|\.listen\(|\.goto\(|urlopen|subprocess.run' origin/main -- ':(top,glob)storefront-mockup/*-qa.*' storefront-mockup/qa-env.cjs storefront-mockup/optimize-images.cjs
-git ls-tree --name-only origin/main:storefront-mockup | rg -i '(-qa\.json|\.(png|jpe?g))$'
-git grep -lE 'catalog-only-(cards-mobile|desktop|detail-mobile|hero-mobile|mobile)\.png|community-(hikes-desktop|hikes-mobile|newsletter-mobile)\.png|mobile-visual-(375|390)-(footer|hero|market|purpose)\.png|["\x27/](desktop|mobile)\.png' origin/main -- ':(top,glob)storefront-mockup/*.cjs' ':(top,glob)storefront-mockup/*.js' ':(top,glob)storefront-mockup/*.py'
-git ls-tree --name-only origin/main:storefront-mockup/assets/products | rg '\.png$'
-git ls-tree -r --name-only origin/main | rg '(^|/)(contrast\.json|catalog-(inline|maker)-(390|1440)\.png|hiking-(intro-mobile|invitation-mobile|history-mobile|desktop)\.png|section-navigation-QA\.json|static-site-QA\.json|trail-map-retry-QA\.json|trail-observer-QA\.json)$'
-git ls-tree -r --name-only origin/main -- reports/site-contrast-2026-11.md storefront-mockup/contrast.json
+base=37feae1dc5efa6968f90d17a1eda6daed29afd4a
+git ls-tree --name-only "$base:storefront-mockup" | rg -- '-qa[.][^.]+$'
+git grep -nE 'screenshot[(]|[.]toFile[(]|writeFile(Sync)?[(]|write_(text|bytes)[(]|saveAs[(]|[.]launch[(]|[.]listen[(]|[.]goto[(]|urlopen|subprocess[.]run' "$base" -- ':(top,glob)storefront-mockup/*-qa.*' storefront-mockup/qa-env.cjs storefront-mockup/optimize-images.cjs
+git ls-tree --name-only "$base:storefront-mockup" | rg -i '(-qa[.]json|[.](png|jpe?g))$'
+git grep -nE 'catalog-only-(cards-mobile|desktop|detail-mobile|hero-mobile|mobile)[.]png|community-(hikes-desktop|hikes-mobile|newsletter-mobile)[.]png|mobile-visual-(375|390)-(footer|hero|market|purpose)[.]png|(^|[^[:alnum:]_.-])(desktop|mobile)[.]png' "$base" -- ':(top,glob)storefront-mockup/*.cjs' ':(top,glob)storefront-mockup/*.js' ':(top,glob)storefront-mockup/*.py'
+git ls-tree --name-only "$base:storefront-mockup/assets/products" | rg '[.]png$'
+git ls-tree -r --name-only "$base" | rg '(^|/)(contrast[.]json|catalog-(inline|maker)-(390|1440)[.]png|hiking-(intro-mobile|invitation-mobile|history-mobile|desktop)[.]png|section-navigation-QA[.]json|static-site-QA[.]json|trail-map-retry-QA[.]json|trail-observer-QA[.]json)$'
+git ls-tree -r --name-only "$base" -- reports/site-contrast-2026-11.md storefront-mockup/contrast.json
 ```

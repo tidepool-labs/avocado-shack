@@ -120,9 +120,9 @@ Scan order is source path, then line, for the selected owner/operator-facing Has
 | 23 | `hass/skills/item_intake.py:27,542–548,582–584` | Fixed cleaned free-text intake answer capped at 400 characters, distinct from the fallback-reader cap. |
 | 24 | `hass/skills/item_intake.py:391,415,435–452,609–628` | Leading parsed number capped at 1,000,000 for quantity/low-stock answers; dozens are multiplied after this check. |
 | 25 | `hass/skills/item_intake.py:526–535,626` | Explicit intake year range 2000–2100 inclusive; fixed parser expands two-digit years with base 2000. |
-| 26 | `hass/skills/makers.py:40,81–84,458–476` | Maker hide/restore reply names up to 5 products, then gives remainder; not a cap on changes. |
-| 27 | `hass/skills/openreq.py:42,201–214` | Open request keeps at most the first 5 supplied attachment references; distinct from the per-message upload cap. |
-| 28 | `hass/skills/reports.py:38,69–71` | Report intent sees the last 5 turns, cut to 400 characters each. |
+| 26 | `hass/skills/items.py:452–458` | The hide proposal echoes at most 120 characters of the reason after collapsing whitespace. The echo, but not its length, is described in `docs/hass/skills/items.md:107–108`. |
+| 27 | `hass/skills/makers.py:40,81–84,458–476` | Maker hide/restore reply names up to 5 products, then gives remainder; not a cap on changes. |
+| 28 | `hass/skills/openreq.py:42,201–214` | Open request keeps at most the first 5 supplied attachment references; distinct from the per-message upload cap. |
 | 29 | `hass/skills/specials.py:470,509` | Special selection prompts show up to 10 names, not the active-specials cap. |
 | 30 | `hass/skills/specials.py:587–602` | `specials.show` lists only the first 3 upcoming by date, with no remainder line. |
 
@@ -145,10 +145,10 @@ git show "$r":docs/hass/LIMITS.md | nl -ba
 git show "$r":docs/hass/LIMITS.md | rg -o '<!-- [^>]+ -->' | wc -l
 git show "$r":hass/tests/test_limits_doc.py | nl -ba
 git show "$r":hass/conversation.py | nl -ba
-git grep -nE 'MAX_|MIN_|LIMIT|TTL|\[:[0-9]+\]|at most|too (long|many|large)|[<>]=? [0-9]+' "$r" -- ':(glob)hass/**/*.py' ':!hass/tests/**' | LC_ALL=C sort -t: -k2,2 -k3,3n
-git grep -niIE 'interpreterDailyCap|80%|80 percent|look <product>|60 characters|megapixels|2\.5×|2\.5x|8,192|8192|upcoming specials' "$r" -- '*.md' '*.txt' ':(glob)docs/**/*.json' ':!hass/tests/**' ':!storefront-mockup/archive/**' ':!commerce/**'
+git grep -nE 'MAX_|MIN_|LIMIT|TTL|[[]:[0-9]+[]]|at most|too (long|many|large)|[<>]=? [0-9]+' "$r" -- ':(glob)hass/**/*.py' ':!hass/tests/**' | LC_ALL=C sort -t: -k2,2 -k3,3n
+git grep -niIE 'interpreterDailyCap|80%|80 percent|look <product>|60 characters|megapixels|2[.]5([×x]|[- ]times)|8,192|8192|upcoming specials|specials[._ ]show|first (3|three) upcoming|You told me why' "$r" -- '*.md' '*.txt' ':(glob)docs/**/*.json' ':!hass/tests/**' ':!storefront-mockup/archive/**' ':!commerce/**'
 ```
 
-For R3, repeat the last search with the command/setting name, the limit's digits and spelled-out form, and field or behavior synonyms; a documented cap for a different command is not equivalent. `FEATURES.md:39,50` and `OPERATIONS.md:38,125` describe expiry/usage or adjacent operations, not substitutes for the source checks above. No live service, state, external model, browser or transport was exercised.
+For R3, the search uses bracket expressions for literal `[` and `]` and a literal decimal point, so the shell patterns need no backslashes. The slice alternative alone finds 175 source lines at this SHA, including `coming[:3]` at `hass/skills/specials.py:601` (#30). The raw hits also include date parsing and identifiers, which are not user-visible limits. No equivalent 2.5× renderer cap was found; `reports/hass/NEWITEM-1.md:42` describes an older 3.2-times example, not this bound. Repeat the doc search with the command/setting name, the limit's digits and spelled-out form, and field or behavior synonyms; a documented cap for a different command is not equivalent. `FEATURES.md:39,50` and `OPERATIONS.md:38,125` describe expiry/usage or adjacent operations, not substitutes for the source checks above. No live service, state, external model, browser or transport was exercised.
 
 Focused baseline receipt (2026-11-21): `python3 -B -m unittest -v hass.tests.test_limits_doc.LimitsDocTest.test_every_number_matches_its_constant hass.tests.test_limits_doc.LimitsDocTest.test_every_text_limits_group_is_cited hass.tests.test_limits_doc.LimitsDocTest.test_photo_types_match_media_kinds` ran 3 tests, `OK`. That checks the tagged values, group coverage and image types; it does not test every row above.

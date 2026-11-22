@@ -4,6 +4,7 @@ from contextlib import ExitStack, redirect_stdout
 import csv
 import fcntl
 import io
+import json
 from pathlib import Path
 import stat
 import subprocess
@@ -16,6 +17,7 @@ from scripts.hass import npp_findings
 
 
 SCRIPT = Path(npp_findings.__file__).resolve()
+GUARDS = SCRIPT.parents[2] / "hass/npp/assets/hass-npp-reply/reply-templates.json"
 WEEK = "2099-W02"
 HEADER = "id\tweek\tstage\tclass\tsummary\tcase_id\tcard\tstate\treason\n"
 
@@ -204,3 +206,150 @@ class FindingsTests(unittest.TestCase):
         marker.write_text("gitdir: ../fixture-metadata\n", encoding="utf-8")
         self.assertEqual(self.cli("report", "--week", WEEK, code=1), ["FAIL ledger must be outside Git worktrees"])
         self.assertEqual(list(checkout.iterdir()), [marker])
+
+    # Import rows follow npp_review_export.py: event rows, then one row per job with its summary.
+    @staticmethod
+    def job_row(job, **facts):
+        summary = dict(segment_s=[None], slow=False, stages=None, fallbacks=None, drifted_steps=None,
+                       failed_checks=None, approval_role=None, edits=0, questions=0, evidence="missing")
+        return dict(job=job, state="card_out", segments=1,
+                    versions=[dict(n=1, state="delivered", image_variant="raw")], summary=summary | facts)
+
+    @staticmethod
+    def event_row(chat="chat-1", direction="out", text="Use this title"):
+        return dict(day="2099-01-12", chat=chat, dir=direction, kind="text", text_redacted=text,
+                    attachments=0, disposition="queued")
+
+    def export(self, *rows, name="review.jsonl"):
+        path = self.root / name
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        return path
+
+    def import_export(self, path, week=WEEK, code=0):
+        return self.cli("import", "--export", str(path), "--week", week, code=code)
+
+    def table(self):
+        return [(row["id"], row["stage"], row["class"], row["summary"], row["state"]) for row in self.rows()]
+
+    def test_c6_import(self):
+        # C6: one finding per job and class from each summary fact and each outgoing guard line; no finding for
+        # a single question, no edits, an owner echoing a guard line, or ordinary replies; duplicates collapse.
+        guards = json.loads(GUARDS.read_text(encoding="utf-8"))["guards"]
+        stages = [dict(stage="S1", ms=400, outcome="ok"), dict(stage="S6", ms=75000, outcome="fallback"),
+                  dict(stage="S2", ms=6000, outcome="fallback")]
+        busy = self.job_row("c0de", slow=True, stages=stages, fallbacks=["label-local", "picture-raw"],
+                            drifted_steps=["identify"], questions=2, edits=2, evidence="recorded")
+        path = self.export(
+            self.event_row(text=guards["not_ready"]), self.event_row(text=guards["not_ready"]),
+            self.event_row(chat="chat-12", text=" " + guards["replaced"].upper()),
+            self.event_row(direction="in", text=guards["which_card"]), self.event_row(text="Use this title"),
+            busy,
+            self.job_row("beef", questions=1, segment_s=[75.0]),
+            self.job_row("cafe", slow=True, fallbacks=["picture-raw", "[redacted]", "[redacted]"], edits=1),
+            self.job_row("cafe", slow=True, fallbacks=["picture-raw"], edits=1),
+            self.job_row("f00d", questions=3, drifted_steps=["copy_select"], evidence="recorded"),
+        )
+        prior = self.add(kind="slow")
+        self.cli("close", prior, "--reason", "fixture-only", "--card", "card-demo")
+        week = "2099-W03"
+        output = self.import_export(path, week)
+        ids = [f"F-{week}-{n}" for n in range(1, 15)]
+        self.assertEqual(output, [*ids, "PASS npp_findings import added=14 existing=0"])
+        self.assertEqual(self.table()[1:], [(finding, *row) for finding, row in zip(ids, [
+            ("S11", "guard-not-ready", "chat h: guard reply not ready sent", "open"),
+            ("S11", "guard-replaced", "chat hi: guard reply replaced sent", "open"),
+            ("S6", "slow", "job cgde: a work segment passed the time-to-card target", "repeat"),
+            ("S2", "fallback-label-local", "job cgde: the card used fallback label-local", "open"),
+            ("S6", "fallback-picture-raw", "job cgde: the card used fallback picture-raw", "open"),
+            ("S3", "question", "job cgde: asked more than one question", "open"),
+            ("S2", "drift-identify", "job cgde: step identify returned a model other than its pin", "open"),
+            ("S10", "edit", "job cgde: edited after a card was delivered", "open"),
+            ("S9", "slow", "job cafe: a work segment passed the time-to-card target", "repeat"),
+            ("S6", "fallback-picture-raw", "job cafe: the card used fallback picture-raw", "open"),
+            ("S9", "fallback-redacted", "job cafe: the card used fallback redacted", "open"),
+            ("S10", "edit", "job cafe: edited after a card was delivered", "open"),
+            ("S3", "question", "job fggd: asked more than one question", "open"),
+            ("S5", "drift-copy-select", "job fggd: step copy-select returned a model other than its pin", "open"),
+        ])])
+        self.assertEqual(stat.S_IMODE(self.ledger.stat().st_mode), 0o600)
+        self.assertEqual(self.cli("report", "--week", week)[0], "open=14 closed=1 repeat=2")
+
+    def test_c7_idempotent(self):
+        # C7: a second import of one export, a later export repeating its jobs, a closed import and
+        # concurrent importers must never add a finding twice or rewrite the ledger for nothing.
+        rows = [self.event_row(text=json.loads(GUARDS.read_text(encoding="utf-8"))["guards"]["replaced"]),
+                self.job_row("c0de", slow=True, edits=1), self.job_row("beef", fallbacks=["picture-raw"])]
+        path = self.export(*rows)
+        first = self.import_export(path)
+        self.assertEqual(first[-1], "PASS npp_findings import added=4 existing=0")
+        original, inode = self.ledger.read_bytes(), self.ledger.stat().st_ino
+        self.assertEqual(self.import_export(path), ["PASS npp_findings import added=0 existing=4"])
+        self.assertEqual((self.ledger.read_bytes(), self.ledger.stat().st_ino), (original, inode))
+
+        self.cli("close", first[1], "--reason", "fixture-only", "--card", "card-demo")
+        closed = self.ledger.read_bytes()
+        self.assertEqual(self.import_export(path), ["PASS npp_findings import added=0 existing=4"])
+        self.assertEqual(self.ledger.read_bytes(), closed)
+
+        # Next week's export lists every receipt again; only the new job and the new week's guard line are new.
+        later = self.export(*rows, self.job_row("f00d", edits=1), name="later.jsonl")
+        self.assertEqual(self.import_export(later, "2099-W03"),
+                         ["F-2099-W03-1", "F-2099-W03-2", "PASS npp_findings import added=2 existing=3"])
+        self.assertEqual([row["class"] for row in self.rows()][-2:], ["guard-replaced", "edit"])
+        self.assertEqual(self.rows()[-1]["summary"], "job fggd: edited after a card was delivered")
+
+        settled = self.ledger.read_bytes()
+        racing = self.export(*rows, self.job_row("abcd", slow=True), self.job_row("dcba", questions=2),
+                             name="racing.jsonl")
+        with ExitStack() as stack:
+            importers = [stack.enter_context(subprocess.Popen(
+                self.command("import", "--export", str(racing), "--week", "2099-W03"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)) for _ in range(4)]
+            trailers = []
+            for importer in importers:
+                stdout, stderr = importer.communicate(timeout=10)
+                self.assertEqual(importer.returncode, 0, stderr)
+                trailers.append(stdout.splitlines()[-1])
+        self.assertEqual(sorted(trailers), ["PASS npp_findings import added=0 existing=6"] * 3
+                         + ["PASS npp_findings import added=2 existing=4"])
+        self.assertTrue(self.ledger.read_bytes().startswith(settled))
+        self.assertEqual([row["id"] for row in self.rows()][-2:], ["F-2099-W03-3", "F-2099-W03-4"])
+        self.assertEqual(len(self.rows()), len({(row["class"], row["summary"], row["week"]) for row in self.rows()}))
+
+    def test_c8_redacted_only(self):
+        # C8: only the job id, the named summary facts and a matched guard key build a summary; raw or extra
+        # fields, unredacted names and unmatched text never reach the ledger, and a bad export is refused whole.
+        canaries = ("Canary Farm Lane", "canary@example.invalid", "canary.example.invalid", "7541",
+                    "canarysender", "Canary-Mixed")
+        event = self.event_row(text="Canary Farm Lane said hello") | dict(
+            text="canary@example.invalid", sender="canarysender", kind="Canary-Mixed")
+        job = self.job_row("feed", fallbacks=["canary.example.invalid", "price-7541", "Canary-Mixed",
+                                              "-".join(["canary"] * 8), "[redacted]"],
+                           drifted_steps=["canary.example.invalid"], failed_checks=["canarysender"],
+                           approval_role="Canary Farm Lane", evidence="recorded", note="canary@example.invalid")
+        job |= dict(title="Canary Farm Lane", cost="7541")
+        result = subprocess.run(self.command("import", "--export", str(self.export(event, job)), "--week", WEEK),
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(result.stdout.splitlines()[-1], "PASS npp_findings import added=2 existing=0")
+        self.assertEqual([(row["class"], row["summary"]) for row in self.rows()], [
+            ("fallback-redacted", "job feed: the card used fallback redacted"),
+            ("drift-redacted", "job feed: step redacted returned a model other than its pin")])
+        stored = (self.ledger.read_text(encoding="utf-8") + result.stdout).lower()
+        self.assertNotIn("canary", stored)
+        for canary in canaries:
+            with self.subTest(canary=canary):
+                self.assertNotIn(canary.lower(), stored)
+
+        original = self.ledger.read_bytes()
+        for bad in ('{"job": "Canary Farm Lane", "summary": {}}\n', "Canary Farm Lane 7541\n", "[]\n",
+                    json.dumps(self.job_row("feed", edits="7541")) + "\n",
+                    json.dumps(self.job_row("feed") | dict(summary=None)) + "\n",
+                    json.dumps(self.event_row(chat="canarysender")) + "\n",
+                    json.dumps(dict(cost="7541")) + "\n"):
+            with self.subTest(bad=bad):
+                path = self.root / "bad.jsonl"
+                path.write_text(json.dumps(self.job_row("abcd", slow=True)) + "\n" + bad, encoding="utf-8")
+                self.assertEqual(self.import_export(path, code=1), ["FAIL bad-export"])
+                self.assertEqual(self.ledger.read_bytes(), original)
+        self.assertEqual(self.import_export(self.root / "missing.jsonl", code=1), ["FAIL bad-export"])

@@ -583,7 +583,8 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             running.add(sha)
 
             def complete():
-                if epoch != generation or photo_polish.decision(root, sha) is not None:
+                observe_late = 'polish_late_logged' in view['expect']
+                if epoch != generation or (not observe_late and photo_polish.decision(root, sha) is not None):
                     running.discard(sha)
                     return
                 source = polish.get('source')
@@ -610,12 +611,25 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                     out.write_bytes(data)
                     return {'ok': True}
 
-                photo_polish.run(root, sha, log=log, transport=transport)
+                if observe_late:
+                    fx.now = T0 + timedelta(seconds=clock.monotonic())
+                    before = outbox_count()
+                    decision = photo_polish.decision(root, sha)
+                    assert log is not None
+                    with patch.object(log, 'record', wraps=log.record) as records:
+                        code = photo_polish.run(root, sha, log=log, transport=transport)
+                    settle()
+                    late.update(logged=any(c.args[:2] == ('error', 'polish-late') for c in records.call_args_list),
+                                messages=outbox_count() - before, dropped=code == 'late' and decision is not None
+                                and decision == photo_polish.decision(root, sha))
+                else:
+                    photo_polish.run(root, sha, log=log, transport=transport)
 
             clock.at(clock.monotonic() + polish.get('latency_s', 0), 1, complete)
 
         class Sender(_ChatTransport):
             def send_card(self, row, chat, text, png_path, digest):
+                attempts[row] += 1
                 if self.fail:
                     raise OSError('fixture send outage')
                 super().send_card(row, chat, text, png_path, digest)
@@ -626,11 +640,53 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         fx.transport.fail = any(spec.get('retry_send') for spec in view['turns'])
         current = []
         fx.fetch = lambda _pid, count: current[:count]
+        attempts, late, captures = Counter(), {}, {}
+        schedule = inputs.get('outbox', {}) if view['id'] == 25 else {}
+
+        def outbox_count():
+            return fx.conv.db.execute('SELECT count(*) FROM outbox').fetchone()[0]
+
         start()
+
+        if view['id'] in (26, 36):
+            def observe_capture(files, target, out, assets=None):
+                shot = capture(files, target, out, assets=assets)
+                if target.get('cardOnly') and shot.get('ok') and shot.get('png'):
+                    captures.setdefault(sha256(Path(shot['png']).read_bytes()), []).append({
+                        'description': target['description'] if shot['checks'].get('description') is True else None,
+                        'text': shot.get('cardText'), 'assets': {p: sha256(b) for p, b in (assets or {}).items()},
+                    })
+                return shot
+
+            fx.conv.previewer = SimpleNamespace(capture=observe_capture)
+
+        if view['id'] == 36 and fx.conv.npp and fx.conv.npp.stages:
+            # Count the actual supplied nonconforming model response, not a local default.
+            select = fx.conv.npp.stages.selector
+            assert select is not None
+
+            def fabricated_copy(*args, **kwargs):
+                calls['copy'] += 1
+                return select(*args, **kwargs)
+
+            fx.conv.npp.stages.selector = fabricated_copy
 
         def flush():
             try:
-                fx.flush()
+                if schedule:
+                    # Hold transport polling, not the receipt or eligibility gate. Once a
+                    # hold expires even a superseded row reaches the real dispatch check.
+                    unsent = fx.conv.outbox.unsent
+                    def available():
+                        for row in unsent():
+                            v = fx.conv.db.execute('SELECT n FROM npp_versions WHERE outbox_id=?', (row['id'],)).fetchone()
+                            timing = schedule.get(f'v{v[0]}', {}) if v else {}
+                            if clock.monotonic() >= timing.get('held_until_s', timing.get('delivered_at_s', 0)):
+                                yield row
+                    with patch.object(fx.conv.outbox, 'unsent', available):
+                        fx.flush()
+                else:
+                    fx.flush()
             except OSError:
                 if not fx.transport.fail:
                     raise
@@ -639,8 +695,14 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             for _ in range(12):
                 flush()
                 if fx.scheduler.steps:
-                    # Run planning immediately; render once the image result is ready, or at the stage deadline.
+                    # The executor may finish after a competing inbound turn or a deadline.
                     future, fn, args = fx.scheduler.steps[0]
+                    job_runner = fx.conv.npp
+                    if inputs.get('stage_ready_at_s') and job_runner and job_runner.running:
+                        segment = job_runner.running[0][0]
+                        started = fx.conv.db.execute('SELECT started_by FROM npp_segments WHERE segment_id=?', (segment,)).fetchone()
+                        if started and clock.monotonic() < inputs['stage_ready_at_s'].get(started[0], {}).get(fn.__name__, 0):
+                            break
                     if fn.__name__ == 'render' and running:
                         break
                     fx.scheduler.steps.pop(0)
@@ -667,6 +729,12 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                     start()
                 if spec.get('retry_send'):
                     fx.transport.fail = False
+                snapshot = {}
+                if schedule:
+                    snapshot = dict(approvals=fx.conv.db.execute('SELECT count(*) FROM approvals').fetchone()[0],
+                                    npp_approvals=fx.conv.db.execute('SELECT count(*) FROM npp_approvals').fetchone()[0],
+                                    commits=int(git(fx.repo.wt, 'rev-list', '--count', f'{fx.base}..HEAD')),
+                                    versions={v['n']: v['state'] for v in fx.conv.db.execute('SELECT n,state FROM npp_versions')})
                 text = spec.get('text')
                 outcome = None
                 prior_job = fx.job()
@@ -681,6 +749,12 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                     version = fx.version(int(ref[1:])) if ref and row else None
                     arrival = fx.now
                     kwargs = {}
+                    if spec.get('edit_published_description') and row and row['state'] == 'published':
+                        approved = fx.version(row['current_version'])
+                        change = fx.conv.editor.show(approved['change_id'])['change']
+                        pid = next(r['key'] for r in change['records'] if r['collection'] == 'products')
+                        fx.interpreter.mapping[text] = {'revises': None, 'ops': [{'op': 'product.edit', 'args': {
+                            'id': pid, 'description': spec['edit_published_description']}}]}
                     if ref:
                         if 'reply_to' not in conversation.Inbound.__dataclass_fields__:
                             missing.append('Conversation.Inbound does not yet carry a reply reference')
@@ -692,20 +766,21 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                 settle()
                 version = fx.version(fx.job()['current_version']) if fx.job() and fx.job()['current_version'] else None
                 posted = fx.conv.npp_posted(version['change_id']) if outcome == 'approved' and version and version['change_id'] else None
-                observed.append(dict(turn=index, result=outcome, before=before, posted=posted, polish_ready=polish_ready))
+                observed.append(dict(turn=index, result=outcome, before=before, posted=posted, polish_ready=polish_ready,
+                                     snapshot=snapshot))
 
             clock.at(spec['at_s'], 0, play)
             # Pump between turns, including while polish is in flight. A restart invalidates queued work.
         horizon = max(t['at_s'] for t in turns) + max(80, view.get('settle_until_s', 0))
         def tick():
-            if not (fx.scheduler.steps or (fx.conv.npp is not None and fx.conv.npp.running) or running):
+            if not (schedule or fx.scheduler.steps or (fx.conv.npp is not None and fx.conv.npp.running) or running):
                 return
             fx.now = T0 + timedelta(seconds=clock.monotonic())
             settle()
         with patch.object(stages.research_hermes, 'run', side_effect=research_fixture), \
                 patch.object(photo_polish, 'start', side_effect=launch), patch.object(photo_polish, '_running', running):
             for seconds in range(int(horizon) + 1):
-                if any(t['at_s'] - 1 <= seconds <= t['at_s'] + 80 for t in turns):
+                if inputs.get('stage_ready_at_s') or any(t['at_s'] - 1 <= seconds <= t['at_s'] + 80 for t in turns):
                     clock.at(seconds, 2, tick)
             clock.run_until(horizon)
         row = fx.job()
@@ -730,6 +805,23 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             entry['cards'] = [v[0] for _, v in card_rows[b:y]]
             entry['card_reply_providers'] = [turn_by_reply.get(row) for row, _ in card_rows[b:y]]
             entry['previews'] = [v[0] for v in fx.transport.previews[c:z]]
+            entry['card_sent_at_s'] = [(datetime.fromisoformat(fx.transport.receipts[row]['confirmed_at']) - T0).total_seconds()
+                                       for row, _ in card_rows[b:y]]
+        if schedule:
+            # A delayed delivery belongs to its durable inbound binding, not
+            # whichever owner input happened just before transport confirmation.
+            for entry in observed:
+                for field in ('cards', 'card_reply_providers', 'card_sent_at_s'):
+                    entry[field] = []
+            for row_id, card in card_rows:
+                provider = turn_by_reply.get(row_id)
+                if not provider or not re.fullmatch(r'fixture-\d+', provider) or int(provider[8:]) >= len(observed):
+                    failures.append('card missing a durable owner-turn binding')
+                    continue
+                entry = observed[int(provider.removeprefix('fixture-'))]
+                entry['cards'].append(card[0])
+                entry['card_reply_providers'].append(provider)
+                entry['card_sent_at_s'].append((datetime.fromisoformat(fx.transport.receipts[row_id]['confirmed_at']) - T0).total_seconds())
         calls.update(world.calls)
         failures.extend(world.violations)
         gaps = []
@@ -737,7 +829,8 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             failures += check_conversation(view['expect'], observed, state, calls, bodies, pinned[2])
             if 'polish_settled_before_answer' in view['expect'] and observed[1]['polish_ready'] != view['expect']['polish_settled_before_answer']:
                 failures.append('polish did not settle before the price answer')
-            failures += check_card(view, fx, state, versions, photo_polish.decision(fx.root, row['photo_sha']) if row and row['photo_sha'] else None, gaps)
+            decision = photo_polish.decision(fx.root, row['photo_sha']) if row and row['photo_sha'] else None
+            failures += check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures)
         return failures, {'observed': observed, 'state': state, 'calls': dict(calls), 'missing': sorted(set(missing)), 'gaps': gaps}
     finally:
         fx.doCleanups()
@@ -765,6 +858,10 @@ def check_conversation(expect, observed, state, calls, bodies, replies):
         seen = observed[want['turn']]
         if 'answers_turn' in want and seen['card_reply_providers'] != [f"fixture-{want['answers_turn']}"]:
             bad.append(f"turn {want['turn']}: card does not answer owner turn {want['answers_turn']}")
+        if 'sent_by_s' in want and (not seen['card_sent_at_s'] or max(seen['card_sent_at_s']) > want['sent_by_s']):
+            bad.append(f"turn {want['turn']}: card confirmation missed deadline {want['sent_by_s']}")
+        if 'sent_at_s' in want and seen['card_sent_at_s'] != [want['sent_at_s']]:
+            bad.append(f"turn {want['turn']}: expected card confirmation at {want['sent_at_s']}")
         kinds = [(text, reply_kind(text, replies)) for text in seen['texts']]
         kinds += [(text, 'card') for text in seen['cards']]
         # Sandbox acknowledgement is expected instead of an actual live send. Check
@@ -774,6 +871,8 @@ def check_conversation(expect, observed, state, calls, bodies, replies):
                 kinds.append((text, 'undo_draft'))
             elif text.startswith('Saved and checked:') and seen['posted']:
                 kinds.append((seen['posted'], reply_kind(seen['posted'], replies)))
+            elif want.get('legacy_proposal') and 'reply yes ' in text.lower():
+                kinds.append((text, 'card'))
             else:
                 kinds.append((text, reply_kind(text, replies)))
         texts = [text for text, _ in kinds]
@@ -812,7 +911,7 @@ def check_conversation(expect, observed, state, calls, bodies, replies):
     return bad
 
 
-def check_card(view, fx, state, versions, decision, gaps):
+def check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures):
     """Bind delivery and publish claims to stored versions and actual committed bytes."""
     want, bad = view['expect'], []
     db = fx.conv.db
@@ -835,6 +934,8 @@ def check_card(view, fx, state, versions, decision, gaps):
             bad.append(f'v{n} missing')
             continue
         got = versions[n]
+        if 'sent' in version:
+            same(f'v{n}.sent', bool(attempts[got['outbox_id']]), version['sent'])
         for key, value in [('delivered', bool(got['delivered_at'])), ('approved', got['state'] == 'approved'),
                            ('superseded', got['state'] == 'superseded'), ('state', got['state'])]:
             if key in version:
@@ -891,7 +992,7 @@ def check_card(view, fx, state, versions, decision, gaps):
              ('fixture-1', when.isoformat(), (when + timedelta(seconds=cap)).isoformat()))
 
     contradiction = view['id'] == 31 and want.get('listing') == {'maker_panel': False}
-    follows_edit = view['id'] in (19, 32) or contradiction
+    follows_edit = view['id'] in (19, 21, 26, 32, 36) or contradiction
 
     def version_record(version):
         found = fx.conv.editor.show(version.get('change_id') or '')
@@ -941,12 +1042,86 @@ def check_card(view, fx, state, versions, decision, gaps):
         for term in want.get('public_lacks', ()):
             same('conflicting maker is absent from public fields and card', term.casefold() in public.casefold(), False)
 
+    newly_covered = set()
+    if 'polish_late_logged' in want:
+        same('polish late logged', late.get('logged'), want['polish_late_logged'])
+        same('late polish left the write-once decision unchanged', late.get('dropped'), True)
+        same('messages on late polish', late.get('messages'), want['messages_on_polish_late'])
+        hashes = [versions.get(n, {}).get('image_sha256') for n in (1, 2)]
+        same('v2 bytes equal v1', bool(hashes[0] and hashes[0] == hashes[1]), want['v2_bytes_equal_v1'])
+        newly_covered.update({'polish_late_logged', 'messages_on_polish_late', 'v2_bytes_equal_v1'})
+    if view['id'] == 25:
+        same('v2 was queued (before supersession)', observed[3]['snapshot']['versions'].get(2), 'queued')
+        same('v3 was building at first bare yes', observed[4]['snapshot']['versions'].get(3), 'building')
+        same('v3 was delivered at second bare yes', observed[5]['snapshot']['versions'].get(3), 'delivered')
+        pending = db.execute("SELECT code, ops_json FROM drafts WHERE state='proposed'").fetchall()
+        same('one separate pending F6 draft', len(pending), 1)
+        if len(pending) == 1 and len(approved) == 1:
+            after = view['turns'][7]['edit_published_description']
+            product = committed_product(approved[0])
+            same('F6 edit is a new draft with a separate code', bool(pending[0]['code'] and
+                 pending[0]['code'] != fx.job()['job_id']), True)
+            same('F6 edits the posted product', json.loads(pending[0]['ops_json']),
+                 [{'op': 'product.edit', 'args': {'id': product.get('id'), 'description': after}}])
+            same('F6 was not applied', product.get('description') == after, False)
+        for turn in (4, 5, 6):
+            before = observed[turn]['snapshot']
+            same(f'approval rows before turn {turn}', before['approvals'], want['approval_rows_before_turn_6'])
+            same(f'NPP approval rows before turn {turn}', before['npp_approvals'], want['approval_rows_before_turn_6'])
+            same(f'commits before turn {turn}', before['commits'], want['commits_before_turn_6'])
+        for n, v in versions.items():
+            timing = view['inputs']['outbox'].get(f'v{n}', {})
+            if 'delivered_at_s' in timing:
+                from hass.tests.test_conversation import T0
+                same(f'v{n} durable delivery time', v['delivered_at'],
+                     (T0 + timedelta(seconds=timing['delivered_at_s'])).isoformat())
+            if 'sends' in timing:
+                same(f'v{n} transport attempts', attempts[v['outbox_id']], len(timing['sends']))
+        newly_covered.update({'approval_rows_before_turn_6', 'commits_before_turn_6'})
+
+    if view['id'] in (26, 36) and len(approved) == 1:
+        product = committed_product(approved[0])
+        shots = [captures.get(versions.get(n, {}).get('card_png_sha'), []) for n in (1, 2)]
+        if view['id'] == 26:
+            from hass import media
+            gate = view['inputs']['gate_expect']
+            same('polish fidelity rejection code', (decision or {}).get('code'), gate['code'])
+            same('polish fidelity accepted', (decision or {}).get('use') == 'polished', gate['ok'])
+            photo = fx.job()['photo_sha']
+            owner_sha = media.web_copy(fx.root, photo)['web_sha256']
+            for n, matches in enumerate(shots, 1):
+                v = versions.get(n, {})
+                same(f'v{n} owner web copy bytes', v.get('image_sha256'), owner_sha)
+                asset = 'storefront-mockup/' + (v.get('image_path') or '')
+                same(f'v{n} capture input has owner web copy bytes', [m['assets'].get(asset) for m in matches], [owner_sha])
+            alt = product.get('imageAlt', '')
+            same('applied alt exists', bool(alt), True)
+            for term in want['alt_lacks']:
+                same(f'applied alt contains {term}', term.casefold() in alt.casefold(), False)
+            newly_covered.update({'alt_lacks', 'bytes_equal'})
+            gaps.append('needs each delivered PNG bound to the selected product img DOM alt and loaded image SHA; capture currently returns only text and checks')
+        else:
+            description = product.get('description')
+            same('applied fallback description', description, want['description_equals'])
+            for n, matches in enumerate(shots, 1):
+                same(f'v{n} browser description equals applied',
+                     len(matches) == 1 and description is not None and matches[0]['description'] == description,
+                     want['preview_description_equals_applied'])
+            card_text = [m['text'] for group in shots for m in group]
+            same('captured both product cards’ DOM text', len(card_text) == 2 and all(card_text), True)
+            public = json.dumps(version_record(approved[0]).get('records', [])) + json.dumps(card_text) + '\n'.join(
+                card[0] for card in fx.transport.cards.values())
+            for term in want['public_lacks']:
+                same(f'fabricated claim in public listing or card: {term}', term.casefold() in public.casefold(), False)
+            newly_covered.update({'description_equals', 'preview_description_equals_applied', 'public_lacks'})
+
     # Never report a fixture green when its declared contract has no observer.
     covered = {'state', 'replies', 'total_replies', 'draft_rows', 'approval_rows', 'commits', 'calls',
                'checks', 'cards_sent', 'variant', 'versions', 'undo', 'polish_decision', 'approved_version',
                'approved_draft_hash', 'sent_at_null_until_s', 'v1_delivered_after_retry', 'v1_needs_fresh_yes',
                'frozen_sha_equals_committed_file', 'preview_sha_equals_frozen_equals_committed', 'picture_line',
                'install_path_re', 'cloud_bodies_lack_digits_from', 'research'}
+    covered.update(newly_covered)
     if 'segment2_started_at_s' in want and want.get('segment_cap_measured_from') == 'answer':
         covered.update({'polish_settled_before_answer', 'segment2_started_at_s', 'segment_cap_measured_from'})
     if follows_edit:

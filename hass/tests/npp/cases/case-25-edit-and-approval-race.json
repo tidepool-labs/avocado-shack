@@ -57,13 +57,13 @@
       "at_s": 95,
       "from": "mike",
       "text": "yes {code}-3",
-      "photos": [],
-      "alt_reply_to": "v3"
+      "photos": []
     },
     {
       "at_s": 200,
       "from": "mike",
-      "text": "make it $13",
+      "text": "Change the description of the posted honey to: Try the honey on toast.",
+      "edit_published_description": "Try the honey on toast.",
       "photos": []
     },
     {
@@ -74,6 +74,7 @@
     }
   ],
   "inputs": {
+    "stage_ready_at_s": {"fixture-0": {"plan": 3}, "fixture-3": {"render": 80}},
     "polish": {
       "source": "file",
       "file": "npp:edits/honey-good.png",
@@ -103,14 +104,16 @@
     "replies": [
       {
         "turn": 0,
-        "count": 1,
-        "kind": "card",
+        "count": 0,
+        "kind": "none",
         "note": "the early edit is folded into v1; no separate reply"
       },
       {
         "turn": 1,
-        "count": 0,
-        "kind": "none"
+        "count": 1,
+        "kind": "card",
+        "answers_turn": 1,
+        "has_all": ["Reply yes <code>-1"]
       },
       {
         "turn": 2,
@@ -121,7 +124,8 @@
         "turn": 3,
         "count": 1,
         "kind": "card",
-        "note": "v3"
+        "answers_turn": 3,
+        "has_all": ["Reply yes <code>-3"]
       },
       {
         "turn": 4,
@@ -143,12 +147,13 @@
         "turn": 6,
         "count": 1,
         "kind": "posted",
-        "note": "reply to v3's exact message id: publishes v3"
+        "note": "approve exactly the delivered v3"
       },
       {
         "turn": 7,
         "count": 1,
         "kind": "card",
+        "legacy_proposal": true,
         "note": "an edit of the published product follows the F6 flow with its own code"
       },
       {
@@ -169,6 +174,7 @@
       {
         "n": 2,
         "delivered": false,
+        "superseded": true,
         "sent": false
       },
       {
@@ -186,5 +192,73 @@
       "reply",
       "delivery_approval"
     ]
-  }
+  },
+  "variants": [
+    {
+      "id": "tag"
+    },
+    {
+      "id": "reply-to",
+      "turns": [
+        {
+          "at_s": 0,
+          "from": "mike",
+          "text": "new honey $9 each",
+          "photos": [
+            "npp:honey.jpg"
+          ]
+        },
+        {
+          "at_s": 3,
+          "from": "mike",
+          "text": "make it $10",
+          "photos": []
+        },
+        {
+          "at_s": 50,
+          "from": "mike",
+          "text": "make it $11",
+          "photos": []
+        },
+        {
+          "at_s": 57,
+          "from": "mike",
+          "text": "make it $12",
+          "photos": []
+        },
+        {
+          "at_s": 60,
+          "from": "mike",
+          "text": "yes {code}",
+          "photos": []
+        },
+        {
+          "at_s": 90,
+          "from": "mike",
+          "text": "yes {code}",
+          "photos": []
+        },
+        {
+          "at_s": 95,
+          "from": "mike",
+          "text": "yes {code}",
+          "photos": [],
+          "reply_to": "v3"
+        },
+        {
+          "at_s": 200,
+          "from": "mike",
+          "text": "Change the description of the posted honey to: Try the honey on toast.",
+          "edit_published_description": "Try the honey on toast.",
+          "photos": []
+        },
+        {
+          "at_s": 210,
+          "from": "mike",
+          "text": "yes {code}-3",
+          "photos": []
+        }
+      ]
+    }
+  ]
 }

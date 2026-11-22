@@ -53,7 +53,7 @@
         "description": "The beans are roasted in copper pans."
       }
     },
-    "item": "ridge roast dark coffee beans",
+    "item": "Ridge Roast Dark Coffee",
     "item_note": "the S2 item slot the default description is anchored on (copy-templates.json defaults.description, rung a, kind food)"
   },
   "expect": {
@@ -63,7 +63,7 @@
         "count": 1,
         "kind": "card",
         "has_all": [
-          "(basic wording)"
+          "; basic wording)"
         ]
       },
       {
@@ -88,7 +88,8 @@
       }
     ],
     "state": "published",
-    "description_equals": "Pick up ridge roast dark coffee beans for the kitchen. Set ridge roast dark coffee beans out on the table.",
+    "calls": {"copy": 2},
+    "description_equals": "Pick up Ridge Roast Dark Coffee for the kitchen. Set Ridge Roast Dark Coffee out on the table.",
     "preview_description_equals_applied": true,
     "public_lacks": [
       "copper",

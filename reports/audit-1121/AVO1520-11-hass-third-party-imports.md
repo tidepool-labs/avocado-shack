@@ -48,14 +48,14 @@ A function-local import defers the dependency; it does not make the feature work
 
 On 2026-11-21, the scratch command `python3 audit_imports.py avocado-shack origin/main --nested` parsed **1,164 tracked Python files** with Python 3.12.3: `hass/` recursively (1,076), `scripts/hass/` directly (85), and `storefront-mockup/` directly (3). The scratch script is not committed. To reconstruct it: enumerate paths with `git ls-tree -r --name-only -z`, read each selected blob with `git show REV:PATH`, run `ast.parse`, and walk the tree while keeping ancestors. For `Import`, split each alias name at its first dot; for absolute `ImportFrom`, split the source module at its first dot. Treat relative imports and the repository-local roots listed in R1 separately; subtract `sys.stdlib_module_names` from the absolute roots. Group by root, source line and presence of `FunctionDef`, `AsyncFunctionDef`, `Lambda`, `Try` or `TryStar` ancestors; deduplicate paths for file counts. The full scratch output includes 484 function/try import statements before filtering out stdlib and local imports. Review literal dynamic-load calls separately; computed imports, imports in generated source, and transitive dependencies of external code are not resolved by this inventory.
 
-From the clone at the audited base, these read-only commands cross-check the external import rows and install declarations:
+From a clean checkout of the audited base, these read-only commands cross-check the external import rows and install declarations. The grep uses single ERE escapes for literal punctuation; the commit ID keeps replay independent of later `origin/main` changes:
 
 ```sh
-git ls-tree -r --name-only origin/main -- .github/workflows .github/actions
+git ls-tree -r --name-only 37feae1dc5efa6968f90d17a1eda6daed29afd4a -- .github/workflows .github/actions
 # In a clean checkout of the audited tree, expected output: none.
 git ls-files ':(glob)**/requirements*.txt' ':(glob)**/pyproject.toml'
-git grep -n -E '(^|[[:space:]])(from PIL|import PIL|import httpx|import hermes_bootstrap|from agent\.auxiliary_client)|import_module\("plugins\.' origin/main -- ':(glob)hass/**/*.py' ':(glob)scripts/hass/*.py' ':(glob)storefront-mockup/*.py'
-git grep -n -E 'pip[[:space:]]+install|npm[[:space:]]+install|install-deps|PILLOW_VERSION' origin/main -- .github/workflows .github/actions/test-env
+git grep -n -E '(^|[[:space:]])(from PIL|import PIL|import httpx|import hermes_bootstrap|from agent\.auxiliary_client)|import_module\("plugins\.' 37feae1dc5efa6968f90d17a1eda6daed29afd4a -- ':(glob)hass/**/*.py' ':(glob)scripts/hass/*.py' ':(glob)storefront-mockup/*.py'
+git grep -n -E 'pip[[:space:]]+install|npm[[:space:]]+install|install-deps|PILLOW_VERSION' 37feae1dc5efa6968f90d17a1eda6daed29afd4a -- .github/workflows .github/actions/test-env
 ```
 
 This was a source and install-step audit, not a CI run or an installation test. No project Python, package install, browser, site, host service or adapter was run. Archived storefront/commerce files and other Python paths were not scanned for imports (`AGENTS.md:3–5`; scope above).

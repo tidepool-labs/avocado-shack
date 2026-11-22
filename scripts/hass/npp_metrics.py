@@ -7,13 +7,17 @@
 Reads `<job>/receipt.json` files (job id, state, versions, segments, asset pins: ids, times and digests only, never owner
 text) and appends one row to the private metrics.tsv. Quantities the receipts do not carry (wording and maker fallbacks,
 guard replies, repeat incidents, judge scores) come from the redacted weekly findings file and the judge run, and are left
-`n/a` when absent: an absent figure is never reported as zero.
+`n/a` when absent: an absent figure is never reported as zero. Jobs are attributed in full to the ISO week of their
+creation in America/Los_Angeles; their current receipt may include later activity. Findings and judge inputs must already
+cover the requested week. Receipts without an aware creation timestamp are rejected rather than silently omitted.
 """
 import argparse
 import json
+import re
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[2]
 OUT = Path("~/agent-work/reports/hass-npp/metrics.tsv").expanduser()
@@ -31,6 +35,30 @@ def load_receipts(directory):
         if isinstance(data, dict) and "job_id" in data:
             found.append(data)
     return found
+
+
+def receipts_for_week(receipts, week):
+    """Attribute each whole job to its creation week in the shop's local time."""
+    match = re.fullmatch(r"([0-9]{4})-W([0-9]{2})", week)
+    try:
+        if not match:
+            raise ValueError
+        year, number = map(int, match.groups())
+        date.fromisocalendar(year, number, 1)
+    except ValueError:
+        raise ValueError("invalid ISO week (expected YYYY-Www)") from None
+    selected = []
+    for receipt in receipts:
+        try:
+            created = datetime.fromisoformat(receipt["created_at"])
+            if created.utcoffset() is None:
+                raise ValueError
+            iso = created.astimezone(ZoneInfo("America/Los_Angeles")).isocalendar()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise ValueError("receipt has missing or invalid creation timestamp") from None
+        if (iso.year, iso.week) == (year, number):
+            selected.append(receipt)
+    return selected
 
 
 def seconds(row):
@@ -128,7 +156,11 @@ def main(argv=None):
     pins = json.loads((REPO / "hass" / "npp" / "pins.json").read_text(encoding="utf-8"))["assets"]
     findings = json.loads(Path(args.findings).read_text()) if args.findings else None
     judge = json.loads(Path(args.judge).read_text()) if args.judge else None
-    row = compute(load_receipts(args.receipts), pins=pins, findings=findings, judge=judge)
+    try:
+        receipts = receipts_for_week(load_receipts(args.receipts), args.week)
+    except ValueError as exc:
+        p.error(str(exc))
+    row = compute(receipts, pins=pins, findings=findings, judge=judge)
     write_row(args.out, args.week, row)
     print(json.dumps({"week": args.week, **row}, sort_keys=True))
     return 0

@@ -445,6 +445,37 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(lines[1].split("\t")[0], "2026-W47")
             self.assertIn("n/a", lines[1])
 
+    def test_cli_filters_jobs_by_pacific_iso_week_of_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for job, created, variant in [
+                ("aaaa", "2027-01-04T07:59:59+00:00", "polished"),
+                ("bbbb", "2027-01-04T08:00:00+00:00", "raw"),
+                ("cccc", "2026-12-28T08:00:00+00:00", "polished"),
+            ]:
+                folder = root / job
+                folder.mkdir()
+                receipt = self.receipt(job, [("card", 40)], [variant], approved=1)
+                receipt["created_at"] = created
+                (folder / "receipt.json").write_text(json.dumps(receipt))
+            out = root / "metrics.tsv"
+            with patch("builtins.print") as printed:
+                self.assertEqual(metrics.main(["--receipts", str(root), "--week", "2026-W53", "--out", str(out)]), 0)
+            row = json.loads(printed.call_args.args[0])
+            self.assertEqual((row["jobs"], row["listings"], row["fallback_picture"]), (2, 2, 0.0))
+            self.assertEqual(out.read_text().splitlines()[1].split("\t")[1:3], ["2", "2"])
+
+    def test_week_selection_rejects_bad_dates_and_accepts_empty_week(self):
+        self.assertEqual(metrics.receipts_for_week([], "2026-W53"), [])
+        for week in ("2026-W54", "2025-W53", "2026-53"):
+            with self.subTest(week=week), self.assertRaises(ValueError):
+                metrics.receipts_for_week([], week)
+        for created in (None, "not-a-date", "2026-11-20T17:00:00"):
+            with self.subTest(created=created), self.assertRaises(ValueError):
+                metrics.receipts_for_week([{"created_at": created}], "2026-W47")
+        with self.assertRaises(ValueError):
+            metrics.receipts_for_week([{}], "2026-W47")
+
     def test_receipts_are_read_from_the_job_folders(self):
         # Contract: receipts are <mediaRoot>/npp/<job>/receipt.json; other files are ignored.
         with tempfile.TemporaryDirectory() as tmp:

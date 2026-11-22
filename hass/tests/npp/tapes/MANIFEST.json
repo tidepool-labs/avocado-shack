@@ -33,8 +33,10 @@
   },
   "pins_sha256": "7b00db1b05bd1f02d7b452d4a3affd7818c1fe3fa77aa55701506790d8098ebf",
   "renderer_commit": null,
-  "runner_version": 1,
+  "renderer_sha256": "c813f584fec9d9e19289fd069219dda4b206abc319e9d0549951a8bd087d73dd",
+  "runner_version": 2,
   "tape_files": {
+    "capture.json": "9eb6c305a92af2a15982f01d736e29ff0186e5264f6983139f8f0f4c5d44adc5",
     "s2.json": "b55ae96f242eba4fd9988739ccad69cf4acbc240f82dab893fa5546b5ee1ed37"
   }
 }

@@ -81,9 +81,11 @@ def audit_research(receipt, facts, pages, *, queries, fetched, sources, seed, la
     # 5. Every kept fact is cited and its quote is in the visible text of the chosen, fetched page.
     chosen = receipt.get("chosen_domain")
     for fact in facts:
-        for key in ("slot", "value", "url", "quote", "retrieved"):
-            if not fact.get(key):
-                problems.append(f"kept fact lacks its {key}")
+        missing = [key for key in ("slot", "value", "url", "quote", "retrieved")
+                   if not isinstance(fact.get(key), str) or not fact[key].strip()]
+        if missing:
+            problems.extend(f"kept fact lacks its {key}" for key in missing)
+            continue
         page = pages.get(fact.get("url"))
         if page is None:
             problems.append(f"kept fact cites a page that was never fetched: {fact.get('url')}")
@@ -92,6 +94,16 @@ def audit_research(receipt, facts, pages, *, queries, fetched, sources, seed, la
             problems.append(f"kept fact is not from the chosen official site: {fact['url']}")
         if not any(fact["quote"] in block for block in page.blocks):
             problems.append(f"kept fact's quote is not in the page's visible text: {fact['quote']!r}")
+        # Whole words, not substrings (a year of 1890 does not support 890).
+        # The extraction verifier must also have supported this exact proposition,
+        # not just some other value or predicate appearing in the same sentence.
+        value = _fold(fact["value"])
+        if not value or not re.search(r"(?<![\w-])" + re.escape(value) + r"(?![\w-])", _fold(fact['quote'])):
+            problems.append("kept fact value is not supported by its visible quote")
+        if not any(row.get("kept") is True and row.get("verifier") == "supports"
+                   and all(row.get(key) == fact[key] for key in ("slot", "value", "url", "quote"))
+                   for row in receipt.get("facts", ())):
+            problems.append("kept fact has no matching supported extraction receipt")
         if fact.get("retrieved") != page.retrieved:
             problems.append("kept fact's retrieval day differs from the page's")
         if fact.get("slot") in research.STORY and NEVER_FACT.search(fact["value"]):

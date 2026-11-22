@@ -3,7 +3,7 @@
 
     python3 -B hass/tests/npp/run_npp.py [--case ID ...] [--strict] [--preview] [--jobs N] [--json]
     python3 -B hass/tests/npp/run_npp.py --update-manifest        # after a reviewed change to cases, tapes or pins
-    python3 -B hass/tests/npp/run_npp.py --record --max-codex 120 --max-images 30   # private host only
+    python3 -B hass/tests/npp/run_npp.py --record --record-to <new-private-file> --max-codex 120 --max-images 30
 
 Replay is deterministic: a virtual clock (never the wall clock), tapes keyed by (asset sha, input sha, ordinal), a tape
 miss is a failure, nothing touches the network or a model. Replies go to an in-memory adapter and a "publish" is a commit
@@ -14,12 +14,13 @@ A case is split into LAYERS and each layer reports `pass`, `fail`, `gap` or `not
   research      the real S4 `research.research` over a synthetic web (G 2026-11-18 14:00: search only to locate the
                 maker's own site; identity must match; facts only from that site, cited and checked against its
                 visible text; not confident means no story) plus the sourcing audit in scripts/hass/npp_eval.py
-  conversation  the real Conversation, job runner and production stages over a taped S2 reading (question paths)
-  card          picture edit, card capture, approval, publish (needs a recorded image-edit tape or --preview)
+  conversation  question paths through the real Conversation, job runner and production stages
+  card          listing or contract path through the picture gate, capture, approval and local commit
 A case passes only when every layer it needs passes. `not-run` is never `pass`; `gap` is a known, named contract gap
 (KNOWN_GAPS). Exit 0 when nothing failed; `--strict` also fails on any `not-run`/`gap` and on a missing dependency.
 """
 import argparse
+import base64
 import concurrent.futures
 import hashlib
 import heapq
@@ -42,11 +43,11 @@ if str(REPO) not in sys.path:
 CASES = HERE / "cases"
 TAPES = HERE / "tapes"
 PHOTO_DIRS = {"npp": CASES / "photos", "chaos": REPO / "hass" / "tests" / "chaos" / "photos"}
-RUNNER_VERSION = 1
+RUNNER_VERSION = 2
 EXPECTED_IDS = tuple(range(1, 39))
 # Each taped call finishes this many virtual seconds after it starts (a case may override with `latency`).
 LATENCY_S = {"search": 1.0, "fetch": 1.5, "extract": 4.0, "verify": 2.0, "identify": 3.0}
-SETTING_KEYS = {"npp": "npp", "houseRender": "houseRender", "photo_polish": "photoPolish", "itemIntake": "itemIntake",
+SETTING_KEYS = {"npp": "npp", "houseRender": "houseRender", "photo_polish": "photo_polish", "itemIntake": "itemIntake",
                 "approvalTtlSeconds": "approvalTtlSeconds"}  # liveSite is a hostname setting, not a flag
 
 # An injected instruction is dropped by whichever S4 check fires first: the hedge/instruction markers or "the quote does
@@ -71,6 +72,10 @@ class ManifestMismatch(ValueError):
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def encode(data):
+    return base64.b64encode(data).decode('ascii')
 
 
 def read_json(path):
@@ -179,6 +184,7 @@ def fingerprints(pinned=None):
         "pins_sha256": sha256((REPO / "hass" / "npp" / "pins.json").read_bytes()),
         "assets_sha256": sha256(json.dumps(pins["assets"], sort_keys=True).encode()),
         "renderer_commit": pins.get("renderer", {}).get("commit"),
+        "renderer_sha256": sha256((REPO / 'hass' / 'screenshot.cjs').read_bytes()),
         "models": {step: [spec.get("model"), spec.get("effort")] for step, spec in sorted(pins["steps"].items())},
     }
     return out
@@ -205,7 +211,7 @@ def check_manifest():
     recorded = read_json(manifest_path())
     now = fingerprints()
     problems = []
-    for key in ("runner_version", "cases_sha256", "pins_sha256", "assets_sha256", "renderer_commit", "models"):
+    for key in ("runner_version", "cases_sha256", "pins_sha256", "assets_sha256", "renderer_commit", "renderer_sha256", "models"):
         if recorded.get(key) != now[key]:
             problems.append(f"{key} differs from tapes/MANIFEST.json")
     held = {p.name: sha256(p.read_bytes()) for p in tape_files()}
@@ -219,16 +225,24 @@ def check_manifest():
 class Tapes:
     """Replay store keyed by (kind, asset sha, input sha, ordinal). A miss is a failure, never a guess."""
 
-    def __init__(self, directory=TAPES):
+    def __init__(self, directory=TAPES, recorded=None):
         self.entries = {}
         self.sources = {}
         for path in sorted(Path(directory).glob("*.json")):
             if path.name == "MANIFEST.json":
                 continue
-            data = read_json(path)
-            self.sources[data["kind"]] = data["source"]
-            for key, entry in data["entries"].items():
-                self.entries[f"{data['kind']}:{key}"] = entry
+            self.add(read_json(path))
+        if recorded:
+            for data in read_json(recorded).values():
+                self.add(data)
+
+    def add(self, data):
+        self.sources[data['kind']] = data['source']
+        for key, entry in data['entries'].items():
+            full = f"{data['kind']}:{key}"
+            if full in self.entries:
+                raise ValueError(f'duplicate tape key {full}')
+            self.entries[full] = entry
 
     def lookup(self, kind, asset, inp, ordinal):
         key = f"{kind}:{asset}:{inp}:{ordinal}"
@@ -242,7 +256,15 @@ class Tapes:
 
 def photo_bytes(ref):
     scheme, _, name = ref.partition(":")
-    return (PHOTO_DIRS[scheme] / name).read_bytes()
+    return fixture_file(PHOTO_DIRS[scheme], name).read_bytes()
+
+
+def fixture_file(directory, name):
+    root = Path(directory).resolve()
+    path = (root / name).resolve(strict=True)
+    if not path.is_relative_to(root) or not path.is_file():
+        raise ValueError('fixture must be a file inside its corpus')
+    return path
 
 
 # ---------------------------------------------------------------- expectations
@@ -432,115 +454,324 @@ def has_research(view):
 # ---------------------------------------------------------------- conversation layer (question paths)
 
 
-def run_conversation(view, tapes, pinned=None):
-    """Real Conversation, job runner and production stages; only the S2 reading, the clock and the transport are taped."""
+class TapeUnavailable(Exception):
+    """An optional recording is absent, not an assertion pass."""
+
+
+def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
+    """Real stages, Conversation and writer, with fixture-only I/O in replay."""
     from unittest.mock import patch
-    from hass import npp, photo_polish, sandbox, sandbox_editor
-    from hass.npp import job, stages
+    from hass import conversation, media, npp, photo_polish, sandbox, sandbox_editor
+    from hass import preview as renderer
+    from hass.npp import research, stages
     from hass.tests import test_npp_job as jf
-    from hass.tests.test_conversation import T0
+    from hass.tests.test_conversation import CHAT, OWNER, T0
+    from hass.tests.test_editor import git
+    from hass.tests.test_npp_undo_journey import _ChatTransport
+    from hass.tests.test_preview import BrowserCase
+
     pinned = pinned or npp.assets()
-    asset = pinned[0]["assets"]["hass-product-identify/SKILL.md"]
-    calls = Counter()
-    ordinals = Counter()
-    bodies = []
-    failures = []
+    asset = pinned[0]['assets']['hass-product-identify/SKILL.md']
+    calls, ordinals = Counter(), Counter()
+    failures, missing, observed, bodies = [], [], [], []
+    inputs = view.get('inputs', {})
+    stubs, polish = inputs.get('stubs', {}), inputs.get('polish', {})
+    clock, generation, running = VirtualClock(), 0, set()
+    world = World(inputs.get('web'), clock, inputs.get('latency'))
+    models = Models(stubs, clock, world, inputs.get('latency'))
 
     def deny(*_a, **_k):
-        raise TapeMiss("a stage reached for something this question case tapes none of")
+        failures.append('unexpected untaped adapter call')
+        raise TapeMiss(failures[-1])
+
+    def replay(kind, pin, digest, create=None, optional=False):
+        ordinal = ordinals[kind, digest]
+        ordinals[kind, digest] += 1
+        try:
+            return tapes.lookup(kind, pin, digest, ordinal)['output']
+        except TapeMiss as error:
+            if create is not None:
+                return recorder.record(kind, pin, digest, ordinal, create)
+            if optional and (not tapes.holds(kind, pin, digest) or
+                             (kind == 'capture' and view['id'] != 24)):
+                missing.append(str(error))
+                raise TapeUnavailable(str(error)) from error
+            failures.append(str(error))  # stages defensively catch exceptions
+            raise
+
+    def identify(photos):
+        photos = tuple(photos)
+        digest = sha256(photos[0]) if len(photos) == 1 else sha256(b''.join(hashlib.sha256(p).digest() for p in photos))
+        calls['identify'] += 1
+        bodies.append(json.dumps({'images': len(photos)}))
+        if 'identify' in stubs:
+            return SimpleNamespace(evidence=stubs['identify'])
+        create = (lambda: recorder.identify(pinned, photos)) if recorder else None
+        return SimpleNamespace(evidence=replay('s2', asset, digest, create, optional=True))
+
+    def research_fixture(*_args, **kwargs):
+        try:
+            result = research.research(pinned, search=world.search, fetch=world.fetch, extract=models.extract,
+                                       verify=models.verify, clock=clock.monotonic,
+                                       **{k: v for k, v in kwargs.items() if k != 'web'})
+        except TapeMiss as error:
+            failures.append(str(error))
+            raise
+        failures.extend(eval_module().audit_research(
+            result.receipt, result.facts, {url: row[0] for url, row in world.pages.items()},
+            queries=world.queries, fetched=world.fetched, sources=json.loads(pinned[1][research.ASSETS + 'sources.json']),
+            seed={k: kwargs['owner_' + k] for k in ('maker', 'town', 'url')},
+            label={'brand': kwargs['label_brand'], 'confidence': kwargs['label_confidence']}))
+        return result
 
     fx = jf.JobTests()
     fx.setUp()
-    fx.settings.update({SETTING_KEYS[k]: v for k, v in view.get("settings", {}).items() if k in SETTING_KEYS})
-    fx.start()
+    fx.transport = _ChatTransport()
+    fx.settings.pop('liveSite', None)  # no live verifier, even for live-shaped fixture rows
+    fx.settings.update({SETTING_KEYS[k]: v for k, v in view.get('settings', {}).items() if k in SETTING_KEYS})
     try:
-        gate = sandbox.Gate(lambda: {"approvals": "private"}, lambda: {("site", "sandbox"): str(fx.repo.wt)})
-        fx.conv.editor = sandbox_editor.SiteEditor(fx.repo.state, gate, deny, clock=lambda: fx.now)
-        fx.conv.previewer = SimpleNamespace(capture=deny)
-        port = npp.stages_for(fx.conv, pinned)
-        if port is None:
-            return ["stages_for returned None: the production stages are not composed"], {}
-        fx.conv.npp.stages = port
+        browser = None
+        if preview or recorder:
+            BrowserCase.make_previewer(SimpleNamespace(repo=fx.repo, env=None))
+            browser = renderer.Previewer(fx.repo.wt, viewports=('phone',))
+        fx.base = fx.repo.head()
+        gate = sandbox.Gate(lambda: {'approvals': 'private'}, lambda: {('site', 'sandbox'): str(fx.repo.wt)})
+        render_asset = sha256((REPO / 'hass' / 'screenshot.cjs').read_bytes())
 
-        def identify(photos):
-            found = []
-            for data in photos:
-                digest = sha256(data)
-                entry = tapes.lookup("s2", asset, digest, ordinals[digest])
-                ordinals[digest] += 1
-                calls["identify"] += 1
-                bodies.append(json.dumps({"images": 1}))
-                found.append(entry["output"])
-            return SimpleNamespace(evidence=found[0])
+        def capture(files, target, out, assets=None):
+            if browser is not None and recorder is None:
+                return browser.capture(files, target, out, assets=assets)
+            hashes = {key: sha256(val if isinstance(val, bytes) else val.encode())
+                      for key, val in {**files, **(assets or {})}.items()}
+            digest = sha256(json.dumps([hashes, target], sort_keys=True).encode())
 
-        port.identifier.read = identify
-        port.selector = None
-        port.mapper = deny
-        current = {"photos": []}
-        fx.fetch = lambda _pid, count: current["photos"][:count]
+            def draw():
+                shot = browser.capture(files, target, out, assets=assets)
+                return {**{k: v for k, v in shot.items() if k != 'png'},
+                        'png_b64': encode(Path(shot['png']).read_bytes()) if shot.get('png') else None}
 
-        def counted(name):
-            def fail(*_a, **_k):
-                calls[name] += 1
-                raise TapeMiss(f"{name} was called in a case that must not call it")
-            return fail
+            try:
+                # Only the case with a complete versioned capture set expects every
+                # ordinal. Other cases can share some rendered inputs without having
+                # a complete recording for their own edit/retry sequence.
+                shot = dict(replay('capture', render_asset, digest, draw if recorder else None, optional=True))
+            except (TapeMiss, TapeUnavailable):
+                return {'ok': False, 'png': None, 'error': 'capture tape unavailable'}
+            png = shot.pop('png_b64')
+            if png:
+                out.parent.mkdir(exist_ok=True)
+                out.write_bytes(base64.b64decode(png, validate=True))
+            return {**shot, 'png': str(out) if png else None}
 
-        observed = []
-        clock = VirtualClock()
-        turns = view["turns"]
+        def start():
+            fx.start()
+            fx.conv.editor = sandbox_editor.SiteEditor(fx.repo.state, gate, deny, clock=lambda: fx.now)
+            fx.conv.previewer = SimpleNamespace(capture=capture)
+            port = npp.stages_for(fx.conv, pinned)
+            if port is None:
+                raise TapeMiss('the production stages are not composed')
+            fx.conv.npp.stages = port
+            port.identifier.read = identify
+            port.selector = (lambda *_a, **_k: stubs['copy']) if 'copy' in stubs else None
+            port.mapper = (lambda *_a, **_k: stubs['edit_map']) if 'edit_map' in stubs else deny
 
-        def play(index, spec):
-            def run():
-                code = fx.job()["job_id"] if fx.job() else "none"
-                fx.now = T0 + timedelta(seconds=spec["at_s"])
-                current["photos"] = [photo_bytes(p) for p in spec.get("photos", [])]
-                before = len(fx.transport.texts)
-                outcome = fx.say(spec["text"].replace("{code}", code), photos=len(current["photos"]))
-                fx.work()
-                observed.append({"turn": index, "result": outcome, "texts": fx.transport.texts[before:]})
-            return run
+        def launch(root, sha, *, log=None, **_kwargs):
+            calls['image_edit'] += 1
+            if generation:
+                calls['image_edit_after_restart'] += 1
+            epoch = generation
+            running.add(sha)
 
-        with patch.object(stages.research_hermes, "run", side_effect=counted("research")), \
-                patch.object(stages.photo_polish, "start", side_effect=counted("image_edit")), \
-                patch.object(stages.picture, "read_text", return_value=""):
-            for index, spec in enumerate(turns):
-                clock.at(spec["at_s"], 0, play(index, spec))
-            clock.run_until(max(spec["at_s"] for spec in turns) + float(view.get("settle_until_s", 0)))
+            def complete():
+                if epoch != generation or photo_polish.decision(root, sha) is not None:
+                    running.discard(sha)
+                    return
+                source = polish.get('source')
+                if source == 'record':
+                    web = media.web_copy(root, sha)
+                    pin = sha256((photo_polish.MODEL + '\n' + photo_polish.PROMPT).encode())
+                    try:
+                        data = base64.b64decode(replay('image', pin, web['web_sha256'],
+                                               (lambda: recorder.edit(Path(web['path']))) if recorder else None,
+                                               optional=True), validate=True)
+                    except TapeUnavailable:
+                        running.discard(sha)
+                        return
+                elif source == 'file':
+                    data = fixture_file(CASES / 'edits', polish['file'].removeprefix('npp:edits/')).read_bytes()
+                elif source == 'error':
+                    data = None
+                else:
+                    deny()
+
+                def transport(_src, out, _timeout):
+                    if data is None:
+                        return {'ok': False, 'code': 'transport'}
+                    out.write_bytes(data)
+                    return {'ok': True}
+
+                photo_polish.run(root, sha, log=log, transport=transport)
+
+            clock.at(clock.monotonic() + polish.get('latency_s', 0), 1, complete)
+
+        class Sender(_ChatTransport):
+            def send_card(self, row, chat, text, png_path, digest):
+                if self.fail:
+                    raise OSError('fixture send outage')
+                super().send_card(row, chat, text, png_path, digest)
+                self.receipts[row] = dict(state='confirmed', png_sha256=digest, provider_guid=f'fixture-card-{row}',
+                                          confirmed_at=fx.now.isoformat())
+
+        fx.transport = Sender()
+        fx.transport.fail = any(spec.get('retry_send') for spec in view['turns'])
+        current = []
+        fx.fetch = lambda _pid, count: current[:count]
+        start()
+
+        def flush():
+            try:
+                fx.flush()
+            except OSError:
+                if not fx.transport.fail:
+                    raise
+
+        def settle():
+            for _ in range(12):
+                flush()
+                if fx.scheduler.steps:
+                    # Run planning immediately; render once the image result is ready, or at the stage deadline.
+                    future, fn, args = fx.scheduler.steps[0]
+                    if fn.__name__ == 'render' and running:
+                        break
+                    fx.scheduler.steps.pop(0)
+                    if missing:
+                        future.set_result(None)
+                        continue
+                    try:
+                        future.set_result(fn(*args))
+                    except (TapeMiss, TapeUnavailable) as error:
+                        future.set_exception(error)
+                elif fx.conv.npp is not None and not fx.conv.npp.running:
+                    flush()
+                    break
+
+        turns = view['turns']
+        for index, spec in enumerate(turns):
+            def play(spec=spec, index=index):
+                nonlocal generation
+                fx.now = T0 + timedelta(seconds=clock.monotonic())
+                before = len(fx.transport.texts), len(fx.transport.cards), len(fx.transport.previews)
+                if spec.get('restart'):
+                    generation += 1
+                    running.clear()
+                    start()
+                if spec.get('retry_send'):
+                    fx.transport.fail = False
+                text = spec.get('text')
+                outcome = None
+                if text is not None:
+                    row = fx.job()
+                    current[:] = [photo_bytes(ref) for ref in spec.get('photos', [])]
+                    code = row['job_id'] if row else 'none'
+                    ref = spec.get('reply_to')
+                    version = fx.version(int(ref[1:])) if ref and row else None
+                    arrival = fx.now
+                    kwargs = {}
+                    if ref:
+                        if 'reply_to' not in conversation.Inbound.__dataclass_fields__:
+                            missing.append('Conversation.Inbound does not yet carry a reply reference')
+                        else:
+                            kwargs['reply_to'] = version['transport_message_id'] if version else 'fixture-undelivered'
+                    msg = conversation.Inbound(f'fixture-{index}', CHAT, OWNER, text.replace('{code}', code),
+                                               received_at=arrival.isoformat(), attachments=len(current), **kwargs)
+                    outcome = fx.conv.handle(msg, forwarded_at=arrival)
+                settle()
+                version = fx.version(fx.job()['current_version']) if fx.job() and fx.job()['current_version'] else None
+                posted = fx.conv.npp_posted(version['change_id']) if outcome == 'approved' and version and version['change_id'] else None
+                observed.append(dict(turn=index, result=outcome, before=before, posted=posted))
+
+            clock.at(spec['at_s'], 0, play)
+            # Pump between turns, including while polish is in flight. A restart invalidates queued work.
+        horizon = max(t['at_s'] for t in turns) + max(80, view.get('settle_until_s', 0))
+        def tick():
+            if not (fx.scheduler.steps or (fx.conv.npp is not None and fx.conv.npp.running) or running):
+                return
+            fx.now = T0 + timedelta(seconds=clock.monotonic())
+            settle()
+        with patch.object(stages.research_hermes, 'run', side_effect=research_fixture), \
+                patch.object(photo_polish, 'start', side_effect=launch), patch.object(photo_polish, '_running', running):
+            for seconds in range(int(horizon) + 1):
+                if any(t['at_s'] - 1 <= seconds <= t['at_s'] + 80 for t in turns):
+                    clock.at(seconds, 2, tick)
+            clock.run_until(horizon)
         row = fx.job()
         db = fx.conv.db
+        versions = [dict(v) for v in db.execute('SELECT * FROM npp_versions ORDER BY n')]
         state = {
-            "state": row["state"] if row else None,
-            "draft_rows": db.execute("SELECT count(*) FROM drafts").fetchone()[0],
-            "version_rows": db.execute("SELECT count(*) FROM npp_versions WHERE state NOT IN ('building')").fetchone()[0],
-            "approvals": db.execute("SELECT count(*) FROM approvals").fetchone()[0],
-            "commits": 0 if fx.repo.head() == fx.base else 1,
-            "cards": len(fx.transport.cards),
+            'state': row['state'] if row else None,
+            'draft_rows': db.execute('SELECT count(*) FROM drafts').fetchone()[0],
+            'version_rows': sum(v['state'] != 'building' for v in versions),
+            'approvals': db.execute('SELECT count(*) FROM approvals').fetchone()[0],
+            'commits': int(git(fx.repo.wt, 'rev-list', '--count', f'{fx.base}..HEAD')),
+            'cards': len(fx.transport.cards),
         }
-        failures += check_conversation(view["expect"], observed, state, calls, bodies, pinned[2], turns)
-        return failures, {"observed": observed, "state": state, "calls": dict(calls)}
+        for index, entry in enumerate(observed):
+            a, b, c = entry['before']
+            x, y, z = observed[index + 1]['before'] if index + 1 < len(observed) else (
+                len(fx.transport.texts), len(fx.transport.cards), len(fx.transport.previews))
+            entry['texts'] = fx.transport.texts[a:x]
+            entry['cards'] = [v[0] for v in list(fx.transport.cards.values())[b:y]]
+            entry['previews'] = [v[0] for v in fx.transport.previews[c:z]]
+        calls.update(world.calls)
+        failures.extend(world.violations)
+        gaps = []
+        if not missing:
+            failures += check_conversation(view['expect'], observed, state, calls, bodies, pinned[2])
+            failures += check_card(view, fx, state, versions, photo_polish.decision(fx.root, row['photo_sha']) if row and row['photo_sha'] else None, gaps)
+        return failures, {'observed': observed, 'state': state, 'calls': dict(calls), 'missing': sorted(set(missing)), 'gaps': gaps}
     finally:
         fx.doCleanups()
 
 
 def reply_kind(text, replies):
     from hass.npp import job
+    from hass.ops.photos import RETAKE
     if text == job.EXPIRED:
         return "expired"
+    if text == RETAKE:
+        return "retake"
+    if text.startswith("Posted"):
+        return "posted"
+    if text in replies['guards'].values() or "already saved" in text.lower():
+        return "guard"
     if text in replies["questions"].values() or text.endswith("?"):
         return "question"
     return "other"
 
 
-def check_conversation(expect, observed, state, calls, bodies, replies, turns):
+def check_conversation(expect, observed, state, calls, bodies, replies):
     bad = []
     for want in expect.get("replies", []):
-        texts = observed[want["turn"]]["texts"] if want["turn"] < len(observed) else []
+        seen = observed[want['turn']]
+        kinds = [(text, reply_kind(text, replies)) for text in seen['texts']]
+        kinds += [(text, 'card') for text in seen['cards']]
+        # Sandbox acknowledgement is expected instead of an actual live send. Check
+        # the real S13 link builder separately, using the committed change ID.
+        for text in seen['previews']:
+            if text.startswith('To undo that,') and 'to hidden' in text:
+                kinds.append((text, 'undo_draft'))
+            elif text.startswith('Saved and checked:') and seen['posted']:
+                kinds.append((seen['posted'], reply_kind(seen['posted'], replies)))
+            else:
+                kinds.append((text, reply_kind(text, replies)))
+        texts = [text for text, _ in kinds]
         if len(texts) != want["count"]:
             bad.append(f"turn {want['turn']}: want {want['count']} reply, got {len(texts)}")
             continue
-        for text in texts:
-            if reply_kind(text, replies) != want["kind"]:
-                bad.append(f"turn {want['turn']}: reply kind {reply_kind(text, replies)!r}, want {want['kind']!r}")
+        for text, kind in kinds:
+            if kind != want["kind"]:
+                bad.append(f"turn {want['turn']}: reply kind {kind!r}, want {want['kind']!r}")
+            text = re.sub(r'(?<=yes )[A-Z0-9]{4,12}(?=-\d+)', '<code>', text, flags=re.I)
             for needle in want.get("has_all", ()):
                 if needle not in text:
                     bad.append(f"turn {want['turn']}: reply lacks {needle!r}")
@@ -551,8 +782,9 @@ def check_conversation(expect, observed, state, calls, bodies, replies, turns):
             if source.startswith("hass-npp-reply questions."):
                 if text != replies["questions"][source.rsplit(".", 1)[1]]:
                     bad.append(f"turn {want['turn']}: not the {source} template")
-    if "total_replies" in expect and sum(len(o["texts"]) for o in observed) != expect["total_replies"]:
-        bad.append(f"total_replies: want {expect['total_replies']}, got {sum(len(o['texts']) for o in observed)}")
+    total = sum(len(o[k]) for o in observed for k in ('texts', 'cards', 'previews'))
+    if "total_replies" in expect and total != expect["total_replies"]:
+        bad.append(f"total_replies: want {expect['total_replies']}, got {total}")
     if "state" in expect and state["state"] != expect["state"]:
         bad.append(f"state: want {expect['state']}, got {state['state']}")
     if expect.get("draft_rows") == "none" and (state["draft_rows"] or state["version_rows"] or state["cards"]):
@@ -561,34 +793,102 @@ def check_conversation(expect, observed, state, calls, bodies, replies, turns):
         bad.append(f"approval_rows: want {expect['approval_rows']}, got {state['approvals']}")
     if "commits" in expect and state["commits"] != expect["commits"]:
         bad.append(f"commits: want {expect['commits']}, got {state['commits']}")
-    bad += check_calls(expect, {"image_edit": calls["image_edit"], "search": 0, "fetch": 0, "extract": 0}
-                       | ({"search": calls["research"]} if calls["research"] else {}))
-    digits = [d for text in turns for d in re.findall(r"\d", text["text"])] if expect.get("cloud_bodies_lack_digits_from") else []
+    bad += check_calls(expect, calls)
     for digit in expect.get("cloud_bodies_lack_digits_from", ()):
         if any(digit in re.findall(r"\d+", body) for body in bodies):
             bad.append(f"no_private_values: digit {digit} reached a cloud request body")
-    del digits
+    return bad
+
+
+def check_card(view, fx, state, versions, decision, gaps):
+    """Bind delivery and publish claims to stored versions and actual committed bytes."""
+    want, bad = view['expect'], []
+    db = fx.conv.db
+    versions = {v['n']: v for v in versions}
+    latest = versions[max(versions)] if versions else {}
+    approved = [v for v in versions.values() if v['state'] == 'approved']
+
+    def same(contract, actual, expected):
+        if actual != expected:
+            bad.append(f'{contract}: want {expected!r}, got {actual!r}')
+
+    same('terminal', state['state'], view['terminal'])
+    for key, actual in [('cards_sent', state['cards']), ('variant', latest.get('image_variant')),
+                        ('approved_version', approved[0]['n'] if len(approved) == 1 else None)]:
+        if key in want:
+            same(key, actual, want[key])
+    for version in want.get('versions', []):
+        n = version['n']
+        if n not in versions:
+            bad.append(f'v{n} missing')
+            continue
+        got = versions[n]
+        for key, value in [('delivered', bool(got['delivered_at'])), ('approved', got['state'] == 'approved'),
+                           ('superseded', got['state'] == 'superseded'), ('state', got['state'])]:
+            if key in version:
+                same(f'v{n}.{key}', value, version[key])
+    for key, value in want.get('polish_decision', {}).items():
+        same(f'polish_decision.{key}', (decision or {}).get(key), value)
+    for v in approved:
+        path = fx.repo.wt / 'storefront-mockup' / v['image_path']
+        if not path.is_file() or sha256(path.read_bytes()) != v['image_sha256']:
+            bad.append('published photo does not match the frozen SHA')
+        receipt = db.execute('SELECT n,outbox_id,transport_message_id FROM npp_approvals WHERE job_id=? AND n=?',
+                             (v['job_id'], v['n'])).fetchone()
+        same('approval receipt binds the delivered version', tuple(receipt) if receipt else None,
+             (v['n'], v['outbox_id'], v['transport_message_id']))
+        approval = db.execute('SELECT draft_hash, approved_at FROM approvals JOIN npp_approvals '
+                              'ON approval_id=id WHERE job_id=? AND n=?', (v['job_id'], v['n'])).fetchone()
+        same('approval receipt binds the draft hash', approval[0] if approval else None, v['draft_hash'])
+        if not (approval and v['delivered_at'] and datetime.fromisoformat(v['delivered_at']) < datetime.fromisoformat(approval[1])):
+            bad.append('approval did not follow delivery')
+    if 'approved_draft_hash' in want:
+        n = int(want['approved_draft_hash'].removeprefix('v'))
+        same('approved_draft_hash', approved[0]['draft_hash'] if len(approved) == 1 else None,
+             versions.get(n, {}).get('draft_hash'))
+    if view['terminal'] == 'published':
+        same('exactly one approved version', len(approved), 1)
+        same('exactly one local publish commit', state['commits'], 1)
+    if 'undo' in want:
+        same('undo does not commit', state['commits'], want['undo']['commits'])
+        pending = db.execute("SELECT change_id FROM drafts WHERE state='proposed'").fetchall()
+        undo = fx.conv.editor.show(pending[0][0]).get('draft', {}) if len(pending) == 1 else {}
+        same('undo proposes only a revert of this publish', undo.get('ops'),
+             [{'op': 'history.revert', 'args': {'changeId': approved[0]['change_id']}}] if len(approved) == 1 else None)
+    if 'sent_at_null_until_s' in want:
+        from hass.tests.test_conversation import T0
+        out = db.execute('SELECT sent_at FROM outbox WHERE id=?', (versions.get(1, {}).get('outbox_id'),)).fetchone()
+        minimum = T0 + timedelta(seconds=want['sent_at_null_until_s'])
+        same('outbox not sent before retry', bool(out and out[0] and datetime.fromisoformat(out[0]) >= minimum), True)
+        same('retry confirms delivery', bool(versions.get(1, {}).get('delivered_at')), want['v1_delivered_after_retry'])
+        same('retry needs fresh yes', not approved, want['v1_needs_fresh_yes'])
+    if 'picture_line' in want:
+        note = next((text for line, *_ in reversed(list(fx.transport.cards.values()))
+                     if (text := re.search(r'picture: [^)]*', line))), None)
+        same('picture_line', note[0] if note else None, want['picture_line'])
+    if 'install_path_re' in want and not re.search(want['install_path_re'], latest.get('image_path') or ''):
+        bad.append('installed image path did not match the fixture pattern')
+
+    # Never report a fixture green when its declared contract has no observer.
+    covered = {'state', 'replies', 'total_replies', 'draft_rows', 'approval_rows', 'commits', 'calls',
+               'checks', 'cards_sent', 'variant', 'versions', 'undo', 'polish_decision', 'approved_version',
+               'approved_draft_hash', 'sent_at_null_until_s', 'v1_delivered_after_retry', 'v1_needs_fresh_yes',
+               'frozen_sha_equals_committed_file', 'preview_sha_equals_frozen_equals_committed', 'picture_line',
+               'install_path_re', 'cloud_bodies_lack_digits_from', 'research'}
+    if unsupported := want.keys() - covered:
+        gaps.append('unobserved expectations: ' + ', '.join(sorted(unsupported)))
     return bad
 
 
 # ---------------------------------------------------------------- case driver
 
 
-def card_reason(view):
-    polish = (view.get("inputs", {}).get("polish") or {}).get("source")
-    if polish == "record":
-        return "the real image edit is taped on the private host only (polish.source=record)"
-    if view["path"] == "question" and view["terminal"] == "retake":
-        return "raw-conditions picture stage needs recorded picture reads and a card capture tape"
-    return "no card-capture tape and no --preview renderer in this run (private host: run_npp.py --strict --preview)"
-
-
-def run_case(case_id, tapes=None, pinned=None, preview=False):
+def run_case(case_id, tapes=None, pinned=None, preview=False, recorder=None):
     from hass import npp
     pinned = pinned or npp.assets()
     tapes = tapes or Tapes()
     case = load_cases()[case_id]
-    asset = pinned[0]["assets"]["hass-product-identify/SKILL.md"]
+
     rows = []
     for variant, view in case_views(case):
         layers = {}
@@ -606,16 +906,12 @@ def run_case(case_id, tapes=None, pinned=None, preview=False):
                     layers["seed"] = "gap" if gap else "pass"
                     if gap:
                         notes["seed"] = [KNOWN_GAPS["seed"]]
-            if view["path"] == "question" and view["terminal"] in ("asking", "expired"):
-                have = all(tapes.holds("s2", asset, sha256(photo_bytes(p))) for t in view["turns"] for p in t.get("photos", [])
-                           ) and any(t.get("photos") for t in view["turns"])
-                if have:
-                    failures, _ = run_conversation(view, tapes, pinned)
-                    layers["conversation"] = "fail" if failures else "pass"
-                    notes["conversation"] = failures
-            if view["path"] != "question" or view["terminal"] not in ("asking", "expired") or "conversation" not in layers:
-                layers["card"] = "not-run"
-                notes["card"] = [card_reason(view)]
+            failures, evidence = run_conversation(view, tapes, pinned, preview=preview, recorder=recorder)
+            layer = 'conversation' if view['path'] == 'question' else 'card'
+            missing = evidence['missing']
+            gaps = evidence['gaps']
+            layers[layer] = 'fail' if failures else 'gap' if gaps else 'not-run' if missing else 'pass'
+            notes[layer] = failures + missing + gaps
         except TapeMiss as miss:
             layers["tape"] = "fail"
             notes["tape"] = [str(miss)]
@@ -634,18 +930,19 @@ def overall(layers):
     return "not-run"
 
 
-def _worker(case_id):  # top level so a process pool can pickle it
-    return run_case(case_id)
+def _worker(args):  # top level so a process pool can pickle it
+    case_id, preview, directory, recorded = args
+    return run_case(case_id, Tapes(directory, recorded), preview=preview)
 
 
-def run_all(ids, jobs=1):
+def run_all(ids, jobs=1, *, preview=False, directory=TAPES, recorder=None, recorded=None):
     ids = sorted(ids)
     if jobs > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
-            return [row for rows in pool.map(_worker, ids) for row in rows]
+            return [row for rows in pool.map(_worker, [(i, preview, directory, recorded) for i in ids]) for row in rows]
     from hass import npp
-    pinned, tapes = npp.assets(), Tapes()
-    return [row for case_id in ids for row in run_case(case_id, tapes, pinned)]
+    pinned, tapes = npp.assets(), Tapes(directory, recorded)
+    return [row for case_id in ids for row in run_case(case_id, tapes, pinned, preview, recorder)]
 
 
 # ---------------------------------------------------------------- dependencies and record mode
@@ -690,6 +987,56 @@ class RecordCaps:
         self.used[kind] += 1
 
 
+class Recorder:
+    """Only the attended CLI attaches paid ports; count calls before dispatch."""
+
+    def __init__(self, caps, *, codex=None, images=None):
+        from hass import cloud_codex, photo_polish
+        self.caps, self.entries = caps, {}
+        self.codex = codex if codex is not None else cloud_codex.Runner()
+        self.images = images if images is not None else photo_polish.HermesTransport()
+
+    def identify(self, pinned, photos):
+        from hass.npp.identify import Identifier
+
+        def request(body):
+            self.caps.take('codex')
+            return self.codex(body)
+
+        reading = Identifier(pinned, runner=request).read(photos)
+        if reading.evidence is None:
+            raise TapeMiss('recorded identification did not return schema-valid evidence')
+        return reading.evidence
+
+    def edit(self, path):
+        import tempfile
+        from hass import photo_polish
+
+        with tempfile.TemporaryDirectory(prefix='npp-edit-') as tmp:
+            out = Path(tmp) / 'edit.img'
+            self.caps.take('images')
+            got = self.images(path, out, photo_polish.TIMEOUT_S)
+            if not (got.get('ok') and out.is_file() and 0 < out.stat().st_size <= photo_polish.MAX_OUTPUT_BYTES):
+                raise TapeMiss('recorded image edit did not return bounded image bytes')
+            return encode(out.read_bytes())
+
+    def record(self, kind, pin, digest, ordinal, create):
+        rows = self.entries.setdefault(kind, {})
+        key = f'{pin}:{digest}:{ordinal}'
+        if key not in rows:
+            rows[key] = {'output': create()}
+        return rows[key]['output']
+
+    def save(self, path):
+        # Exclusive file, private from its first byte; never overwrite an existing tape.
+        data = {kind: {'kind': kind, 'source': 'attended recording', 'entries': entries}
+                for kind, entries in self.entries.items() if entries}
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, sort_keys=True)
+            handle.write('\n')
+
+
 def record_guard(args, environ):
     """Return an error string when --record must not run, else None."""
     if not args.record:
@@ -698,6 +1045,8 @@ def record_guard(args, environ):
         return "--record runs on the private host only (set HASS_NPP_PRIVATE_HOST=1 there); nothing is recorded here"
     if args.max_codex is None or args.max_images is None or args.max_codex < 0 or args.max_images < 0:
         return "--record needs --max-codex and --max-images"
+    if args.max_codex > 120 or args.max_images > 30:
+        return '--record caps cannot exceed 120 Codex and 30 image calls'
     return None
 
 
@@ -715,6 +1064,8 @@ def parse(argv):
     p.add_argument("--record", action="store_true")
     p.add_argument("--max-codex", type=int)
     p.add_argument("--max-images", type=int)
+    p.add_argument('--record-to', type=Path, help='new private JSON bundle (never writes versioned fixtures)')
+    p.add_argument('--recorded', type=Path, help='explicit private JSON recording to overlay in replay')
     return p.parse_args(argv)
 
 
@@ -724,14 +1075,14 @@ def main(argv=None, environ=None):
     if (error := record_guard(args, environ)):
         print(error)
         return 2
-    if args.record:
-        print("record mode is wired to the private host runner only; no recorder is attached in this checkout")
+    if args.jobs < 1 or (args.record and (not args.record_to or args.jobs != 1 or args.update_manifest)):
+        print('record mode needs --record-to, one worker and no manifest update')
         return 2
     if args.update_manifest:
         print(json.dumps(write_manifest(), sort_keys=True))
         return 0
     deps = dependencies()
-    missing = [name for name, ok in deps.items() if not ok and (args.strict or args.preview)]
+    missing = [name for name, ok in deps.items() if not ok and (args.strict or args.preview or args.record)]
     if missing:
         print(json.dumps({"error": "dependency missing", "missing": missing}))
         return 2
@@ -742,8 +1093,16 @@ def main(argv=None, environ=None):
         if unknown:
             print(f"unknown case ids {unknown}")
             return 2
-        rows = run_all(ids, args.jobs)
-    except (ManifestMismatch, ValueError) as error:
+        if args.record and (args.record_to.exists() or args.record_to.resolve().is_relative_to(REPO)
+                            or not args.record_to.parent.is_dir()):
+            raise ValueError('--record-to must be a new file outside the checkout')
+        recorder = Recorder(RecordCaps(args.max_codex, args.max_images)) if args.record else None
+        rows = run_all(ids, args.jobs, preview=args.preview, recorder=recorder, recorded=args.recorded)
+        if recorder is not None:
+            recorder.save(args.record_to)
+        if args.recorded:
+            fingerprint['recorded_sha256'] = sha256(args.recorded.read_bytes())
+    except (ManifestMismatch, ValueError, OSError, RuntimeError) as error:
         print(json.dumps({"error": str(error)}))
         return 2
     counts = Counter(row["result"] for row in rows)

@@ -177,6 +177,15 @@ class AuditTests(unittest.TestCase):
         facts = tuple({**f, "quote": "Miners makes award-winning figs."} for f in self.args["facts"])
         self.assertTrue(any("visible text" in p for p in self.audit(facts=facts)))
 
+    def test_visible_quote_does_not_authorize_an_unsupported_town_or_predicate(self):
+        # Contract: even a verbatim visible sentence cannot authorize an invented town
+        # or reassign a verified phrase to a different slot.
+        fact = self.args["facts"][0]
+        self.assertIn("kept fact value is not supported by its visible quote",
+                      self.audit(facts=[{**fact, "slot": "town", "value": "Invented Town"}]))
+        self.assertIn("kept fact has no matching supported extraction receipt",
+                      self.audit(facts=[{**fact, "slot": "town"}]))
+
     def test_a_fact_without_a_citation_is_caught(self):
         facts = tuple({**f, "url": ""} for f in self.args["facts"])
         self.assertTrue(any("lacks its url" in p for p in self.audit(facts=facts)))
@@ -230,6 +239,12 @@ class RunnerTests(unittest.TestCase):
         row, = run_npp.run_case(1)
         self.assertEqual(row["result"], "not-run")
 
+    def test_taped_honey_card_survives_restart_and_approves_only_the_delivered_version(self):
+        # Case 24: the real stages must reach a frozen/receipted card, survive restart,
+        # then commit exactly the delivered draft and propose (not apply) its undo.
+        row, = run_npp.run_case(24)
+        self.assertEqual(row['result'], 'pass', row['notes'])
+
     def test_strict_fails_on_not_run_and_default_does_not(self):
         # Contract (design 3.4): --strict never skips; the CI replay lists not-run without failing.
         with patch("builtins.print"):
@@ -259,6 +274,28 @@ class RunnerTests(unittest.TestCase):
             caps.take("codex")
         with self.assertRaises(RuntimeError):
             caps.take("images")
+
+    def test_image_record_cap_refuses_a_second_transport_call_and_round_trips_bytes(self):
+        # A cap is enforced at dispatch, not merely counted in the report after spend.
+        calls = []
+        original = Path('synthetic.jpg')
+
+        def edit(src, out, timeout):
+            calls.append((src, timeout))
+            out.write_bytes(b'synthetic edited bytes')
+            return {'ok': True}
+
+        recorder = run_npp.Recorder(run_npp.RecordCaps(0, 1), images=edit, codex=lambda _: self.fail('unexpected Codex'))
+        key = ('image', 'a' * 64, 'b' * 64, 0)
+        recorder.record(*key, lambda: recorder.edit(original))
+        with self.assertRaisesRegex(RuntimeError, 'record cap reached for images'):
+            recorder.edit(original)
+        self.assertEqual(len(calls), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'image-tape.json'
+            recorder.save(path)
+            entry = run_npp.Tapes(recorded=path).lookup(*key)
+            self.assertEqual(run_npp.base64.b64decode(entry['output']), b'synthetic edited bytes')
 
     def test_strict_names_the_missing_dependency(self):
         # Contract (design 3.4): --strict fails, never skips, when a dependency is missing.

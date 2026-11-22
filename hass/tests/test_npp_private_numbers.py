@@ -1,5 +1,6 @@
 """Finance provenance and independent numeric evidence, with synthetic captions/OCR."""
 from decimal import Decimal
+import re
 import unittest
 
 from hass.npp import private_numbers as pn
@@ -19,19 +20,24 @@ class Numbers(unittest.TestCase):
 
     def test_equal_cost_and_price_require_separate_typed_spans(self):
         # Same value is allowed in the structured price, not in any other text.
-        for caption in ('cost $3; sell $3 each; qty 12', 'cost three dollars; sell three dollars each; qty twelve'):
+        for caption, price in (('cost $3; sell $3 each; qty 12', 3),
+                               ('cost three dollars; sell three dollars each; qty twelve', 3),
+                               ('cost 14, selling 14 each, got 12 bags', 14),
+                               ('cost fourteen, selling fourteen each, got twelve bags', 14)):
             with self.subTest(caption=caption):
                 finance = pn.finance(caption)
-                self.assertEqual(finance.selling_price, '3.00 each')
-                self.assertEqual(caption[slice(*finance.price_span)].strip(), caption.split(';')[1].strip())
-                self.assertEqual(finance.private, {3, 300, 12})
+                self.assertEqual(finance.selling_price, f'{price}.00 each')
+                self.assertEqual(caption[slice(*finance.price_span)].strip(), re.split('[;,]', caption)[1].strip())
+                self.assertEqual(finance.private, {price, price * 100, 12})
                 self.assertTrue(finance.has_cost and finance.has_qty)
                 self.assertEqual(finance.public_words, '')
 
     def test_ambiguous_or_unproven_amount_is_missing_not_model_guess(self):
         # A plausible local-model answer cannot bless ambiguous digits or a private cost's unit.
         local = dict(price_cents=500, cost_cents=None, quantity=None)
-        for text in ('4 or 5 bucks, got 4', 'cost $4 per lb; sell $5', 'sell $5 each; sell $6 each', 'sell $5 per basket'):
+        for text in ('4 or 5 bucks, got 4', 'cost $4 per lb; sell $5', 'sell $5 each; sell $6 each',
+                     'sell $5 per basket', 'selling fourteen or fifteen each', 'selling fourteen per basket',
+                     'selling fourteen each; selling fifteen each', 'cost fourteen each; got twelve bags'):
             with self.subTest(text=text):
                 result = pn.finance(text, local_answers=local)
                 self.assertIsNone(result.selling_price)

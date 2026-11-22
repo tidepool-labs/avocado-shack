@@ -199,6 +199,7 @@ class Inbound:
     kind: str = "new"  # new | edited
     received_at: str = ""
     attachments: int = 0  # H12: count only; nothing about the files is kept or downloaded
+    reply_to: str | None = None  # optional channel message ID, not an outbox ID or timestamp
 
 
 class Editor:
@@ -277,9 +278,12 @@ class Outbox:
         return self.db.execute("SELECT * FROM outbox WHERE sent_at IS NULL" + hidden + " ORDER BY id").fetchall()
 
     def flush(self, adapter) -> int:
-        """A raised send error propagates and leaves that row and every later row unsent, except a private row (G's chat):
-        if that cannot be sent it is dropped and logged, so it never holds up an owner reply."""
+        """Ordinary sends retain their ordering. A failed tracked card stays pending, but doesn't block text.
+
+        Report its error after draining; a private text failure is still dropped as before.
+        """
         sent = 0
+        card_error = None
         for row in self.unsent():
             head = self._late(row["reply_to"]) or self._delayed(row["created_at"])  # the longer wait is the one named
             try:
@@ -287,6 +291,9 @@ class Outbox:
                     adapter.send(row["chat"], head + row["text"], json.loads(row["attachments"]))
                 elif not self.job_dispatch(adapter, row, head + row["text"]):
                     continue
+            except listing_jobs.CardSendFailed as failure:
+                card_error = card_error or failure.__cause__
+                continue
             except Exception:
                 if row["chat"] != self.private_chat or self.private_chat is None: raise
                 self.db.execute("DELETE FROM outbox WHERE id = ?", (row["id"],))
@@ -295,6 +302,8 @@ class Outbox:
             self.db.execute("UPDATE outbox SET sent_at = ? WHERE id = ?", (_iso(self._now()), row["id"]))
             self._slow(row)
             sent += 1
+        if card_error is not None:
+            raise card_error
         return sent
 
     def _slow(self, row):

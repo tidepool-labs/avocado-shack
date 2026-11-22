@@ -2,7 +2,6 @@
 from datetime import date, datetime
 from decimal import Decimal
 import hashlib
-import json
 from pathlib import Path
 import re
 import time
@@ -63,15 +62,27 @@ def _site_words(phrase, texts):
     lines = '\n'.join(map(claims.fold, texts))
     towns = set()
     urls = set()
+    # Finance parsing normalizes comma-delimited clauses to semicolons. Require
+    # the town clause to immediately follow the exact owner-named maker.
+    maker_clause = re.compile(r'\s*made by\s+' + re.escape(phrase or '') + r'\s*', re.I)
     for text in texts:
-        for clause in re.split(r'[;\n]', text):
-            if found := re.fullmatch(r'\s*(?:based in|town:)\s+([\w .’\'-]+)\s*', clause, re.I):
+        follows_maker = False
+        for clause in re.split(r'[;,\n]', text):
+            explicit = re.fullmatch(r'\s*(?:based in|town:)\s+([\w .’\'-]+)\s*', clause, re.I)
+            attached = (re.fullmatch(r"\s*([\w ’'-]+?)(?:\.\s+.+|\s+(https://\S+)(?:\s.*)?)\s*", clause, re.I)
+                        if follows_maker else None)
+            if found := explicit or attached:
                 value = found[1].strip(' .')
-                if research._identity_field(value) and live_policy._owner_said(value, lines):
+                if (research._identity_field(value) and live_policy._owner_said(value, lines)
+                        and (explicit or all(word[0].isupper() for word in value.split()))):
                     towns.add(value)
-            if found := re.fullmatch(r'\s*(?:(?:website|site):?\s+)?(https://\S+)\s*', clause, re.I):
-                if research._url(found[1]) and live_policy._owner_said(found[1], lines):
-                    urls.add(found[1])
+            standalone = re.fullmatch(r'\s*(?:(?:website|site):?\s+)?(https://\S+)\s*', clause, re.I)
+            url = standalone[1] if standalone else attached[2] if attached else None
+            # The anchored forms above bind the literal URL. The prose matcher
+            # splits on ':' and '.' and cannot recognize an intact URL.
+            if url and research._url(url):
+                urls.add(url)
+            follows_maker = bool(phrase and maker_clause.fullmatch(clause))
     return (next(iter(towns)) if len(towns) == 1 and phrase else '', next(iter(urls)) if len(urls) == 1 else '')
 
 
@@ -85,7 +96,6 @@ class ProductionStages(Stages):
         self.missing = missing.MissingInfo(pinned)
         self.writer = copy.Writer(pinned)
         self.selector = copy.codex_selector()
-        self.sources = json.loads(pinned[1][research.ASSETS + 'sources.json'])
 
     def catalog(self):
         return load_content(editor._load(str(self.c.sdir))[2] / 'hass' / 'content')
@@ -107,13 +117,11 @@ class ProductionStages(Stages):
     def _research(self, work, maker, town, owner_url, reading):
         if not (maker.research_allowed and town):
             return ()
-        allowed = {entry['domain'] for entry in self.sources['allowlist']
-                   if entry['maker'] == claims.fold(maker.phrase) and entry['added_by'] == 'G' and entry['reviewed_in']}
-        url = research._url(owner_url) if owner_url else research._url('https://' + next(iter(allowed)) + '/') if len(allowed) == 1 else None
+        url = research._url(owner_url) if owner_url else ''
         budget = self._remaining(work) - self.pinned[0]['steps']['copy_select']['timeout_s'] - 10
-        if not url or budget <= 0:
+        if url is None or budget <= 0:
             return ()
-        result = research_hermes.run(self.pinned, web=OfficialPage(url), owner_maker=maker.phrase,
+        result = research_hermes.run(self.pinned, web=OfficialPage(url) if url else research_hermes.Web(), owner_maker=maker.phrase,
                                      owner_town=town, owner_url=url, label_brand=reading.get('brand_on_label') or '',
                                      label_confidence=reading.get('confidence', {}).get('brand', 0), budget=budget)
         return result.story_facts
@@ -137,6 +145,9 @@ class ProductionStages(Stages):
         town, url = _site_words(maker.phrase, texts)
         facts = self._research(work, maker, town, url, reading) if not local else ()
         private = _finance(work, '').private
+        label = reading.get('brand_on_label') if maker.state == 'contradictory' else None
+        if label and (validate._contact(label) or private_numbers.problem(label, private)):
+            label = None
         label_words = [word for word in reading.get('label_words', []) if not validate._contact(word)
                        and not private_numbers.problem(word, private)]
         # The durable listing is a narrow projection, not a caption, full model read, or research transcript.
@@ -144,6 +155,7 @@ class ProductionStages(Stages):
             'name': decision.item, 'category': decision.category or 'general', 'kind': reading.get('kind') or 'non-food',
             'sellingPrice': decision.price.amount, 'priceUnit': 'lb' if decision.price.unit == 'pound' else 'each',
             'maker': maker.phrase if maker.state in ('known', 'new') else None,
+            'contradictoryLabel': label,
             'makerKey': maker.key, 'newMaker': maker.state == 'new', 'town': town, 'url': url,
             'facts': [{**{k: fact[k] for k in ('id', 'slot', 'value', 'url', 'quote')}, 'verdict': 'supports'} for fact in facts],
             'photo': shas[0], 'personOrScreen': reading.get('has_person_or_screen'),
@@ -223,10 +235,17 @@ class ProductionStages(Stages):
             parts['basic_wording'] = {}
         if fresh and 'story' not in written.text:
             parts['story_not_found'] = {}
+        label = None
         if not key and not brand:
-            parts['maker_left_off'] = {}
+            label = listing.get('contradictoryLabel')
+            parts['maker_left_off_label' if label else 'maker_left_off'] = {'brand': label} if label else {}
+        note = compose(self.replies, parts)
+        if label and label not in note:
+            # Case 31b explicitly explains the omission. Keep the one-bracket
+            # cap and omit the optional picture annotation if both won't fit.
+            note = compose(self.replies, {'maker_left_off_label': {'brand': label}}) or note
         return Card(draft, png, frozen.variant, frozen.image_path, frozen.image_sha256,
-                    compose(self.replies, parts), candidate=True)
+                    note, candidate=True)
 
     def _candidate(self, context, listing, finance, makers, key, fresh, url, sha, selector):
         written = self.writer.write(context, selector)

@@ -113,7 +113,7 @@
         "count": 1,
         "kind": "card",
         "answers_turn": 1,
-        "has_all": ["Reply yes <code>-1"]
+        "has_all": ["Post this? Reply yes <code>-1, or tell me what to change."]
       },
       {
         "turn": 2,
@@ -125,7 +125,7 @@
         "count": 1,
         "kind": "card",
         "answers_turn": 3,
-        "has_all": ["Reply yes <code>-3"]
+        "has_all": ["Post this? Reply yes <code>-3, or tell me what to change."]
       },
       {
         "turn": 4,
@@ -195,10 +195,12 @@
   },
   "variants": [
     {
-      "id": "tag"
+      "id": "tag",
+      "title": "Approve by version tag"
     },
     {
       "id": "reply-to",
+      "title": "Approve by reply to the delivered version",
       "turns": [
         {
           "at_s": 0,

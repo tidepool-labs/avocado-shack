@@ -14,11 +14,11 @@ Audited `origin/main` at `37feae1dc5efa6968f90d17a1eda6daed29afd4a` on 2026-11-2
 One row per live source site, not per test instance. The condition is written in the direction that **causes the skip** (or applies the expected-failure mark). Class decorators cover the class's tests; setup and helper skips can affect callers. A dash means the decorator carries no inline reason. The separate fixture and generated-case tables reconcile textual sites with actual test marks. To reproduce the text cross-check from the pinned clone:
 
 ```sh
-git grep -niE 'skipif|skipunless|skiptest|expectedfailure|importorskip|xfail|\.skip\b|collect_ignore|__unittest_(skip|expecting_failure)' -- hass/tests
+git grep -niE 'skipif|skipunless|skiptest|expectedfailure|importorskip|xfail|[.]skip([^[:alnum:]_]|$)|collect_ignore|__unittest_(skip|expecting_failure)' -- hass/tests
 git ls-files 'hass/tests/*.js' 'hass/tests/*.mjs' 'hass/tests/*.ts' 'hass/tests/*.sh'
 ```
 
-The second command found no tracked files of those types. The AST pass classified decorators, calls, and raised exceptions and inspected bare names/attributes for alias candidates. The textual pass also caught synthetic Python embedded in strings.
+The `[.]skip` branch uses a literal dot and requires a non-word character or end of line after `skip`, with no backslashes to escape. The first command should include `hass/tests/test_acceptance_runner.py:680:        @unittest.skip("x")`, a synthetic fixture match. The second command found no tracked files of those types. The AST pass classified decorators, calls, and raised exceptions and inspected bare names/attributes for alias candidates. The textual pass also caught synthetic Python embedded in strings.
 
 | Site | Kind | Skip/mark when | Stated reason (source quote) |
 | --- | --- | --- | --- |

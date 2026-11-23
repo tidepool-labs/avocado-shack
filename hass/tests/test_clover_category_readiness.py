@@ -92,7 +92,7 @@ class CloverCategoryReadinessTests(unittest.TestCase):
         self.assertEqual(self.assert_result(self.invoke(self.args(cache=cache)), 0), [
             "shelf fruit products 2", "shelf fruit mapped yes", "shelf fruit till-items 2",
             "shelf general products 1", "shelf general mapped yes", "shelf general till-items 1",
-            "note till-engine-unsupported general", PASS,
+            PASS,
         ])
 
     def test_c2_1_bad_category_map(self):

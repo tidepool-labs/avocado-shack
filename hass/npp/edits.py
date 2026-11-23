@@ -5,6 +5,12 @@ model mapping (edit.schema.json) or gets one question. His message is never past
 is a field value he set, and public copy still comes from reviewed templates (S5). The selling price is never read from
 his edit text or from a model: it comes only from the code-parsed finance slots (design 1.9), so an edit that names a
 price without one is asked. Each applied patch builds a new listing; the parent listing is never changed (1.3).
+
+HRM-14: a text no form reads as typed is tried once more in its everyday wording (``everyday``): courtesy words and end
+punctuation dropped, quotes around a value removed, and a common lead-in ("rename it to", "swap the supplier to", "move
+that to") swapped for the form's own. Every text a form read before is read exactly as before, a value is still his
+words, and it is still checked by the form that reads it. A text that names an amount or only a unit (``PRICE_EDIT``,
+``UNIT``) is the price form: the price still comes only from the finance slots, so without one it asks for the price.
 """
 from dataclasses import dataclass
 import json
@@ -19,11 +25,35 @@ from hass.skills import intake_simple
 GRAMMAR = "hass-listing-edit/edit-grammar.json"
 SCHEMA = "hass-listing-edit/edit.schema.json"
 PROMPT = "hass-listing-edit/SKILL.md"
-UNITS = {"each": "each", "apiece": "each", "per lb": "lb", "a lb": "lb", "per pound": "lb", "a pound": "lb", "/lb": "lb"}
+UNITS = {"each": "each", "apiece": "each", "per lb": "lb", "a lb": "lb", "per pound": "lb", "a pound": "lb",
+         "/lb": "lb", "/each": "each", "by the pound": "lb", "by the lb": "lb"}
 UNSURE = re.compile(r"\b(?:or|maybe|probably|think|guess|not|either)\b", re.I)
 DIGIT = re.compile(r"\d")
 SENTENCE = re.compile(r"(?<=[.!?])\s+")
 QUOTES = (('"', '"'), ("“", "”"), ("'", "'"))
+# HRM-14 everyday wording (see ``everyday``). Courtesy is only a leading "please" or a trailing "please"/"thanks"; end
+# punctuation is only a trailing "." or "!" (a "?" stays: a question is never read as an edit).
+COURTESY = re.compile(r"^(?:please|pls)\b[\s,]*|[\s,]*\b(?:please|pls|thanks|thank you)$|\s*[.!]+$", re.I)
+QUOTED = re.compile(r"(?P<lead>.*?[\s:])(?:\"(?P<a>[^\"]+)\"|“(?P<b>[^”]+)”)")
+_FIELD_LEAD = {"name": ("name", "call it"), "maker": ("maker", "made by"),
+               "supplier": ("supplier", "from"), "source": ("supplier", "from"),
+               "category": ("category", "category:"), "shelf": ("category", "category:")}
+LEADS = (  # (everyday lead-in, target form and its pinned lead-in)
+    (re.compile(r"(?:change|set|switch|swap|update)\s+(?:the\s+|its\s+)?"
+                r"(?P<field>name|maker|supplier|source|category|shelf)\s+to(?=\s|$)", re.I), None),
+    (re.compile(r"rename\s+(?:it|this|that)\s+(?:to|as)(?=\s|$)", re.I), ("name", "call it")),
+    (re.compile(r"(?:move|put|stick)\s+(?:it|that|this|them)\s+(?:to|in|into|under|on|onto)(?:\s+the)?(?=\s|$)", re.I),
+     ("category", "put it in")),
+    (re.compile(r"make\s+(?:the\s+|its\s+)?(?:description|copy|text|wording|blurb)(?=\s|$)", re.I),
+     ("wording", "make it")),
+    (re.compile(r"use\s+(?:the|my)\s+(?:photo|picture|pic)\s+i\s+(?:just\s+)?sent(?:\s+you)?\b"
+                r"|use\s+my\s+(?:picture|pic)\b", re.I), ("picture", "use my photo")),
+)
+_QUOTED_FIELDS = frozenset({"name", "maker", "supplier", "category"})
+DEGREE = re.compile(r"(?P<lead>make it\s+)?(?:a little bit|a little|a bit|a tad|slightly|bit)\s+", re.I)
+# Only a unit, no amount ("per pound please", "sold by the pound"): the price form without a value.
+UNIT = re.compile(r"(?:(?:make it|sell it|sold|priced)\s+)?"
+                  r"(?P<unit>each|apiece|per lb|a lb|per pound|a pound|by the pound|by the lb)", re.I)
 
 
 @dataclass(frozen=True)
@@ -48,9 +78,45 @@ def _named(value):
     return value.title() if value.islower() else value
 
 
+def _tidy(words):
+    """``words`` without courtesy (a leading "please", a trailing "please"/"thanks") or a trailing "." / "!"."""
+    while (tidier := COURTESY.sub("", words, count=1).strip()) != words:
+        words = tidier
+    return words
+
+
+def _everyday(words):
+    """Normalize a fallback, restricting aliases to the field they actually address."""
+    text = _tidy(words)
+    fields = None
+    if got := QUOTED.fullmatch(text):
+        text = got["lead"] + (got["a"] if got["a"] is not None else got["b"])
+        fields = _QUOTED_FIELDS
+    for rx, target in LEADS:
+        if got := rx.match(text):
+            field, lead = target or _FIELD_LEAD[got['field'].lower()]
+            fields = {field} if fields is None else fields & {field}
+            text = f"{lead} {text[got.end():].lstrip()}".rstrip()
+            break
+    if got := DEGREE.match(text):
+        fields = {"wording"} if fields is None else fields & {"wording"}
+        text = (got["lead"] or "") + text[got.end():]
+    return text, fields
+
+
+def _fallback_match(form_id, rx, text, fields):
+    if fields is not None and form_id not in fields:
+        return None
+    got = rx.fullmatch(text)
+    if got and form_id == "name" and UNSURE.search(got["value"]):
+        return None  # Do not turn a tentative suggestion into a name via a new alias.
+    return got
+
+
 class Grammar:
     """The pinned edit forms. Every example and negative in the asset is re-checked at load: a form that no longer reads
-    its own examples (or reads a negative) refuses the asset, so a grammar edit cannot silently change S10."""
+    its own examples (or reads a negative, as typed or in its everyday wording) refuses the asset, so a grammar edit
+    cannot silently change S10."""
 
     def __init__(self, files):
         doc = json.loads(files[GRAMMAR])
@@ -63,17 +129,24 @@ class Grammar:
                 got = rx.fullmatch(example["text"])
                 if got is None or {k: got.groupdict().get(k) for k in example["captures"]} != example["captures"]:
                     raise ValueError(f"edit form {form['id']} does not read its example")
-            if any(rx.fullmatch(text) for text in form["negatives"]):
+            if any(rx.fullmatch(text) or _fallback_match(form["id"], rx, *_everyday(" ".join(text.split())))
+                   for text in form["negatives"]):
                 raise ValueError(f"edit form {form['id']} reads a negative")
             self.forms.append((form, rx))
         self.fields = tuple(doc["model_mapping"]["fields_allowed"])
 
     def match(self, text):
-        """(form id, captures) of the first form that reads the whole trimmed text, else None."""
+        """(form id, captures) of the first form that reads the whole trimmed text, else None. Only when no form reads
+        it as typed is its everyday wording tried (HRM-14), so a text read before is read exactly as before."""
         words = " ".join(text.split())
         for form, rx in self.forms:
             if got := rx.fullmatch(words):
                 return form["id"], {k: v for k, v in got.groupdict().items() if v is not None}
+        fallback = _everyday(words)
+        if fallback[0] != words:
+            for form, rx in self.forms:
+                if got := _fallback_match(form["id"], rx, *fallback):
+                    return form["id"], {k: v for k, v in got.groupdict().items() if v is not None}
         return None
 
     def supplier(self, text):
@@ -94,7 +167,7 @@ def _form_edit(form, got, finance):
         # itself is never a price source (a model or the public remainder could carry a misread or private number).
         if finance.get("price") is None:
             return Edit(ask="ask_price")
-        unit = UNITS.get(" ".join((got.get("unit") or "").lower().split()))
+        unit = UNITS.get(re.sub(r"\s*/\s*", "/", " ".join((got.get("unit") or "").lower().split())))
         return Edit(patch=(("sellingPrice", finance["price"]),) + ((("priceUnit", unit),) if unit else ()))
     if form == "supplier":
         name = _unquote(value)
@@ -189,6 +262,11 @@ def read(grammar, text, finance, mapper=None):
         return _form_edit(got[0], got[1], finance)
     if name := grammar.supplier(words):
         return Edit(patch=(("supplier", name),))
+    plain = _tidy(words)
+    if (said := intake_simple.PRICE_EDIT.fullmatch(plain) or UNIT.fullmatch(plain)) and not UNSURE.search(words):
+        # HRM-14: he named an amount ("make it four bucks") or only a unit ("per pound please"). That is the price form:
+        # the amount in the text is never read, only the finance slots are, so without a code-parsed price it is asked.
+        return _form_edit("price", {"unit": said["unit"]}, finance)
     if mapper is None or DIGIT.search(words) or intake_simple.QUESTION.match(words) or words.endswith("?"):
         return Edit(ask="ask_edit_unclear")  # digits stay local (PLAN-v2): a text with any digit is never mapped remotely
     try:

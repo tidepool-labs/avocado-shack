@@ -13,9 +13,13 @@ from hass.clover.mapper import parse_item, format_quantity
 REFUSED = "I can read the till but I can't change it yet."
 
 
-def _compared_values(item):
-    return {"price": item.price_cents, "stock": None if item.stock is None else format_quantity(item.stock),
-            "sku": item.sku, "hidden": item.hidden, "name": item.name}
+def _compared_values(entry, raw):
+    item = parse_item(raw)
+    values = {"price": item.price_cents, "stock": None if item.stock is None else format_quantity(item.stock),
+              "sku": item.sku, "hidden": item.hidden, "name": item.name}
+    if entry.get("kind") == "create_item" and entry["after"].get("priceType") == "PER_UNIT":
+        values.update(priceType=raw.get("priceType"), unitName=raw.get("unitName"))
+    return values
 
 
 class ApplyEngine:
@@ -99,7 +103,7 @@ class ApplyEngine:
     def _matches(entry, raw):
         if entry["item_id"] and raw.get("id") != entry["item_id"]:
             return False  # an existing-item change is bound to the approved item id
-        values = _compared_values(parse_item(raw))
+        values = _compared_values(entry, raw)
         categories = {e["id"] for e in raw.get("categories", {}).get("elements", [])}
         return all(values.get(k) == v for k, v in entry["after"].items()) and all(
             r["json"]["elements"][0]["category"]["id"] in categories for r in entry["requests"] if r["path"] == "/category_items")
@@ -111,7 +115,7 @@ class ApplyEngine:
         if mismatch:
             # Keep the approved `after` intact; record only the checked facts
             # from the existing read-back, never the full response.
-            observed = {key: value for key, value in _compared_values(item).items() if key in entry["after"]}
+            observed = {key: value for key, value in _compared_values(entry, raw).items() if key in entry["after"]}
             if any(r["path"] == "/category_items" for r in entry["requests"]):
                 observed["categories"] = [e["id"] for e in raw.get("categories", {}).get("elements", [])
                                           if isinstance(e["id"], str)]

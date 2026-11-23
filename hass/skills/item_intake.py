@@ -134,6 +134,28 @@ def without_unresolved_finance(text):
                      if part.strip() and not unresolved_finance(part))
 
 
+_SELL = r"(?:I['’]?ll\s+|(?:I\s+)?(?:will\s+)?)sell(?:ing)?\b"
+_CAPTION_BREAK = re.compile(
+    r"[;\n]+|(?<!\d),|,(?!\d)|"
+    r"\s+and\s+(?=" + _SELL + r"|(?:I\s+)?(?:bought|paid)\b|\d\b(?!\s+cents?\b))|"
+    r"(?<=\w)[.!]\s+(?=" + _SELL + r")|"
+    r"(?<=\d)\s+(?=sell(?:ing)?\b)|\s*/\s*(?=sell(?:ing)?\b)", re.I)
+_SLASH_COST = re.compile(r"\s*\$\d+(?:\.\d{1,2})?\s*")
+
+
+def caption_spans(caption):
+    """Yield independent caption clauses with offsets into the original text."""
+    start = 0
+    for cut in (*_CAPTION_BREAK.finditer(caption), None):
+        end = cut.start() if cut else len(caption)
+        part = caption[start:end]
+        if cut and cut[0].strip() == '/' and _SLASH_COST.fullmatch(part):
+            part = 'cost ' + part.strip()  # explicitly supported "$3 / sell $5 each" shorthand
+        yield start, end, part
+        if cut:
+            start = cut.end()
+
+
 def caption_answers(caption, extracted=None):
     """Separate typed finance spans from public words. Never called on image output.
 
@@ -147,9 +169,6 @@ def caption_answers(caption, extracted=None):
         extracted, photo = extracted["photo_fields"], True
     if not photo and re.match(r"\s*(?:(?:add|description)\s*:|say\s+it['’]s\b|(?:rename|change the name)\b)", caption, re.I):
         return caption, {}  # literal copy edits are not instructions to change the price
-    # The slash between two amounts is a separator, not the /lb or /each suffix.
-    caption = re.sub(r"^\s*(\$\d+(?:\.\d{1,2})?)\s*/\s*(?=sell(?:ing)?\b)", r"cost \1; ", caption, flags=re.I)
-    will_sell = r"(?:I['’]?ll\s+|(?:I\s+)?(?:will\s+)?)sell(?:ing)?\b"
     basis = r"(?:(?:\s*/\s*|\s+(?:(?:per|a)\s+)?)(?:lbs?|pounds?|each|items?|baskets?))"
     cash = r"(?P<amount>\$\s*[0-9]{1,6}(?:\.(?:[0-9]{1,2}|[0-9]O))?)"
     stock = (r"(?P<count>\d+)\s+(?P<unit>lb|pounds?|items?|each)\s+in\s+stock" if photo else
@@ -160,17 +179,17 @@ def caption_answers(caption, extracted=None):
     uncertain = r"\b(?:minus|negative|or|maybe|about|around)\s*$"
     # Voice dictation sometimes spells the punctuation between a spoken price and the next clause.
     if not photo:
-        caption = re.sub(r"(?<=\w)\s+(?:comma|period)\s+(?=" + will_sell + r"|they\b)", "; ", caption, flags=re.I)
+        caption = re.sub(r"(?<=\w)\s+(?:comma|period)\s+(?=" + _SELL + r"|they\b)", "; ", caption, flags=re.I)
     public, answers, conflicts = [], {}, set()
     model = commerce_answers(extracted)
-    split = r"[,;\n]+" if photo else r"[;\n]+|(?<!\d),|,(?!\d)"
-    for part in re.split(split + r"|\s+and\s+(?=" + will_sell + r"|(?:I\s+)?(?:bought|paid|\d)\b)"
-                         r"|(?<=\w)[.!]\s+(?=" + will_sell + r")", caption, flags=re.I):
+    for _, _, part in caption_spans(caption):
         text = re.sub(r"^(?:I['’]?ll\s+(?=sell\b)|(?:I\s+)?(?:will\s+)?(?:just\s+(?=bought\b))?)",
                       "", part.strip().rstrip(".!"), flags=re.I)
         got, price_basis = {}, ""
-        purchase = re.fullmatch(r"bought\s+(\d+)(?:\s+of\s+(?:these|them))?\s+(?:at|for)\s+(.+)", text, re.I)
-        money = re.fullmatch(r"(?:bought|paid|cost|sell|selling|price|retail)(?:\s+(?:it|them))?(?:\s+(?:for|at))?\s*:?\s+(.+)", text, re.I)
+        purchase = re.fullmatch(r"(?:bought|got|purchased)\s+(\d+)(?:\s+of\s+(?:these|them))?\s+(?:at|for)\s+(.+)", text, re.I)
+        money = re.fullmatch(r"(bought|purchased|paid|costs?|wholesale|sell|selling|(?:sale\s+)?price|retail)"
+                             r"(?:\s+(?:it|them))?(?:\s+(?:for|at))?\s*:?\s+(.+)", text, re.I)
+        retail = re.fullmatch(r"(\$.+?)\s+retail", text, re.I)
         qty = re.fullmatch(r"(?:(bought|got|have|stock|qty|quantity)\s*:?\s*)?(\d+(?:\.\d+)?)(?:\s+(of them|of these|each|[a-z]+))?", text, re.I)
         if purchase:
             count = _parse_count(purchase[1])
@@ -188,11 +207,14 @@ def caption_answers(caption, extracted=None):
         elif match := re.fullmatch(stock, text, re.I):
             got.update(qty=int(match["count"]), qty_unit=UNIT_WORDS[match["unit"].lower()])
         elif money:
-            key = "cost" if re.match(r"bought|paid|cost", text, re.I) else "price"
-            value = _parse_money(money[1])
+            key = "cost" if money[1].lower() in {"bought", "purchased", "paid", "cost", "costs", "wholesale"} else "price"
+            value = _parse_money(money[2])
             if value is not None: got[key] = value
+        elif retail:
+            value = _parse_money(retail[1])
+            if value is not None: got["price"] = value
         remaining = part.strip()
-        if not photo and not got and not (purchase or qty or money):
+        if not photo and not got and not (purchase or qty or money or retail):
             # Retain the owner words before a finance tail, without accepting a
             # prefix of a malformed amount or guessing between two values.
             if match := re.search(r"(?:^|\s+)(?:and\s+)?" + stock + r"$", text, re.I):
@@ -213,7 +235,10 @@ def caption_answers(caption, extracted=None):
                 amount = re.sub(r"(?<=\.[0-9])o$", "0", match["amount"], flags=re.I)
                 value = _parse_money(amount)
                 before = text[:match.start()].strip()
-                if value is not None and len(units) <= 1 and not re.search(uncertain, before, re.I):
+                # A price-shaped suffix does not override a nearby unresolved
+                # finance cue ("don't sell $5 each", "costs about $3").
+                if (value is not None and len(units) <= 1 and not re.search(uncertain, before, re.I)
+                        and (match["cost"] or not unresolved_finance(re.sub(r"^new item\b", "", before, flags=re.I)))):
                     key = "cost" if match["cost"] else "price"
                     got[key] = value
                     if key == "price": price_basis = next(iter(units), "")
@@ -235,13 +260,20 @@ def caption_answers(caption, extracted=None):
             got.pop("qty_unit", None)
         if price_basis == "basket": got["price_unit"] = "basket"  # no public basket basis in the current catalog schema
         elif price_basis: got["sold_by"] = price_basis
-        elif "price" in got and text.lower().endswith(" each"): got["sold_by"] = "item"
+        elif "price" in got:
+            # Units in cost and quantity clauses do not set the sale basis.
+            priced = retail[1] if retail else text
+            if unit := re.search(basis + r"$", priced, re.I):
+                parsed_unit = _parse_sold_by(unit[0])
+                if parsed_unit:
+                    got["sold_by"] = parsed_unit
+                elif unit[0].lower().endswith(("basket", "baskets")):
+                    got["price_unit"] = "basket"
         if remaining and remaining != part.strip(): public.append(remaining)
         for key, value in got.items():
             if key in answers and answers[key] != value: conflicts.add(key)
             answers[key] = value
-    if re.search(r"(?:/|per\s+)(?:lb|pound)\b", caption, re.I): answers["sold_by"] = "pound"
-    elif re.search(r"(?:/|per\s+)(?:each|item)\b", caption, re.I): answers["sold_by"] = "item"
+
     out = {k: v for k, v in {**answers, **model}.items() if k not in conflicts}
     if "qty" in out and answers.get("qty_unit"): out["qty_unit"] = answers["qty_unit"]
     return "; ".join(public), out

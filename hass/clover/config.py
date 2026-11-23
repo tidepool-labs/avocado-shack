@@ -3,16 +3,15 @@
 Closed keys, no defaults for the three identity keys, every number range-checked. A problem is reported by field name only, never by value
 (the block holds a path to the token, not the token). An absent block means "Clover not configured" and nothing else changes.
 
-`liveApproved` (default false) is about WRITES only: Hass has no Clover write path yet, and when one comes it needs `liveApproved: true`
-for `environment: production` plus a separate write token (a later card, behind its own approval). Read-only use of production (`check`,
-`sync`, the owner's stock questions) works with `liveApproved: false`; that is how the real store is connected (HASS-CLOVER-2).
+Omit `writeMode` to stay read-only. `dry-run` rehearses with the read token;
+`live` requires all existing write gates, even in sandbox.
 """
 from dataclasses import dataclass, field
 
 from hass.clover.mapper import CATEGORIES, MAX_PRICE_CENTS
 
 KEYS = {"environment", "merchantId", "tokenFile", "liveApproved", "dailyWriteCap", "priceConfirmPct", "maxPriceCents",
-        "lowStockThreshold", "maxStock", "categoryMap", "writeTokenFile", "writes", "siteStock", "siteStockWords"}
+        "lowStockThreshold", "maxStock", "categoryMap", "writeTokenFile", "writes", "siteStock", "siteStockWords", "writeMode"}
 REQUIRED = ("environment", "merchantId", "tokenFile")
 
 
@@ -41,6 +40,7 @@ class CloverConfig:
     writes: bool = False
     site_stock: str = "off"
     site_stock_words: str = "words"
+    write_mode: str | None = None
 
     @property
     def writes_allowed(self):
@@ -64,6 +64,7 @@ def from_settings(raw):
         "tokenFile": isinstance(raw.get("tokenFile"), str) and 0 < len(raw["tokenFile"]) <= 4096 and raw["tokenFile"].startswith("/"),
         "writeTokenFile": isinstance(raw.get("writeTokenFile", ""), str) and ("writeTokenFile" not in raw or (raw["writeTokenFile"].startswith("/") and raw["writeTokenFile"] != raw.get("tokenFile"))),
         "writes": type(raw.get("writes", False)) is bool,
+        "writeMode": raw.get("writeMode") in ("dry-run", "live"),
         "siteStock": raw.get("siteStock", "off") in ("off", "auto", "draft"),
         "siteStockWords": raw.get("siteStockWords", "words") in ("words", "limited"),
         "liveApproved": type(raw.get("liveApproved", False)) is bool,
@@ -77,7 +78,10 @@ def from_settings(raw):
     bad += [k for k, ok in checks.items() if not ok and k not in bad and (k in raw or k in REQUIRED)]
     if bad:
         raise ConfigProblem(bad)
-    return CloverConfig(raw["environment"], raw["merchantId"], raw["tokenFile"], raw.get("dailyWriteCap", 20), raw.get("priceConfirmPct", 25),
+    cfg = CloverConfig(raw["environment"], raw["merchantId"], raw["tokenFile"], raw.get("dailyWriteCap", 20), raw.get("priceConfirmPct", 25),
                         raw.get("maxPriceCents", MAX_PRICE_CENTS), raw.get("lowStockThreshold", 5), raw.get("maxStock", 100_000), dict(cmap),
                         raw.get("liveApproved", False), raw.get("writeTokenFile", ""), raw.get("writes", False),
-                        raw.get("siteStock", "off"), raw.get("siteStockWords", "words"))
+                        raw.get("siteStock", "off"), raw.get("siteStockWords", "words"), raw.get("writeMode"))
+    if cfg.write_mode == "live" and not cfg.writes_allowed:
+        raise ConfigProblem(["writeMode"])
+    return cfg

@@ -15,8 +15,8 @@ import unicodedata
 
 from hass.clover.mapper import CATEGORIES, MapError, norm_name
 
-CATEGORY_CODES = dict(zip(CATEGORIES, ("FRU", "VEG", "DAI", "EGG", "MEA", "PAN", "DRK", "BRD", "FLW")))
 GENERAL = "GEN"
+CATEGORY_CODES = dict(zip(CATEGORIES, ("FRU", "VEG", "DAI", "EGG", "MEA", "PAN", "DRK", "BRD", "FLW"))) | {"general": GENERAL}
 PREFIX = "AS"
 SLUG_MAX = 18
 SKU_RE = re.compile(r"AS-[A-Z]{3}-[A-Z0-9]+(?:-[A-Z0-9]+)*-(?:0[1-9]|[1-9][0-9])")

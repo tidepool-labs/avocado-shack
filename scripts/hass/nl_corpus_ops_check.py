@@ -69,16 +69,14 @@ def main(argv=None):
             if op is None:
                 reasons["unknown-op"] = None
                 continue
-            try:
-                problems, missing = check_args(op, call["args"], content.makers, None)
-            except TypeError:
-                # The current image validator needs a site directory even for
-                # a well-formed image path. An uncheckable call is a finding.
+            args = call["args"]
+            problems, missing = check_args(op, args, content.makers, None)
+            missing_required += bool(missing)
+            # Without a site directory the image file itself cannot be checked,
+            # so even a well-formed image path is an uncheckable call: a finding.
+            if problems or (isinstance(args, dict) and any(
+                    name in op.args and op.args[name].kind == "image" for name in args)):
                 reasons["arg-problem"] = None
-            else:
-                missing_required += bool(missing)
-                if problems:
-                    reasons["arg-problem"] = None
         findings.extend(reason + suffix for reason in reasons)
 
     print(f"cases {len(corpus)}")

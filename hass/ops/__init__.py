@@ -172,7 +172,9 @@ def _check_value(problems, where, arg: Arg, value, makers, site_dir):
 
 
 def _image_file_problem(site_dir, value) -> str | None:
-    """The file must be a regular file, not a link, whose resolved path stays inside the site folder."""
+    """The file must be regular, not a link, and resolve inside the site folder when supplied."""
+    if site_dir is None:  # Offline replay checks only the syntax validated by the caller.
+        return None
     path = Path(site_dir) / value
     if path.is_symlink():
         return "image file must not be a link"

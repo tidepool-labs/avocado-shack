@@ -100,8 +100,14 @@ class GoldenDriftTest(unittest.TestCase):
             self.assert_report(self.invoke(["--content", str(alternate), *self.args[2:]]), **check)
 
     def test_c2_2_golden_unreadable(self):
-        # A JSON parse alone misses absent or non-string fields; errors name only the file.
         self.write_products(PRODUCT)
+        # An empty glob must not turn a missing or empty directory into a zero-card pass.
+        for tag, directory in (("absent", self.root / "absent"), ("empty", self.goldens)):
+            with self.subTest(directory=tag):
+                self.assert_report(self.invoke([*self.args[:-1], str(directory)]), goldens=0, matched=0,
+                                   findings=["FAIL no-goldens"])
+
+        # A JSON parse alone misses absent or non-string fields; errors name only the file.
         check = dict(goldens=1, matched=0, findings=["FAIL golden-unreadable reference.json"])
         for tag, raw in (("malformed", b"{"), ("non-UTF-8", b"\xff")):
             with self.subTest(input=tag):

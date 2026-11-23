@@ -140,9 +140,14 @@ class NlCorpusOpsCheckTests(unittest.TestCase):
         )
         self.assert_fixture_report(self.check(), 1, 3, 0, "FAIL arg-problem bad")
 
-        # No site directory is supplied; an uncheckable image must not pass or crash.
+        # No site directory is supplied, so offline replay checks image syntax only:
+        # a well-formed path passes, a malformed one is still a finding (a checker
+        # that skipped image args entirely would pass both).
         self.fixture_corpus(case("image", call("product.edit", id="photo-product-001",
                                               image="assets/products/photo-product-001.webp")))
+        self.assert_fixture_report(self.check(), 0, 1, 0)
+        self.fixture_corpus(case("image", call("product.edit", id="photo-product-001",
+                                              image="../outside.webp")))
         self.assert_fixture_report(self.check(), 1, 1, 0, "FAIL arg-problem image")
 
     def test_c3_usage_exit_2(self):

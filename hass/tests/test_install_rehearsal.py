@@ -165,6 +165,50 @@ class InstallRehearsalTests(unittest.TestCase):
                 self.assert_failed("readback", reason)
 
     def test_rollback_requires_byte_equality_and_private_mode(self):
+        # A blind restore (or a length-only guard) would clobber a same-size edit
+        # made after readback. Observe the actual scratch bytes before cleanup.
+        real_read_text = Path.read_text
+        observed = {}
+
+        def drift_after_readback(path, *args, **kwargs):
+            text = real_read_text(path, *args, **kwargs)
+            candidate = text.encode("utf-8")
+            drift = candidate.replace(MARKER.encode(), b"synthetic-change")
+            self.assertEqual(len(drift), len(candidate))
+            self.assertNotEqual(drift, candidate)
+            path.write_bytes(drift)
+            observed.update(path=path, drift=drift)
+            return text
+
+        real_exit = TemporaryDirectory.__exit__
+
+        def observe_cleanup(temp, *exc):
+            observed["final"] = observed["path"].read_bytes()
+            return real_exit(temp, *exc)
+
+        with (
+            self.subTest(fault="drift after readback"),
+            patch.object(Path, "read_text", drift_after_readback),
+            patch.object(TemporaryDirectory, "__exit__", observe_cleanup),
+        ):
+            self.assert_failed("rollback", "config drifted; restore refused")
+            self.assertEqual(observed["final"], observed["drift"])
+
+        # An erroneous refusal result must not hide an overwrite in the built-in trial.
+        restore_if_current = REHEARSAL._restore_if_current
+
+        def overwrite_on_refusal(config, candidate, backup):
+            if restore_if_current(config, candidate, backup):
+                return True
+            REHEARSAL.replace(config, ".rollback.tmp", backup.read_bytes())
+            return False
+
+        with (
+            self.subTest(fault="drift fixture overwritten despite refusal"),
+            patch.object(REHEARSAL, "_restore_if_current", overwrite_on_refusal),
+        ):
+            self.assert_failed("rollback", "drift fixture was not refused and preserved")
+
         # A whitespace-only change is semantically equal but not an exact restore.
         real_replace = Path.replace
         for wrong_bytes, reason in (

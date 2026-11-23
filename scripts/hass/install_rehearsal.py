@@ -37,6 +37,14 @@ def replace(config, stage_name, payload):
         os.close(fd)
 
 
+def _restore_if_current(config, candidate, backup):
+    # Only a byte check in a private fixture, not synchronization with writers.
+    if config.read_bytes() != candidate:
+        return False
+    replace(config, ".rollback.tmp", backup.read_bytes())
+    return True
+
+
 def private(path):
     return stat.S_IMODE(path.stat().st_mode) == PRIVATE_MODE
 
@@ -78,7 +86,8 @@ def main(argv=None):
             expected = json.loads(original)
             expected["settings"].update(dict.fromkeys(SWITCHES, True))
             expected_json = json.dumps(expected, sort_keys=True)
-            replace(config, ".switch.tmp", expected_json.encode() + b"\n")
+            candidate = expected_json.encode() + b"\n"
+            replace(config, ".switch.tmp", candidate)
             if config.read_bytes() == original:
                 return fail(step, "replace did not change the config")
             print("PASS edit")
@@ -97,11 +106,21 @@ def main(argv=None):
             print("PASS readback")
 
             step = "rollback"
-            replace(config, ".rollback.tmp", backup.read_bytes())
+            if not _restore_if_current(config, candidate, backup):
+                return fail(step, "config drifted; restore refused")
             if config.read_bytes() != original:
                 return fail(step, "restored bytes do not match the original")
             if not private(config):
                 return fail(step, "config does not have mode 0600")
+
+            # A separate trial changes only the unrelated extension marker.
+            drifted = candidate.replace(b'"synthetic-marker"', b'"synthetic-change"')
+            if drifted == candidate or len(drifted) != len(candidate):
+                return fail(step, "invalid drift fixture")
+            drift_config = root / "config.drifted"
+            write_private(drift_config, drifted)
+            if _restore_if_current(drift_config, candidate, backup) or drift_config.read_bytes() != drifted:
+                return fail(step, "drift fixture was not refused and preserved")
             step = "cleanup"
     except OSError:
         # Do not echo exception text: it may contain paths or fixture contents.

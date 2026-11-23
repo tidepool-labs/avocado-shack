@@ -81,6 +81,9 @@ def report(events, now, findings):
         if start is None:
             continue
         end = events[step].get("end")
+        if start > now or (end is not None and end > now):
+            findings.append("bad-time")
+            continue
         if index:
             previous_start = events[STEPS[index - 1]].get("start")
             if previous_start is None or start < previous_start:
@@ -93,7 +96,7 @@ def report(events, now, findings):
 
         elapsed = (now if end is None else end) - start
         if elapsed < timedelta(0):
-            findings.append("bad-time" if end is None else "end-before-start")
+            findings.append("end-before-start")
             # A malformed interval has no usable duration; do not print a negative clock.
             elapsed = timedelta(0)
         else:

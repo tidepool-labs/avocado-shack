@@ -1,6 +1,8 @@
 """S7 fixture checks use assembled draft records and independently supplied image/DOM evidence."""
 from dataclasses import replace
 from datetime import datetime, timezone
+from hashlib import sha256
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -20,10 +22,10 @@ class ValidateTests(unittest.TestCase):
         self.asset = 'assets/products/photo-0123456789abcdef.jpg'
         self.sha = 'a' * 64
         self.product = dict(self.copy.text, brand=claims.PLACEHOLDER, displayBrand='From the market', category='pantry',
-                            image=self.asset, sellingPrice='3.00 each')
+                            id='photo-product-001', image=self.asset, sellingPrice='3.00 each')
         self.draft = {'ops': [{'op': 'product.add', 'args': {'sellingPrice': '3.00 each', 'brand': claims.PLACEHOLDER,
                                                          'name': self.copy.text['name']}}],
-                      'records': [{'collection': 'products', 'before': None, 'after': self.product, 'key': 'test-jam'}],
+                      'records': [{'collection': 'products', 'before': None, 'after': self.product, 'key': self.product['id']}],
                       'assets': {self.asset: 'sha256:' + self.sha}}
         self.nodes = [self.copy.text['name'], '$3.00 each', self.copy.text['description']]
         self.kw = dict(finance=self.finance, origin=validate.ORIGIN_UNKNOWN, makers={}, live_site=True,
@@ -76,6 +78,29 @@ class ValidateTests(unittest.TestCase):
         self.assertIn('money', self.verdict(picture_read='Plum Jam $3.00').problems)
         self.assertIn('picture-binding', self.verdict(rendered_sha='c' * 64).problems)
         self.assertIn('price-provenance', self.verdict(finance=finance('cost $3')).problems)
+
+    def test_card_cannot_bind_another_record_key(self):
+        # Contract: captured evidence must describe the product the draft will write.
+        # Regression: checking only after.id lets a stale record key name another product.
+        png = (Path(__file__).parent / 'fixtures' / 'media' / 'pixel.png').read_bytes()
+        capture = dict(productId=self.product['id'], pngSha256=sha256(png).hexdigest(),
+                       fragments=[{'text': text, 'role': None} for text in self.nodes],
+                       priceIndex=1, makerCount=None)
+        shot = dict(card_evidence=capture, card_png=png, card_nodes=None, price_index=None)
+        self.assertEqual(self.verdict(**shot).problems, ())
+        self.draft['records'][0]['key'] = 'photo-product-002'
+        self.assertEqual(self.verdict(**shot).problems, ('listing-records',))
+
+    def test_matching_product_identity_still_requires_an_editor_id(self):
+        # Contract: the write key must exist and meet the editor's ID grammar.
+        # Regression: equality alone accepts two missing or identically malformed IDs.
+        row = self.draft['records'][0]
+        del row['key'], self.product['id']
+        self.assertEqual(self.verdict().problems, ('listing-records',))
+        for value in ('', 'Photo-product-001', 'photo_product_001', 'a' * 65):
+            with self.subTest(value=value):
+                row['key'] = self.product['id'] = value
+                self.assertEqual(self.verdict().problems, ('listing-records',))
 
     def test_assembled_record_cannot_override_checked_copy_or_legacy_gates(self):
         # Valid text alone is insufficient: S7 must check the exact records that apply uses.

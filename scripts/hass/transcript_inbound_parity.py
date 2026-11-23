@@ -131,14 +131,18 @@ def main(argv=None):
 
     if not findings:
         expected, found = windows
-        matched = sum(count for key, count in found.items() if key in expected)
-        missing = sum(count for key, count in expected.items() if key not in found)
+        matched = sum((expected & found).values())
+        missing = sum((expected - found).values())
+        transcript_only = sum(count for key, count in found.items() if key not in expected)
+        surplus = sum(count for key, count in (found - expected).items() if key in expected)
         print(f"inbound-done {sum(expected.values())}")
         print(f"matched {matched}")
-        print(f"note transcript-only {sum(found.values()) - matched}")
+        print(f"note transcript-only {transcript_only}")
         print(f"unparsed {unparsed}")
         if missing:
             findings.append(f"inbound-not-in-transcript {missing}")
+        if surplus:
+            findings.append(f"transcript-surplus {surplus}")
 
     for finding in findings:
         print(f"FAIL {finding}")

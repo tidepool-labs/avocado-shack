@@ -31,14 +31,14 @@ class PilotReceiptNewTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.out = self.root / "receipt.json"
 
-    def cli(self, *args, umask=-1):
+    def cli(self, *args, umask=-1, cwd=None):
         result = subprocess.run([sys.executable, "-B", str(SCRIPT), *args],
-                                cwd=self.root, capture_output=True, text=True,
-                                timeout=10, umask=umask)
+                                cwd=self.root if cwd is None else cwd,
+                                capture_output=True, text=True, timeout=10, umask=umask)
         return result.returncode, result.stdout, result.stderr
 
-    def create(self, path):
-        return self.cli("--listing", "1", "--out", str(path))
+    def create(self, path, *, cwd=None):
+        return self.cli("--listing", "1", "--out", str(path), cwd=cwd)
 
     def assert_refused(self, result, reason):
         self.assertEqual(result, (1, "", f"error: {reason}\n"))
@@ -125,6 +125,28 @@ class PilotReceiptNewTests(unittest.TestCase):
                                     "output parent allows group or other access")
                 self.assertEqual(list(directory.iterdir()), [])
 
+    def test_worktree_destinations_are_refused_without_echo(self):
+        # A mode-0700 leaf isn't private enough inside Git. Checking only for
+        # directories or starting at cwd would miss the relative linked worktree.
+        for marker_type in ("directory", "linked file"):
+            worktree = self.root / marker_type
+            worktree.mkdir(mode=0o700)
+            private = worktree / MARKER
+            private.mkdir(mode=0o700)
+            marker = worktree / ".git"
+            if marker_type == "directory":
+                marker.mkdir()
+            else:
+                marker.write_text("gitdir: synthetic\n", encoding="utf-8")
+            for path, cwd, dest in (
+                (worktree / "direct.json", self.root, worktree / "direct.json"),
+                (private / "absolute.json", self.root, private / "absolute.json"),
+                ("relative.json", private, private / "relative.json"),
+            ):
+                with self.subTest(marker_type=marker_type, path=dest.name):
+                    self.assertEqual((self.create(path, cwd=cwd), dest.exists()),
+                                     ((1, "", "error: output must be outside Git worktrees\n"), False))
+
     def test_invalid_arguments_are_refused_without_echo(self):
         # Default argparse errors echo arguments and exit 2; listing 4 must not write.
         for listing in ("4", MARKER):
@@ -136,6 +158,12 @@ class PilotReceiptNewTests(unittest.TestCase):
         for path in ("", f"{self.root}/", f"{self.root}/.", f"{self.root}/..", f"{MARKER}\n"):
             self.assert_refused(self.create(path), "output path must name a new file with a printable basename")
         self.assertEqual(list(self.root.iterdir()), [])
+        # Normalizing away an actual parent traversal would silently permit a write.
+        child = self.root / MARKER
+        child.mkdir(mode=0o700)
+        result = self.create(f"{child.name}/../{self.out.name}")
+        self.assertEqual((result, list(self.root.iterdir())),
+                         ((1, "", "error: output parent must not contain '..'\n"), [child]))
 
     def test_help_shows_required_options(self):
         # Help is an informational command, not a failed receipt write.

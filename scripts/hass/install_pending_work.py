@@ -52,19 +52,28 @@ def inspect_store(path, checks):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, epilog="Supply at least one store.")
+    parser = argparse.ArgumentParser(description=__doc__, epilog="A clean subset reports PARTIAL PASS.")
+    parser.add_argument("--complete", action="store_true",
+                        help="require --conversation, --relay and --inbox for clearance")
     for store in CHECKS:
         parser.add_argument(f"--{store}", type=Path, metavar="FILE", help=f"{store} SQLite store (read only)")
     stores = vars(parser.parse_args(argv))
-    failed = not any(stores.values())
+    complete = stores.pop("complete")
+    missing = [store for store, path in stores.items() if path is None]
+    failed = len(missing) == len(CHECKS)
     if failed:
         print("FAIL no-store")
+    if complete and missing:
+        for store in missing:
+            print(f"FAIL missing-store {store}")
+        failed = True
     for store, checks in CHECKS.items():
         if stores[store] is not None:
             for line in inspect_store(stores[store], checks):
                 print(line)
                 failed |= line.startswith("FAIL ")
-    print(f"{'FAIL' if failed else 'PASS'} install_pending_work")
+    result = "FAIL" if failed else "PARTIAL PASS" if missing else "PASS"
+    print(f"{result} install_pending_work")
     return int(failed)
 
 

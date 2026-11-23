@@ -54,13 +54,13 @@ class PilotApprovalTests(unittest.TestCase):
             db.execute(query, params)
 
     def draft(self, draft_hash=HASH, *, change=CHANGE, state="verified", reason=None,
-              replaced_by=None, created=CREATED, checked: str | None = CHECKED,
-              commit: str | None = COMMIT):
+              replaced_by=None, created=CREATED, proposed: str | None = PROPOSED,
+              checked: str | None = CHECKED, commit: str | None = COMMIT):
         self.insert('''INSERT INTO drafts(change_id, code, state, reason, replaced_by, draft_hash, base,
                                           sender, chat, summary, ops_json, created_at, proposed_at, checked_at, "commit")
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (change, "fixture-code", state, reason, replaced_by, draft_hash, BASE,
-                     *PRIVATE, created, PROPOSED, checked, commit))
+                     *PRIVATE, created, proposed, checked, commit))
 
     def approve(self, draft_hash=HASH, base=BASE, *, change=CHANGE, approved=APPROVED, expires=EXPIRES):
         self.insert('''INSERT INTO approvals(change_id, draft_hash, base, provider_id, sender, chat, approved_at, expires_at)
@@ -176,6 +176,36 @@ class PilotApprovalTests(unittest.TestCase):
         self.approve()
         lines = self.assert_verdict("NOT-BOUND multiple")
         self.assertEqual(len([line for line in lines if line.startswith("approval ")]), 2)
+
+    def test_yes_before_proposal_not_bound(self):
+        # Matching hashes and an unexpired yes are insufficient: use the selected draft's
+        # proposal, not its creation or a replaced row's proposal, and compare instants.
+        for change, approved, replaced_proposed, expected in (
+            ("early", CREATED, CREATED, (1, "NOT-BOUND before-proposal")),
+            ("equal", "1999-12-31T19:01:00-05:00", CHECKED, (0, "BOUND")),
+        ):
+            with self.subTest(change=change):
+                self.draft(change=change)
+                self.draft(change=change, replaced_by="fixture-replaced", proposed=replaced_proposed)
+                self.approve(change=change, approved=approved)
+                result = subprocess.run([sys.executable, "-B", str(SCRIPT), *self.args(change)],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual((result.returncode, result.stdout.splitlines()[-1]), expected)
+
+    def test_chronology_requires_a_timezone_on_every_timestamp(self):
+        # A missing proposal or naive ISO value must not bind by assuming a timezone.
+        for change, proposed, approved, expires in (
+            ("missing-proposed", None, APPROVED, EXPIRES),
+            ("naive-proposed", PROPOSED[:19], APPROVED, EXPIRES),
+            ("naive-approved", PROPOSED, APPROVED[:19], EXPIRES),
+            ("naive-expires", PROPOSED, APPROVED, EXPIRES[:19]),
+            ("all-naive", PROPOSED[:19], APPROVED[:19], EXPIRES[:19]),
+        ):
+            with self.subTest(change=change):
+                self.draft(change=change, proposed=proposed)
+                self.approve(change=change, approved=approved, expires=expires)
+                self.assert_verdict("NOT-BOUND invalid-chronology", change=change)
 
     def test_expiry_is_relative_to_approval_time_not_the_report_clock(self):
         # An approval at expiry is valid; an instant after it isn't, regardless of text order.

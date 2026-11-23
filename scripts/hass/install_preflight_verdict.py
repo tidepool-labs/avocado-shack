@@ -10,6 +10,11 @@ import argparse
 import json
 from pathlib import Path
 
+if __package__:
+    from .npp_preflight import SKILLS, STAGES
+else:
+    from npp_preflight import SKILLS, STAGES
+
 
 SWITCHES = ("npp", "houseRender", "photo_polish")
 READINESS = ("status", "present", "missing", "pins", "allowlist_count", "skills", "acceptance_fail_0")
@@ -29,12 +34,14 @@ def _reject_constant(_):
     raise ValueError
 
 
-def _complete(group):
-    if not isinstance(group, dict):
+def _complete(group, roster):
+    if not isinstance(group, dict) or group.get("missing") != []:
         return False
     present = group.get("present")
-    return (group.get("missing") == [] and isinstance(present, list)
-            and bool(present) and all(isinstance(path, str) and path for path in present))
+    if not isinstance(present, list) or not all(isinstance(path, str) for path in present):
+        return False
+    paths = set(present)
+    return len(paths) == len(present) and paths == set(roster)
 
 
 def _ready_report(stdout, exit_status):
@@ -49,9 +56,9 @@ def _ready_report(stdout, exit_status):
         return None, "FAIL: invalid first JSON line"
     if report.get("status") != "READY":
         return None, "FAIL: preflight not READY"
-    if not _complete(report):
+    if not _complete(report, STAGES):
         return None, "FAIL: incomplete stages"
-    if not _complete(report.get("skills")):
+    if not _complete(report.get("skills"), SKILLS):
         return None, "FAIL: incomplete skills"
     pins = report.get("pins")
     if (not isinstance(pins, dict) or pins.get("manifest_present") is not True

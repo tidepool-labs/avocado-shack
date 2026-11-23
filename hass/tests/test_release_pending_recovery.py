@@ -42,6 +42,7 @@ class ReleasePendingRecoveryTests(unittest.TestCase):
         self.receipt = self.run_dir / "receipt.json"
         self.host = self.run_dir / "host.before"
         self.document = {
+            "runtime": str(self.runtime),
             "phase": "switching", "old": "0123456789abcdef" * 2 + "01234567",
             "target": "fedcba9876543210" * 2 + "fedcba98",
         }
@@ -198,7 +199,7 @@ class ReleasePendingRecoveryTests(unittest.TestCase):
         # Raw JSON dumps, Git errors, full hashes, or path echoes expose these canaries.
         self.make_run()
         self.document.update(
-            runtime=str(self.runtime), host=str(self.root / "original-host-fixture"),
+            host=str(self.root / "original-host-fixture"),
             chat="fixture-chat-canary", sender="fixture-sender-canary",
         )
         self.write_receipt()
@@ -221,8 +222,22 @@ class ReleasePendingRecoveryTests(unittest.TestCase):
         self.write_host()
         alias = self.root / "receipts-alias"
         alias.symlink_to(self.receipts, target_is_directory=True)
-        self.assert_report(self.invoke(*self.args(receipts=alias)), 1, STOP, RUN, PHASE, OLD,
-                           TARGET, HOST)
+        runtime_alias = self.root / "runtime-alias"
+        runtime_alias.symlink_to(self.runtime, target_is_directory=True)
+        args = self.args(runtime=runtime_alias, receipts=alias)
+        self.assert_report(self.invoke(*args), 1, STOP, RUN, PHASE, OLD, TARGET, HOST)
+
+        # Containment in the receipts root is not checkout identity. Trusting
+        # containment alone would show another checkout's rollback SHAs.
+        for identity in (str(self.root / "other-runtime"), str(self.git_dir), None):
+            with self.subTest(identity=identity):
+                if identity is None:
+                    self.document.pop("runtime")
+                else:
+                    self.document["runtime"] = identity
+                self.write_receipt()
+                self.assert_report(self.invoke(*args), 1, STOP, RUN,
+                                   "FAIL receipt-runtime-mismatch", HOST)
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ def reject_constant(_value):
     raise ValueError("not a JSON constant")
 
 
-def report_receipt(path, fail):
+def report_receipt(path, runtime, fail):
     try:
         mode = os.lstat(path).st_mode
     except OSError:
@@ -52,6 +52,10 @@ def report_receipt(path, fail):
         receipt = None
     if not isinstance(receipt, dict):
         fail("receipt-malformed")
+        return
+    # The writer records the canonical checkout path, not its Git dir.
+    if receipt.get("runtime") != str(runtime):
+        fail("receipt-runtime-mismatch")
         return
 
     phase = receipt.get("phase")
@@ -83,11 +87,12 @@ def report_pending(runtime, receipts, fail):
         if not runtime.is_dir():
             fail("not-git")
             return
+        runtime = runtime.resolve()
         git = subprocess.run(
             ["git", "-C", str(runtime), "rev-parse", "--absolute-git-dir"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
         fail("not-git")
         return
 
@@ -128,7 +133,7 @@ def report_pending(runtime, receipts, fail):
     if not directory:
         fail("run-missing")
         return
-    report_receipt(run / "receipt.json", fail)
+    report_receipt(run / "receipt.json", runtime, fail)
     report_host_before(run / "host.before", fail)
 
 

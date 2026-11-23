@@ -102,6 +102,64 @@ class NppCaseNewTest(unittest.TestCase):
         self.assertIn("usage:", usage.stderr)
         self.assertNotIn("PASS", usage.stdout)
 
+    def write_ledger(self, *rows):
+        ledger = self.cases.parent / "findings.tsv"
+        with ledger.open("x", encoding="utf-8") as out:
+            out.write("id\tweek\tstage\tclass\tsummary\tcase_id\tcard\tstate\treason\n")
+            for serial, (stage, summary, state, card, reason) in enumerate(rows, 1):
+                out.write(f"F-2040-W09-{serial}\t2040-W09\t{stage}\tfixture\t{summary}\t\t{card}\t{state}\t{reason}\n")
+        ledger.chmod(0o600)
+        return ledger
+
+    def from_finding(self, ledger, serial):
+        return self.run_cli("--cases", str(self.cases), "--day", DAY, "--slug", "fixture-regression",
+                            "--finding", f"F-2040-W09-{serial}", "--ledger", str(ledger))
+
+    def test_c5_from_finding(self):
+        # Distinct summaries catch using the wrong row; S8/S9 and S13 catch
+        # off-by-one mapping, and the schema-valid title must retain the pointer.
+        examples = [("S3", "Synthetic question", "question", "asking"),
+                    ("S8", "Synthetic rendering", "listing", "published"),
+                    ("S9", "Synthetic card", "contract", "card_out"),
+                    ("S10", "Synthetic edits", "contract", "card_out"),
+                    ("S11", "Synthetic approval", "contract", "card_out"),
+                    ("S12", "Synthetic installation", "contract", "card_out"),
+                    ("S13", "Synthetic confirmation", "contract", "card_out")]
+        ledger = self.write_ledger(*[(stage, summary, "open", "", "") for stage, summary, _, _ in examples])
+        schema = assets.load(self.cases / "case.schema.json")
+        highest = max(assets.load(p)["id"] for p in self.cases.glob("case-*.json"))
+        for serial, (stage, summary, path, terminal) in enumerate(examples, 1):
+            with self.subTest(stage=stage):
+                name = f"case-{highest + serial:02d}-npp-20400229-{serial}-fixture-regression.json"
+                self.assert_pass(self.from_finding(ledger, serial), name)
+                case = assets.load(self.cases / name)
+                self.assertEqual(assets.validate(schema, case), [])
+                self.assertEqual(case["title"], f"{summary} [F-2040-W09-{serial}]")
+                self.assertEqual((case["path"], case["terminal"]), (path, terminal))
+
+    def test_c6_refuse_closed(self):
+        # Testing only state == 'closed' would accept a resolved repeat.
+        ledger = self.write_ledger(("S3", "Synthetic resolved question", "closed", "fixture-card", "resolved"),
+                                   ("S3", "Synthetic resolved repeat", "repeat", "fixture-repeat", "resolved"))
+        before = set(self.cases.iterdir())
+        for serial in (1, 2):
+            with self.subTest(serial=serial):
+                result = self.from_finding(ledger, serial)
+                self.assert_fail(result)
+                self.assertIn("closed", result.stdout.splitlines()[-1])
+                self.assertEqual(set(self.cases.iterdir()), before)
+
+    def test_c7_ledger_untouched(self):
+        # A successful scaffold must not close the finding, rewrite unchanged
+        # bytes, or invoke the ledger update path and create a lock sidecar.
+        ledger = self.write_ledger(("S9", "Synthetic first finding", "closed", "fixture-card", "resolved"),
+                                   ("S9", "Synthetic pending repeat", "repeat", "", ""))
+        before = (ledger.read_bytes(), ledger.stat().st_mtime_ns, set(ledger.parent.iterdir()))
+        highest = max(assets.load(p)["id"] for p in self.cases.glob("case-*.json"))
+        self.assert_pass(self.from_finding(ledger, 2),
+                         f"case-{highest + 1:02d}-npp-20400229-1-fixture-regression.json")
+        self.assertEqual((ledger.read_bytes(), ledger.stat().st_mtime_ns, set(ledger.parent.iterdir())), before)
+
 
 if __name__ == "__main__":
     unittest.main()

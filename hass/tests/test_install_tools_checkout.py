@@ -70,12 +70,26 @@ class InstallToolsCheckoutTests(unittest.TestCase):
         lines = [*(f"FAIL {reason}" for reason in reasons), "FAIL install_tools_checkout"]
         self.assertEqual(self.invoke(**kwargs), (1, lines, ""))
 
-    def test_clean_clone_lists_sorted_tracked_tool_digests(self):
-        # A glob of the wrong paths, raw URLs, or full digests breaks the report.
+    def test_checkout_requires_selected_tool_bytes(self):
+        # Porcelain can be quiet for an assume-unchanged helper. A hash of
+        # only the checkout would then certify edited bytes under the pin.
         expected = [f"install_tool {path} {sha256(TOOLS[path]).hexdigest()[:12]}"
                     for path in sorted(TOOLS)]
         expected.append("PASS install_tools_checkout")
         self.assertEqual(self.invoke(origin=ORIGIN + "/"), (0, expected, ""))
+
+        path = "scripts/hass/install_z.py"  # The earlier helper still matches.
+        self.git(self.repo, "update-index", "--assume-unchanged", "--", path)
+        (self.repo / path).write_bytes(b"# changed fixture\n")
+        self.assertEqual(self.git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assert_failed("dirty")  # Asserts no partial receipt rows.
+
+    def test_empty_selected_helper_set_refuses(self):
+        # A clean commit without helpers is not a complete checkout receipt.
+        self.git(self.repo, "rm", "--quiet", "--", *TOOLS)
+        self.git(self.repo, "commit", "--quiet", "--message", "no tools")
+        self.sha = self.git(self.repo, "rev-parse", "HEAD").strip()
+        self.assert_failed("dirty")
 
     def test_invalid_sha_is_a_named_failure(self):
         # Neither argparse's exit 2 nor rev-parse abbreviation is a valid pin.
@@ -128,6 +142,14 @@ class InstallToolsCheckoutTests(unittest.TestCase):
         self.git(self.repo, "add", "--all")
         self.git(self.repo, "commit", "--quiet", "--message", "replace with link")
         self.sha = self.git(self.repo, "rev-parse", "HEAD").strip()
+        self.assert_failed("dirty")
+
+        # Git can check a symlink out as an ordinary file of identical bytes.
+        # Byte equality alone must not qualify that non-ordinary tree entry.
+        self.git(self.repo, "config", "core.symlinks", "false")
+        file.unlink()
+        file.write_bytes(PRIVATE.encode())
+        self.assertEqual(self.git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
         self.assert_failed("dirty")
 
     def test_usage_error_keeps_argparse_exit_code_without_echoing_values(self):

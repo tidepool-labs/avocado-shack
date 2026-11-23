@@ -76,16 +76,30 @@ class MakerPrecheckTests(unittest.TestCase):
         # Blank lines don't take an index, and malformed rows don't stop later checks.
         cases = ('{"item":', '[]', '{}', '{"item":1,"caption":"text"}',
                  '{"item":"text","caption":null}', '{"item":"a","caption":"b","extra":NaN}')
-        paths = self.fixture("\n".join(("", row(), " \t", *cases, row(ITEM))), b'{"makers":{}}')
+        # Last-wins decoding would screen both ambiguous rows like the healthy final row.
+        control = row(ITEM)
+        duplicates = (
+            control.replace('"caption":', f'"caption": {json.dumps(CAPTION)}, "caption":'),
+            control[:-1] + r', "extra":[{"private":1,"pr\u0069vate":2}]}',
+        )
+        paths = self.fixture("\n".join(("", row(), " \t", *cases, *duplicates, control)), b'{"makers":{}}')
         self.assert_report(self.run_cli(*paths), 1, "caption 1 maker new",
-                           *(f"FAIL bad-line {i}" for i in range(2, 8)), "caption 8 maker absent")
+                           *(f"FAIL bad-line {i}" for i in range(2, 10)), "caption 10 maker absent")
 
     def test_c2_3_unreadable_makers(self):
         # A schema or read error must not silently fall back to an empty catalogue.
         cases = (None, b"\xff", b"{", b"[]", b"{}", b'{"makers":[]}',
                  b'{"makers":{"first":{"name":"Sample"},"second":false}}',
                  b'{"makers":{"first":{}}}', b'{"makers":{"first":{"name":4}}}')
-        for index, raw in enumerate(cases):
+        # Last-wins decoding would still yield the known maker, even with duplicate metadata.
+        duplicates = (
+            CATALOG.replace(b'"makers":', b'"makers": {}, "makers":'),
+            CATALOG.replace(b'"first":', b'"first": {"name":"Other"}, "first":'),
+            CATALOG.replace(b'"name":', b'"name": "Other", "name":'),
+            CATALOG.replace(b'"name":', b'"extra": [{"x":1,"x":2}], "name":'),
+        )
+        self.assert_report(self.run_cli(*self.fixture(row(), CATALOG)), 0, "caption 1 maker known")
+        for index, raw in enumerate((*cases, *duplicates)):
             with self.subTest(case=index):
                 self.assert_report(self.run_cli(*self.fixture(row(), raw)), 1, "FAIL unreadable makers")
         captions, makers = self.fixture(row())

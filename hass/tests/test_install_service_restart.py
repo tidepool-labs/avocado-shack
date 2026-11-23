@@ -76,6 +76,16 @@ class InstallServiceRestartTests(unittest.TestCase):
             with self.subTest(reason=reason, first=first, second=second):
                 self.assert_findings(self.invoke(first, second), f"FAIL {reason} {SERVICE}")
 
+    def test_active_service_requires_positive_pid(self):
+        # Same-PID and freshness checks alone let two zero PIDs pass.
+        for first_pid, second_pid in ((0, 0), (0, 27), (27, 0)):
+            with self.subTest(first_pid=first_pid, second_pid=second_pid):
+                findings = [f"FAIL missing-process {SERVICE}"]
+                if first_pid != second_pid:
+                    findings.append(f"FAIL pid-changed {SERVICE}")
+                self.assert_findings(self.invoke(service(pid=first_pid), service(pid=second_pid)),
+                                     *findings)
+
     def test_inactive_or_wrong_substate_in_either_capture_fails(self):
         # ActiveState alone (or testing just the later capture) is insufficient.
         self.assert_findings(self.invoke(service(active="inactive"), service()),

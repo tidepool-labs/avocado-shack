@@ -178,6 +178,19 @@ class NppStateInvariantsTests(unittest.TestCase):
         self.write("UPDATE npp_versions SET card_png_sha = NULL")
         self.assert_report(self.invoke(), TOTALS, "delivered-without-card 1")
 
+        # Contract: a cardless version with a non-NULL but unreadable delivery time and no
+        # approval is still a delivery claim. A bug that only counts parseable times would pass it.
+        # An approved version is reported once, by approval-undelivered, not also here.
+        approvals = [*TOTALS[:3], "approvals 0"]
+        self.write("DELETE FROM npp_approvals")
+        for value in ("", "not-a-timestamp", "2000-01-01T00:00:00"):
+            with self.subTest(value=value):
+                with closing(sqlite3.connect(self.store)) as db, db:
+                    db.execute("UPDATE npp_versions SET delivered_at = ?", (value,))
+                self.assert_report(self.invoke(), approvals, "delivered-without-card 1")
+        self.write("UPDATE npp_versions SET delivered_at = NULL")
+        self.assert_report(self.invoke(), approvals)
+
     def test_c2_8_approved_without_draft(self):
         # A valid conversation draft link cannot replace the version's hash.
         self.clean_jobs()

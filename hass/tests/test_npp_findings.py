@@ -6,6 +6,7 @@ import fcntl
 import io
 import json
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -231,9 +232,15 @@ class FindingsTests(unittest.TestCase):
     def table(self):
         return [(row["id"], row["stage"], row["class"], row["summary"], row["state"]) for row in self.rows()]
 
+    def guard_refs(self, line="not ready"):
+        summaries = [row["summary"] for row in self.rows() if row["summary"].startswith("guard ")]
+        self.assertTrue(all(re.fullmatch(r"guard [a-p]{16}: guard reply [a-z ]+ sent", s) for s in summaries))
+        return [s.split(":")[0] for s in summaries if s.endswith(f"reply {line} sent")]
+
     def test_c6_import(self):
-        # C6: one finding per job and class from each summary fact and each outgoing guard line; no finding for
-        # a single question, no edits, an owner echoing a guard line, or ordinary replies; duplicates collapse.
+        # C6: one finding per job and class from each summary fact and one per outgoing guard reply, even two in
+        # one chat; no finding for a single question, no edits, an owner echoing a guard line, or ordinary
+        # replies; duplicate job rows and names collapse.
         guards = json.loads(GUARDS.read_text(encoding="utf-8"))["guards"]
         stages = [dict(stage="S1", ms=400, outcome="ok"), dict(stage="S6", ms=75000, outcome="fallback"),
                   dict(stage="S2", ms=6000, outcome="fallback")]
@@ -253,11 +260,16 @@ class FindingsTests(unittest.TestCase):
         self.cli("close", prior, "--reason", "fixture-only", "--card", "card-demo")
         week = "2099-W03"
         output = self.import_export(path, week)
-        ids = [f"F-{week}-{n}" for n in range(1, 15)]
-        self.assertEqual(output, [*ids, "PASS npp_findings import added=14 existing=0"])
-        self.assertEqual(self.table()[1:], [(finding, *row) for finding, row in zip(ids, [
-            ("S11", "guard-not-ready", "chat h: guard reply not ready sent", "open"),
-            ("S11", "guard-replaced", "chat hi: guard reply replaced sent", "open"),
+        ids = [f"F-{week}-{n}" for n in range(1, 16)]
+        self.assertEqual(output, [*ids, "PASS npp_findings import added=15 existing=0"])
+        guard_rows = [(row[0], row[1], row[2], row[4]) for row in self.table()[1:4]]
+        self.assertEqual(guard_rows, [(ids[0], "S11", "guard-not-ready", "open"),
+                                      (ids[1], "S11", "guard-not-ready", "open"),
+                                      (ids[2], "S11", "guard-replaced", "open")])
+        first, second = self.guard_refs()
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(self.guard_refs("replaced")), 1)
+        self.assertEqual(self.table()[4:], [(finding, *row) for finding, row in zip(ids[3:], [
             ("S6", "slow", "job cgde: a work segment passed the time-to-card target", "repeat"),
             ("S2", "fallback-label-local", "job cgde: the card used fallback label-local", "open"),
             ("S6", "fallback-picture-raw", "job cgde: the card used fallback picture-raw", "open"),
@@ -270,9 +282,9 @@ class FindingsTests(unittest.TestCase):
             ("S10", "edit", "job cafe: edited after a card was delivered", "open"),
             ("S3", "question", "job fggd: asked more than one question", "open"),
             ("S5", "drift-copy-select", "job fggd: step copy-select returned a model other than its pin", "open"),
-        ])])
+        ], strict=True)])
         self.assertEqual(stat.S_IMODE(self.ledger.stat().st_mode), 0o600)
-        self.assertEqual(self.cli("report", "--week", week)[0], "open=14 closed=1 repeat=2")
+        self.assertEqual(self.cli("report", "--week", week)[0], "open=15 closed=1 repeat=2")
 
     def test_c7_idempotent(self):
         # C7: a second import of one export, a later export repeating its jobs, a closed import and
@@ -291,12 +303,27 @@ class FindingsTests(unittest.TestCase):
         self.assertEqual(self.import_export(path), ["PASS npp_findings import added=0 existing=4"])
         self.assertEqual(self.ledger.read_bytes(), closed)
 
-        # Next week's export lists every receipt again; only the new job and the new week's guard line are new.
-        later = self.export(*rows, self.job_row("f00d", edits=1), name="later.jsonl")
+        # Next week's export lists every receipt again; only the new job is new. The same guard reply in a
+        # re-made export of that day stays one finding even when the export numbers its chat differently.
+        replaced = json.loads(GUARDS.read_text(encoding="utf-8"))["guards"]["replaced"]
+        later = self.export(self.event_row(chat="chat-2", text=replaced), *rows[1:], self.job_row("f00d", edits=1),
+                            name="later.jsonl")
         self.assertEqual(self.import_export(later, "2099-W03"),
-                         ["F-2099-W03-1", "F-2099-W03-2", "PASS npp_findings import added=2 existing=3"])
-        self.assertEqual([row["class"] for row in self.rows()][-2:], ["guard-replaced", "edit"])
+                         ["F-2099-W03-1", "PASS npp_findings import added=1 existing=4"])
         self.assertEqual(self.rows()[-1]["summary"], "job fggd: edited after a card was delivered")
+
+        # Another export in the same week reusing chat-1 for a different conversation, or the same reply on
+        # another day, is a separate guard reply and is never suppressed.
+        other = self.export(self.event_row(direction="in", text="Change the name"),
+                            self.event_row(text=replaced), name="other.jsonl")
+        next_day = self.export(self.event_row(text=replaced) | dict(day="2099-01-13"), name="next-day.jsonl")
+        for path, finding in ((other, "F-2099-W03-2"), (next_day, "F-2099-W03-3")):
+            with self.subTest(export=path.name):
+                self.assertEqual(self.import_export(path, "2099-W03"),
+                                 [finding, "PASS npp_findings import added=1 existing=0"])
+                self.assertEqual(self.import_export(path, "2099-W03"),
+                                 ["PASS npp_findings import added=0 existing=1"])
+        self.assertEqual(len(set(self.guard_refs("replaced"))), 3)
 
         settled = self.ledger.read_bytes()
         racing = self.export(*rows, self.job_row("abcd", slow=True), self.job_row("dcba", questions=2),
@@ -313,8 +340,8 @@ class FindingsTests(unittest.TestCase):
         self.assertEqual(sorted(trailers), ["PASS npp_findings import added=0 existing=6"] * 3
                          + ["PASS npp_findings import added=2 existing=4"])
         self.assertTrue(self.ledger.read_bytes().startswith(settled))
-        self.assertEqual([row["id"] for row in self.rows()][-2:], ["F-2099-W03-3", "F-2099-W03-4"])
-        self.assertEqual(len(self.rows()), len({(row["class"], row["summary"], row["week"]) for row in self.rows()}))
+        self.assertEqual([row["id"] for row in self.rows()][-2:], ["F-2099-W03-4", "F-2099-W03-5"])
+        self.assertEqual(len(self.rows()), len({(row["class"], row["summary"]) for row in self.rows()}))
 
     def test_import_rejects_oversized_stage_duration_without_traceback(self):
         self.add()
@@ -330,14 +357,16 @@ class FindingsTests(unittest.TestCase):
 
     def test_c8_redacted_only(self):
         # C8: only the job id, the named summary facts and a matched guard key build a summary; raw or extra
-        # fields, unredacted names and unmatched text never reach the ledger, and a bad export is refused whole.
+        # fields, unredacted names, plain lowercase names that are not reviewed pipeline words, and unmatched
+        # text never reach the ledger, and a bad export is refused whole.
         canaries = ("Canary Farm Lane", "canary@example.invalid", "canary.example.invalid", "7541",
                     "canarysender", "Canary-Mixed")
         event = self.event_row(text="Canary Farm Lane said hello") | dict(
             text="canary@example.invalid", sender="canarysender", kind="Canary-Mixed")
+        plain = ["canarysender", "canary_sender", "picture-canarysender"]
         job = self.job_row("feed", fallbacks=["canary.example.invalid", "price-7541", "Canary-Mixed",
-                                              "-".join(["canary"] * 8), "[redacted]"],
-                           drifted_steps=["canary.example.invalid"], failed_checks=["canarysender"],
+                                              "-".join(["canary"] * 8), "[redacted]", *plain],
+                           drifted_steps=["canary.example.invalid", *plain], failed_checks=["canarysender"],
                            approval_role="Canary Farm Lane", evidence="recorded", note="canary@example.invalid")
         job |= dict(title="Canary Farm Lane", cost="7541")
         result = subprocess.run(self.command("import", "--export", str(self.export(event, job)), "--week", WEEK),
@@ -358,6 +387,7 @@ class FindingsTests(unittest.TestCase):
                     json.dumps(self.job_row("feed", edits="7541")) + "\n",
                     json.dumps(self.job_row("feed") | dict(summary=None)) + "\n",
                     json.dumps(self.event_row(chat="canarysender")) + "\n",
+                    json.dumps(self.event_row() | dict(day="Canary Farm Lane")) + "\n",
                     json.dumps(dict(cost="7541")) + "\n"):
             with self.subTest(bad=bad):
                 path = self.root / "bad.jsonl"

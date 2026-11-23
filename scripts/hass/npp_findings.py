@@ -8,18 +8,25 @@ closure so the repeat count cannot fall when its card is resolved.
 `import` drafts open findings from the redacted weekly review export
 (npp_review_export.py job summaries and event rows). It reads only the job id,
 the summary's slow/stages/fallbacks/drifted_steps/questions/edits facts, and an
-outgoing event's chat pseudonym and redacted text; every summary is a fixed
-template. Summaries may not hold digits, so the job id (lowercase hex) and the
-chat number are written as a reference with each digit 0-9 spelled g-p
-(`c0de` -> `cgde`, `chat-12` -> `hi`). That reference plus the class is the
-import key: a job's finding is never imported twice, in any week or state, and
-a guard reply (event rows carry no job) is keyed by chat within the week.
+event's day, chat pseudonym, direction and redacted text; every summary is a
+fixed template. A fallback or drifted-step name reaches the ledger only when
+each of its words is a reviewed pipeline word (pins.json steps, reply-template
+fallback labels, the stage words below); any other name becomes `redacted`.
+Summaries may not hold digits, so each reference is lowercase hex with every
+digit 0-9 spelled g-p (`c0de` -> `cgde`). The reference plus the class is the
+import key, matched in every week and state. A job keeps its id across exports.
+Event rows carry no job and chat pseudonyms are numbered per export, so each
+guard reply is referenced by a digest of its day's redacted rows up to and
+including it: re-importing an export, or a later export of the same day, finds
+the same reference, while a reply at another place in the day, in any chat or
+on another day, gets its own.
 """
 
 import argparse
 from collections import Counter
 from datetime import date, timedelta
 import fcntl
+import hashlib
 import json
 from math import isfinite
 import os
@@ -39,17 +46,24 @@ CASE = re.compile(r"(?:case-[0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*\.json|npp-[0-9]{8}-[
 CARD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 JOB = re.compile(r"[0-9a-f]{4,12}")  # hass.npp.receipt.JOB_RE
-CHAT = re.compile(r"chat-([1-9][0-9]*)")  # npp_review_export pseudonyms
+CHAT = re.compile(r"chat-[1-9][0-9]*")  # npp_review_export pseudonyms
+DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 REFERENCE = str.maketrans("0123456789", "ghijklmnop")
-IMPORT_KEY = re.compile(r"(job|chat) ([a-p]+): ")
+GUARD_REF_HEX = 16
+IMPORT_KEY = re.compile(r"(job|guard) ([a-p]+): ")
 # A class suffix must be plain words: anything else (the export's [redacted],
 # dotted or numbered names) collapses to `redacted` so it cannot carry values.
 NAME = re.compile(r"[a-z]+(?:-[a-z]+)*")
 NAME_MAX = 40
-GUARDS = Path(__file__).resolve().parents[2] / "hass/npp/assets/hass-npp-reply/reply-templates.json"
+ASSETS = Path(__file__).resolve().parents[2] / "hass/npp"
+GUARDS = ASSETS / "assets/hass-npp-reply/reply-templates.json"
+PINS = ASSETS / "pins.json"
 GUARD_STAGES = {"render_failed": "S8", "live_check_failed": "S13"}  # others are S11 approval guards
-STEP_STAGES = {"label": "S2", "identify": "S2", "research": "S4", "maker": "S4", "copy": "S5",
-               "wording": "S5", "picture": "S6", "polish": "S6", "judge": "S7", "render": "S8", "edit": "S10"}
+STEP_STAGES = {"label": "S2", "identify": "S2", "research": "S4", "maker": "S4", "story": "S4", "copy": "S5",
+               "wording": "S5", "basic": "S5", "picture": "S6", "polish": "S6", "judge": "S7", "claim": "S7",
+               "render": "S8", "edit": "S10"}
+# Outcome words a reviewed fallback code may use besides the stage, step and label words.
+OUTCOME_WORDS = frozenset("local raw house polished late timeout not run default".split())
 
 
 class LedgerError(ValueError):
@@ -94,30 +108,43 @@ def _fold(text):
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def guard_lines():
-    """Map each guard reply line in the reviewed reply templates to its key."""
+def _load(path, *keys):
     try:
-        guards = json.loads(GUARDS.read_text(encoding="utf-8"))["guards"]
-        lines = {_fold(text): key for key, text in guards.items() if key != "guard_note"}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        raise LedgerError("guard templates unavailable") from None
-    if not lines or not all(NAME.fullmatch(key.replace("_", "-")) for key in lines.values()):
-        raise LedgerError("guard templates unavailable")
-    return lines
+        value = json.loads(path.read_text(encoding="utf-8"))
+        for key in keys:
+            value = value[key]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise LedgerError("reviewed assets unavailable") from None
+    if not isinstance(value, dict):
+        raise LedgerError("reviewed assets unavailable")
+    return value
 
 
-def _name(value):
+def reviewed_assets():
+    """Return ({folded guard line: guard key}, frozenset of reviewed fallback and step words)."""
+    guards = _load(GUARDS, "guards")
+    lines = {_fold(text): key for key, text in guards.items() if key != "guard_note" and type(text) is str}
+    reviewed = [*_load(PINS, "steps"), *_load(GUARDS, "brackets", "parts")]  # step and fallback-label names
+    if not lines or not all(NAME.fullmatch(key.replace("_", "-")) for key in [*lines.values(), *reviewed]):
+        raise LedgerError("reviewed assets unavailable")
+    words = {word for key in reviewed for word in key.split("_")}
+    return lines, frozenset(words | STEP_STAGES.keys() | OUTCOME_WORDS)
+
+
+def _name(value, words):
+    # Only names made wholly of reviewed words are kept: a plain lowercase word can still be private.
     name = value.replace("_", "-")
-    return name if NAME.fullmatch(name) and len(name) <= NAME_MAX else "redacted"
+    known = NAME.fullmatch(name) and len(name) <= NAME_MAX and set(name.split("-")) <= words
+    return name if known else "redacted"
 
 
-def _names(value):
+def _names(value, words):
     # A job whose evidence is missing or bad carries None for each evidence fact.
     if value is None:
         return []
     if not isinstance(value, list) or not all(type(item) is str for item in value):
         raise ValueError
-    return sorted({_name(item) for item in value})
+    return sorted({_name(item, words) for item in value})
 
 
 def _count(value):
@@ -140,7 +167,7 @@ def _slowest_stage(stages):
     return slowest[1] if slowest else "S9"
 
 
-def _job_findings(row):
+def _job_findings(row, words):
     job, facts = row["job"], row["summary"]
     if type(job) is not str or not JOB.fullmatch(job) or not isinstance(facts, dict):
         raise ValueError
@@ -148,7 +175,7 @@ def _job_findings(row):
         raise ValueError
     ref = job.translate(REFERENCE)
     slow_stage = _slowest_stage(facts["stages"])
-    fallbacks, drifted = _names(facts["fallbacks"]), _names(facts["drifted_steps"])
+    fallbacks, drifted = _names(facts["fallbacks"], words), _names(facts["drifted_steps"], words)
     questions, edits = _count(facts["questions"]), _count(facts["edits"])
     found = []
 
@@ -169,24 +196,28 @@ def _job_findings(row):
     return found
 
 
-def _guard_findings(row, guards):
-    chat, direction, text = row["chat"], row["dir"], row["text_redacted"]
-    match = CHAT.fullmatch(chat) if type(chat) is str else None
-    if not match or direction not in ("in", "out") or type(text) is not str:
+def _guard_findings(row, guards, days):
+    day, chat, direction, text = row["day"], row["chat"], row["dir"], row["text_redacted"]
+    if (type(day) is not str or not DAY.fullmatch(day) or type(chat) is not str or not CHAT.fullmatch(chat)
+            or direction not in ("in", "out") or type(text) is not str):
         raise ValueError
+    # Every row extends its day's digest, so a reply's reference names its place in that day's redacted
+    # rows. The per-export chat number is left out: another export may number the same chat differently.
+    digest = days.setdefault(day, hashlib.sha256(day.encode()))
+    digest.update(json.dumps([direction, text], ensure_ascii=True).encode() + b"\n")
     key = guards.get(_fold(text)) if direction == "out" else None
     if key is None:
         return []
-    ref = match[1].translate(REFERENCE)
+    ref = digest.hexdigest()[:GUARD_REF_HEX].translate(REFERENCE)
     failure_class = "guard-" + key.replace("_", "-")
-    summary = f"chat {ref}: guard reply {key.replace('_', ' ')} sent"
-    return [(("chat", ref, failure_class), GUARD_STAGES.get(key, "S11"), failure_class, summary)]
+    summary = f"guard {ref}: guard reply {key.replace('_', ' ')} sent"
+    return [(("guard", ref, failure_class), GUARD_STAGES.get(key, "S11"), failure_class, summary)]
 
 
 def draft_findings(path, week):
     """Return {import key: (stage, class, summary)} in export order; refuse the whole file if any row is bad."""
-    guards = guard_lines()
-    drafts = {}
+    guards, words = reviewed_assets()
+    drafts, days = {}, {}
     try:
         with path.open(encoding="utf-8") as source:
             lines = source.read().splitlines()
@@ -195,9 +226,9 @@ def draft_findings(path, week):
             if not isinstance(row, dict):
                 raise ValueError
             if "job" in row:
-                found = _job_findings(row)
+                found = _job_findings(row, words)
             elif "chat" in row:
-                found = _guard_findings(row, guards)
+                found = _guard_findings(row, guards, days)
             else:
                 raise ValueError
             for key, stage, failure_class, summary in found:
@@ -209,17 +240,13 @@ def draft_findings(path, week):
     return drafts
 
 
-def import_key(kind, ref, failure_class, week):
-    # Jobs keep their id across weekly exports; chat pseudonyms are numbered per export.
-    return (kind, ref, failure_class) + ((week,) if kind == "chat" else ())
-
-
 def ledger_keys(rows):
+    # (kind, reference, class) of every imported row, in every week and state.
     keys = set()
     for row in rows:
         match = IMPORT_KEY.match(row["summary"])
         if match:
-            keys.add(import_key(match[1], match[2], row["class"], row["week"]))
+            keys.add((match[1], match[2], row["class"]))
     return keys
 
 
@@ -317,10 +344,9 @@ def update(path, args, drafts=None):
             keys = ledger_keys(rows)
             drafts = drafts or {}
             output = []
-            for (kind, ref, _), (stage, failure_class, summary) in drafts.items():
-                full_key = import_key(kind, ref, failure_class, args.week)
-                if full_key not in keys:
-                    keys.add(full_key)
+            for key, (stage, failure_class, summary) in drafts.items():
+                if key not in keys:
+                    keys.add(key)
                     output.append(append(rows, args.week, stage, failure_class, summary))
             existing = len(drafts) - len(output)
             changed = bool(output)  # A repeat import leaves the ledger bytes untouched.

@@ -84,6 +84,60 @@ class CopyTests(unittest.TestCase):
                          replace(found, url=''), replace(found, source='directory')):
             self.assertNotIn('story', self.writer.write(replace(ctx, facts=(evidence,))).text)
 
+    def test_offered_story_templates_can_bind_evidence(self):
+        # S5 selector contract: slot presence alone advertises a choice the renderer will refuse.
+        # Use identity slots in a synthetic template: unlike makes/nature/founded, they can
+        # be fully populated by owner words without carrying fact IDs.
+        pins, files, digest = self.pinned
+        path = 'hass-listing-copy/copy-templates.json'
+        spec = json.loads(files[path])
+        story_id = 'story-test-attested-base'
+        spec['templates'].append({
+            'id': story_id, 'field': 'story', 'kinds': ['food'],
+            'text': '{maker_name} is based in {town}.',
+            'slots': {'maker_name': 'maker_name', 'town': 'town'},
+            'requires_facts_any': ['maker_name'], 'requires_facts_all': ['town'],
+        })
+        writer = Writer((pins, {**files, path: json.dumps(spec).encode()}, digest))
+        maker, town = 'Bay Orchard', 'Test Harbor'
+        url = 'https://orchard.example/about'
+        name_fact = Fact('f-maker', 'name', maker, url, 'Our name is Bay Orchard.', 'supports')
+        town_fact = Fact('f-town', 'town', town, url, 'Our base is Test Harbor.', 'supports')
+        cases = (
+            ('owner only', (maker, town), (), {}, False),
+            ('missing all', (town,), (name_fact,), {'maker_name': 'f-maker'}, False),
+            ('missing any', (maker,), (town_fact,), {'town': 'f-town'}, False),
+            ('attested', (), (name_fact, town_fact), {'maker_name': 'f-maker', 'town': 'f-town'}, True),
+        )
+        for case, owner_slots, facts, expected_ids, offered in cases:
+            with self.subTest(case=case):
+                ctx = Context('food', 'pantry', 'raw', 'beans', maker_name=maker, town=town,
+                              owner_words='\n'.join((*owner_slots, 'private filler')), facts=facts)
+                requests = []
+
+                def choose(_step, _prompt, _schema, options):
+                    requests.append(options)
+                    choice = selection()
+                    if story_id in options['templates']['story']:
+                        choice['story'] = {'template_id': story_id, 'phrase_ids': [],
+                                           'fact_ids': list(options['fact_ids'].values())}
+                    return choice
+
+                result = writer.write(ctx, choose)
+                payload, = requests
+                self.assertEqual(payload['fact_ids'], expected_ids)
+                self.assertTrue(set(selection()['description']['phrase_ids']) <= set(payload['phrase_ids']))
+                for plain_value in (maker, town, 'private filler', 'beans'):
+                    self.assertNotIn(plain_value, json.dumps(payload))
+                self.assertEqual(story_id in payload['templates']['story'], offered)
+                self.assertFalse(result.basic)
+                if offered:
+                    self.assertEqual(result.selections['story']['template_id'], story_id)
+                    self.assertEqual(result.text['story'], 'Bay Orchard is based in Test Harbor.')
+                    self.assertTrue(writer.conform(result.text, result.selections, ctx))
+                else:
+                    self.assertNotIn('story', result.text)
+
     def test_health_claims_drop_before_public_copy_with_one_safe_note(self):
         # F12 and case 15: the claim does not refuse an otherwise complete product or enter copy.
         ctx = Context('drink', 'drinks', 'raw', 'elderberry syrup, cures colds', label_claims=('cures colds',))

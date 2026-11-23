@@ -105,12 +105,18 @@ class InstallCitationDriftTests(unittest.TestCase):
 
     def test_rejects_invalid_ranges_and_non_relative_paths(self):
         # Reject malformed input before lookup, even when a normalized path would exist.
+        # Echoing a rejected operand could expose pasted text in shared CLI evidence.
+        marker = "SYNTHETIC_PRIVATE_VALUE"
         invalid = ("run.sh", "run.sh:0-1", "run.sh:2-1", "run.sh:-1-2", "run.sh:1",
                    "run.sh:1-2junk", "/run.sh:1-1", "./run.sh:1-1", "docs/../run.sh:1-1",
                    "docs//fixture.txt:1-1", ":1-1")
-        result = self.cli(*invalid)
+        result = self.cli(marker, "run.sh:1-1", *invalid)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count(": invalid citation"), len(invalid))
+        self.assertNotIn(marker, result.stdout + result.stderr)
+        self.assertIn("OK 'run.sh:1-1'", result.stdout)
+        self.assertEqual(result.stdout.count(": invalid citation"), 1 + len(invalid))
+        for ordinal in (1, *range(3, len(invalid) + 3)):
+            self.assertIn(f"FAIL citation #{ordinal}: invalid citation", result.stdout)
 
     def test_requires_available_full_commit_not_revision_or_other_object(self):
         # A generic revision parser can silently allow a branch, abbreviated ID or non-commit.

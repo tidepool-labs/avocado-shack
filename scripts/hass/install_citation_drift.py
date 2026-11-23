@@ -76,16 +76,18 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Selected commit: {commit[:12]}")
     failed = False
-    for reference in args.references:
+    for ordinal, reference in enumerate(args.references, start=1):
         try:
             path, end = _citation(reference)
         except ValueError:
-            problem = "invalid citation; expected repo-relative path:start-end with positive, ordered lines"
-        else:
-            try:
-                problem = _check(args.repo, commit, path, end)
-            except (OSError, subprocess.CalledProcessError):
-                problem = "could not read the local Git object"
+            print(f"FAIL citation #{ordinal}: invalid citation; "
+                  "expected repo-relative path:start-end with positive, ordered lines")
+            failed = True
+            continue
+        try:
+            problem = _check(args.repo, commit, path, end)
+        except (OSError, subprocess.CalledProcessError):
+            problem = "could not read the local Git object"
         if problem is None:
             print(f"OK {reference!r}")
         else:

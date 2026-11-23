@@ -14,7 +14,9 @@ import unicodedata
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-CATEGORIES = ("fruit", "vegetables", "dairy", "eggs", "meat", "pantry", "drinks", "bread", "flowers")  # hass.content_model.CATEGORIES
+from hass.content_model import SELLING_PRICE_RE
+
+CATEGORIES = ("fruit", "vegetables", "dairy", "eggs", "meat", "pantry", "drinks", "bread", "flowers", "general")  # hass.content_model.CATEGORIES
 AVAILABILITY = ("yes", "limited", "no")                                                                # hass.content_model.AVAILABILITY
 PRICE_TYPES = ("FIXED", "VARIABLE", "PER_UNIT")
 MAX_PRICE_CENTS = 100_000          # $1,000.00: a typo guard (a misread number), changed in config, not a business rule
@@ -46,6 +48,14 @@ def format_money(cents):
     if type(cents) is not int or cents < 0:
         raise MapError("not a price in cents")
     return f"${cents // 100:,}.{cents % 100:02d}"
+
+
+def parse_selling_price(text):
+    """Website sellingPrice -> (integer cents, Clover unit name or None)."""
+    if not isinstance(text, str) or SELLING_PRICE_RE.fullmatch(text) is None:
+        raise MapError("I could not read that as a price. Use a price like 12.50 each or 8.00 per lb.")
+    amount = text.split(" ", 1)[0]
+    return int(amount.replace(".", "")), "lb" if text.endswith(" per lb") else None
 
 
 def pct_change(old_cents, new_cents):

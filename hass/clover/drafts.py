@@ -12,11 +12,14 @@ be the one the draft was made from (`is_stale`), and an undo refuses to overwrit
 import hashlib
 import json
 from dataclasses import dataclass
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation, localcontext
+from types import SimpleNamespace
 
 from hass.clover import sku as skumod
 from hass.clover.mapper import (CATEGORIES, MapError, clean_name, create_payload, format_money, format_quantity, norm_name, pct_change,
                                 site_category)
+from hass.clover.mapper import parse_selling_price
 
 DATA_CLASS = "finance-local"   # prices and counts: local code only; no cloud model ever sees a draft or a Clover answer
 KINDS = ("create_item", "set_price", "set_stock", "set_sku", "set_hidden")
@@ -164,6 +167,29 @@ def build_create_item(name, price_cents, category, items, config, *, categories=
              "Nothing goes on the website.")
     return Draft("create_item", None, name, lines, {}, {"name": name, "sku": sku, "price": price_cents, "hidden": False},
                  tuple(requests), {}, warnings=tuple(warnings))
+
+
+def build_create_counted(name, price_text, category, quantity, items, config, *, categories=(), writes_today=0):
+    """Draft a new item and its first count for a single bundle approval."""
+    try:
+        cents, unit = parse_selling_price(price_text)
+    except MapError as exc:
+        raise DraftRefused(str(exc)) from None
+    create = build_create_item(name, cents, category, items, config, categories=categories, writes_today=writes_today)
+    first, *category_requests = create.requests
+    price_basis = {"priceType": "PER_UNIT", "unitName": unit} if unit else {}
+    if price_basis:
+        first = {**first, "json": {**first["json"], **price_basis}}
+    item = SimpleNamespace(name=create.label, price_type=first["json"]["priceType"], unit_name=unit)
+    count = _qty(quantity, item, config)
+    stock = format_quantity(count)
+    headline, item_line, sku_line, _, category_line, *_ = create.lines
+    lines = (headline, item_line, sku_line, f"  Price: {format_money(cents)}{_per(item)}", category_line,
+             f"  Count: {stock}", "  On the register: showing")
+    # The bundle removes this placeholder from the first step and builds a literal-ID stock draft after creation.
+    stock_request = {"method": "PUT", "path": "/item_stocks/{newItemId}", "json": {"quantity": _number(count)}}
+    return replace(create, lines=lines, after={**create.after, **price_basis, "stock": stock},
+                   requests=(first, *category_requests, stock_request))
 
 
 def build_set_price(item, new_cents, config, *, writes_today=0):

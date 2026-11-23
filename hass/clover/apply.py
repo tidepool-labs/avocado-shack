@@ -95,6 +95,8 @@ class ApplyEngine:
         item = parse_item(raw)
         values = {"price": item.price_cents, "stock": None if item.stock is None else format_quantity(item.stock),
                   "sku": item.sku, "hidden": item.hidden, "name": item.name}
+        if entry.get("kind") == "create_item" and entry["after"].get("priceType") == "PER_UNIT":
+            values.update(priceType=raw.get("priceType"), unitName=raw.get("unitName"))
         categories = {e["id"] for e in raw.get("categories", {}).get("elements", [])}
         return all(values.get(k) == v for k, v in entry["after"].items()) and all(
             r["json"]["elements"][0]["category"]["id"] in categories for r in entry["requests"] if r["path"] == "/category_items")

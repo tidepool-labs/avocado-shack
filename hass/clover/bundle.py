@@ -146,6 +146,10 @@ def _till(code, row, journal, engine, sender, chat):
     if till["kind"] == "create_item" and "stock" in till["after"]:
         try:
             item = parse_item(engine._client().get_item(result["result_item_id"]))
+            # Confirm zero on the same unchanged item; an uncounted item still needs a stock write.
+            if (till["after"]["stock"] == "0" and item.stock == 0
+                    and item.id == result["result_item_id"] and d._base(item) == result["result_base"]):
+                return
             stock = replace(d.build_set_stock(item, till["after"]["stock"], engine.config), base=result["result_base"])
             subcode, _ = engine.offer(stock, sender=sender, chat=chat)
             journal.advance(code, "till-intent", till="partial", stock_code=subcode)

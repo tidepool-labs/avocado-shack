@@ -123,8 +123,26 @@ class NppStateInvariantsTests(unittest.TestCase):
         self.assert_report(self.invoke(), [], "no-npp-tables")
 
     def test_c2_3_approval_undelivered(self):
-        # Detect both a present-but-undelivered version and an absent version.
+        # The exact pictured version needs a readable, timezone-aware delivery time.
+        # A non-NULL check alone lets blank, corrupt, and naive timestamps pass.
         self.clean_jobs()
+        for value, reasons in (
+            (WHEN, ()),
+            ("1999-12-31T16:00:00-08:00", ()),  # Same instant as WHEN, different offset.
+            ("", ("approval-undelivered 1",)),
+            ("not-a-timestamp", ("approval-undelivered 1",)),
+            ("2000-01-01T00:00:00", ("approval-undelivered 1",)),
+        ):
+            with self.subTest(value=value):
+                with closing(sqlite3.connect(self.store)) as db, db:
+                    db.execute("UPDATE npp_versions SET delivered_at = ?", (value,))
+                self.assert_report(self.invoke(), TOTALS, *reasons)
+
+        # An unreadable time also cannot establish delivery of a cardless version.
+        self.write("UPDATE npp_versions SET delivered_at = '', card_png_sha = NULL")
+        self.assert_report(self.invoke(), TOTALS, "approval-undelivered 1")
+
+        # Preserve the original check for both NULL and an absent version.
         self.write("UPDATE npp_versions SET delivered_at = NULL")
         self.write("INSERT INTO npp_approvals SELECT 12, job_id, 2, outbox_id, NULL FROM npp_approvals")
         self.assert_report(self.invoke(), [*TOTALS[:3], "approvals 2"], "approval-undelivered 2")

@@ -62,7 +62,8 @@ HELP_ENTRIES = (
     ("report", "Look up", ("morning report",), (q("report") + " - the morning shelf report",)),
     ("post", "Look up", (), (q("post Hass avocado") + " - a caption to copy for a product",  # AV1937-10: nothing is posted
                               q("post maker fixture-farm") + " - a caption to copy for a maker",
-                              q("post notice") + " - a caption for the home page notice")),  # AV1104-07
+                              q("post notice") + " - a caption for the home page notice",  # AV1104-07
+                              q("post today") + " - a caption for what you checked today")),  # AV1104-08
     ("look", "Look up", (), (q("look") + " - a fresh picture of the website", q("look hike") + " - or of the hike page; add a product")),  # AV1922-01
     ("photos to take", "Look up", (), (q("photos to take") + " - the products that still need a photo",)),
     ("margin", "Look up", (), (q("margin Hass avocado at 35%") + " - a price idea or a price check",)),

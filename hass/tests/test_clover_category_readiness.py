@@ -78,8 +78,6 @@ class CloverCategoryReadinessTests(unittest.TestCase):
 
     def test_c1_full_pass(self):
         # Exact shelf counts catch inactive listings, substring matching, and duplicate till tags.
-        # The till engine accepts every website category (including general), so no
-        # till-engine-unsupported note is expected; a stale note would mislead the owner.
         self.products({"category": "fruit", "status": "active"},
                       {"category": "fruit", "status": "active"},
                       {"category": "fruit", "status": "held"},

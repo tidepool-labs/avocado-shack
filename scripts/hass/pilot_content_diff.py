@@ -9,6 +9,8 @@ import subprocess
 
 
 CATALOG = "hass/content/products.json"
+# Fields hass/ops/history.py removes when it undoes an added product.
+INVERSE_DROPPED = ("available", "available_on")
 
 
 class Parser(argparse.ArgumentParser):
@@ -104,8 +106,13 @@ def exact_product_errors(before, after, expectation):
         if old is not None or (new or {}).get("status") != '"active"':
             yield "expected-product-forward"
     else:
-        # history.revert keeps a new product in the writer catalog with status hidden.
-        if (old or {}).get("status") != '"active"' or (new or {}).get("status") != '"hidden"':
+        # history.revert keeps a new product in the writer catalog as its current record with
+        # status hidden and its stock word and day (available, available_on) removed.
+        expected = None
+        if old is not None and old.get("status") == '"active"':
+            expected = {name: value for name, value in old.items() if name not in INVERSE_DROPPED}
+            expected["status"] = '"hidden"'
+        if new is None or new != expected:
             yield "expected-product-inverse"
     if any(before.get(pid) != after.get(pid) for pid in (before.keys() | after.keys()) - {key}):
         yield "other-products-changed"

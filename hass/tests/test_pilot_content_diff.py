@@ -168,6 +168,15 @@ class PilotContentDiffTests(unittest.TestCase):
             ("added another on undo", new, self.commit(other, held, {"id": "extra-fixture"}),
              inverse, "other-products-changed"),
             ("not the writer undo form", new, self.commit(other), inverse, "expected-product-inverse"),
+            # Contract: the inverse is the writer's exact form (the forward record, hidden, minus
+            # available/available_on). Bug caught: any hidden row passed, so an altered
+            # description or a retained stock word went unnoticed.
+            ("undo altered another field", new, self.commit(other, {**held, "description": "edited"}),
+             inverse, "expected-product-inverse"),
+            ("undo kept the stock word", new, self.commit(other, {**held, "available": "yes"}),
+             inverse, "expected-product-inverse"),
+            ("undo dropped another field", self.commit(other, {**target, "name": "Fixture"}),
+             self.commit(other, held), inverse, "expected-product-inverse"),
             ("already hidden", undone, undone, inverse, "expected-product-inverse"),
             ("missing target in both", old, old, inverse, "expected-product-inverse"),
         ):

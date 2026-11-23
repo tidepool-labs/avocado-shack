@@ -6,7 +6,7 @@
 
 The judge never decides a case's pass or fail (design 3.3): it runs for asset and pin changes and weekly, on the private
 host. Without --live nothing here calls a model: the runner replays recorded scores, so a later run can be compared item
-by item. A calibration that fails means this judge version is not used, and the reason goes to metrics.tsv.
+by item. A calibration that fails means this judge version is not used, and the reason goes to calibration.tsv.
 
 `audit_research` is deterministic code, not a model grade. It enforces the G decision on a research receipt: search is
 only used to locate the maker's own site, the site's identity matches the owner's words (or a confident label), exactly
@@ -244,7 +244,7 @@ def main(argv=None, environ=None):
     p.add_argument("--scores", help="recorded scores to replay (no model is called)")
     p.add_argument("--live", action="store_true", help="private host only: ask the pinned judge")
     p.add_argument("--record-to", help="write the scores of a live run here")
-    p.add_argument("--metrics", default=str(METRICS))
+    p.add_argument("--metrics", default=str(METRICS), help="weekly metrics path; write calibration.tsv alongside it")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
     environ = os.environ if environ is None else environ
     if not args.judge:
@@ -272,7 +272,7 @@ def main(argv=None, environ=None):
     ok, reasons = calibrate(runs, good, bad, rubric)
     print(json.dumps({"judge_version": version, "calibration": "passed" if ok else "failed", "reasons": reasons}, sort_keys=True))
     if not ok:
-        append_tsv(args.metrics, metrics_row_for_failure(version, reasons))
+        append_tsv(Path(args.metrics).with_name("calibration.tsv"), metrics_row_for_failure(version, reasons))
     return 0 if ok else 1
 
 

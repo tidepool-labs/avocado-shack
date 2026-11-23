@@ -4,8 +4,8 @@
     python3 -B scripts/hass/npp_metrics.py --receipts <mediaRoot>/npp --week 2026-W47 [--findings findings.json] [--judge scores.json]
         [--out ~/agent-work/reports/hass-npp/metrics.tsv]
 
-Reads `<job>/receipt.json` files (job id, state, versions, segments, asset pins: ids, times and digests only, never owner
-text) and appends one row to the private metrics.tsv. Quantities the receipts do not carry (wording and maker fallbacks,
+Reads `<job>/receipt.json` files (ids, times and digests only, never owner text) for jobs created in the requested ISO
+week and appends one row to the private metrics.tsv. Quantities the receipts do not carry (wording and maker fallbacks,
 guard replies, repeat incidents, judge scores) come from the redacted weekly findings file and the judge run, and are left
 `n/a` when absent: an absent figure is never reported as zero.
 """
@@ -31,6 +31,14 @@ def load_receipts(directory):
         if isinstance(data, dict) and "job_id" in data:
             found.append(data)
     return found
+
+
+def receipt_week(receipt):
+    try:
+        year, week, _ = datetime.fromisoformat(receipt.get("created_at")).isocalendar()
+    except (TypeError, ValueError):
+        return None
+    return f"{year:04d}-W{week:02d}"
 
 
 def seconds(row):
@@ -128,7 +136,8 @@ def main(argv=None):
     pins = json.loads((REPO / "hass" / "npp" / "pins.json").read_text(encoding="utf-8"))["assets"]
     findings = json.loads(Path(args.findings).read_text()) if args.findings else None
     judge = json.loads(Path(args.judge).read_text()) if args.judge else None
-    row = compute(load_receipts(args.receipts), pins=pins, findings=findings, judge=judge)
+    receipts = [r for r in load_receipts(args.receipts) if receipt_week(r) == args.week]
+    row = compute(receipts, pins=pins, findings=findings, judge=judge)
     write_row(args.out, args.week, row)
     print(json.dumps({"week": args.week, **row}, sort_keys=True))
     return 0

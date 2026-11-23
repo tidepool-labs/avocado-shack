@@ -348,20 +348,34 @@ class JudgeTests(unittest.TestCase):
         self.assertTrue(ev.asset_change_gate({"a": 4.5, "b": 4.2}, {"a": 4.2, "b": 4.3}, self.rubric)[0])
         self.assertFalse(ev.asset_change_gate({"a": 4.8}, {"a": 4.2}, self.rubric)[0])
 
-    def test_a_failed_calibration_is_written_to_metrics_and_a_pass_is_not(self):
-        # Contract (design 3.3): a failed judge version is not used and the reason goes to metrics.tsv.
+    def test_calibration_failures_do_not_mix_with_weekly_metrics_in_either_order(self):
+        # A shared output path puts three-field calibration rows in metrics.tsv (or gives it the wrong header).
         version = ev.judge_version(self.pinned[1]["hass-style-judge/rubric.json"], self.pinned[0])
-        with tempfile.TemporaryDirectory() as tmp:
-            scores, out = Path(tmp) / "scores.json", Path(tmp) / "metrics.tsv"
-            scores.write_text(json.dumps({"judge_version": version, "runs": self.runs(good=3.0)}))
-            with patch("builtins.print"):
-                self.assertEqual(ev.main(["--judge", "--calibrate", "--scores", str(scores), "--metrics", str(out)]), 1)
-            self.assertIn("good item scored", out.read_text())
-            scores.write_text(json.dumps({"judge_version": version, "runs": self.runs()}))
-            out.unlink()
-            with patch("builtins.print"):
-                self.assertEqual(ev.main(["--judge", "--calibrate", "--scores", str(scores), "--metrics", str(out)]), 0)
-            self.assertFalse(out.exists())
+        for calibration_first in (True, False):
+            with self.subTest(calibration_first=calibration_first), tempfile.TemporaryDirectory() as tmp:
+                scores, out = Path(tmp) / "scores.json", Path(tmp) / "metrics.tsv"
+                calibration = out.with_name("calibration.tsv")
+                judge_args = ["--judge", "--calibrate", "--scores", str(scores), "--metrics", str(out)]
+                metrics_args = ["--receipts", tmp, "--week", "2026-W47", "--out", str(out)]
+                with patch("builtins.print"):
+                    scores.write_text(json.dumps({"judge_version": version, "runs": self.runs()}))
+                    self.assertEqual(ev.main(judge_args), 0)
+                    self.assertFalse(calibration.exists())
+                    scores.write_text(json.dumps({"judge_version": version, "runs": self.runs(good=3.0)}))
+                    if calibration_first:
+                        self.assertEqual(ev.main(judge_args), 1)
+                    self.assertEqual(metrics.main(metrics_args), 0)
+                    if not calibration_first:
+                        self.assertEqual(ev.main(judge_args), 1)
+
+                header, row = [line.split("\t") for line in out.read_text().splitlines()]
+                self.assertEqual(header, metrics.COLUMNS)
+                self.assertEqual((len(row), row[0]), (len(header), "2026-W47"))
+                cal_header, cal_row = [line.split("\t") for line in calibration.read_text().splitlines()]
+                self.assertEqual(cal_header, ["calibration", "judge_version", "reason"])
+                self.assertEqual(cal_row[:2], ["failed", version])
+                self.assertEqual(len(cal_row), 3)
+                self.assertIn("good item scored", cal_row[2])
 
     def test_scores_for_another_judge_version_are_not_accepted(self):
         # Contract: recorded scores replay only for the judge version (rubric + pinned model) they were made with.
@@ -431,6 +445,23 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual((row["fallback_wording"], row["fallback_maker"], row["guard_replies_per_listing"]), (1.0, 0.0, 2.0))
         self.assertIn("repeat_incidents", row["targets_missed"])
         self.assertIn("judge_mean", row["targets_missed"])
+
+    def test_metrics_cli_counts_only_receipts_created_in_the_requested_iso_week(self):
+        # Labeling an unfiltered aggregate mixes other weeks' jobs and fallbacks into the report.
+        with tempfile.TemporaryDirectory() as tmp:
+            for job, created_at, variant in (("aaaa", "2027-01-01T17:00:00+00:00", "polished"),
+                                             ("bbbb", "2027-01-04T17:00:00+00:00", "raw"),
+                                             ("cccc", None, "raw")):
+                folder = Path(tmp) / job
+                folder.mkdir()
+                receipt = self.receipt(job, [], [variant])
+                (folder / "receipt.json").write_text(json.dumps(dict(receipt, created_at=created_at)))
+            with patch("builtins.print") as printed:
+                self.assertEqual(metrics.main(["--receipts", tmp, "--week", "2026-W53",
+                                               "--out", str(Path(tmp) / "metrics.tsv")]), 0)
+            row = json.loads(printed.call_args.args[0])
+            self.assertEqual((row["week"], row["jobs"], row["listings"], row["fallback_picture"]),
+                             ("2026-W53", 1, 1, 0.0))
 
     def test_the_row_is_appended_to_a_tsv_with_one_header(self):
         # Contract (design 4e): metrics.tsv is append-only with a single header line.

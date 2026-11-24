@@ -395,6 +395,31 @@ class RequestTests(unittest.TestCase):
             interp.interpret("hello there", [], recent=bad)
             self.assertNotIn("recent", self.user(seen), bad)
 
+    def test_product_name_order_reaches_the_interpreter_without_guessing(self):
+        # Comparing whole names only as sets loses the owner's choice between
+        # different listings with the same words. Inspect the real request hints.
+        lime = {"id": "photo-product-021", "name": "Lime Mint Tea"}
+        mint = {"id": "photo-product-022", "name": "Mint Lime Tea"}
+        duplicate = {"id": "photo-product-023", "name": "LÍME-MINT Teas"}
+        cases = (
+            ("change the Lime Mint Tea description", [mint, lime], {"said": "lime mint tea", "is": lime}),
+            ("what is the price of Mint Lime Tea?", [mint, lime], {"said": "mint lime tea", "is": mint}),
+            ("change the Lime Mint Tea description", [lime], {"said": "lime mint tea", "is": lime}),
+            ("what is the price of Lime Mint Tea?", [lime, duplicate],
+             {"said": "lime mint tea", "ambiguous": [lime, duplicate]}),
+            ("what is the price of Tea Mint Lime?", [lime], {"said": "tea mint lime", "is": lime}),
+            ("what is the price of Tea Mint Lime?", [mint, lime],
+             {"said": "tea mint lime", "ambiguous": [mint, lime]}),
+            ("what is the price of Lim Mint Tea?", [mint, lime],
+             {"said": "lim mint tea", "ambiguous": [mint, lime], "spelling": "guessed"}),
+        )
+        for text, products, expected in cases:
+            with self.subTest(text=text, candidates=[p["id"] for p in products]):
+                seen = []
+                content = SimpleNamespace(products=products)
+                self.make(seen, hinter=nl_prep.make_hinter(content)).interpret(text, [])
+                self.assertEqual(self.user(seen)["hints"]["products"], [expected])
+
     def test_the_hint_day_is_the_pacific_day(self):
         seen = []
         late = datetime(2026, 11, 10, 3, 30, tzinfo=timezone.utc)  # 7:30pm Monday in California

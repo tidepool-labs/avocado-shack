@@ -137,7 +137,22 @@ class PictureTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             setattr(frozen, "variant", "house")
         draft = repo.prepare(req)["draft"]
-        self.assertTrue(frozen.matches_draft(draft))
+        self.assertIs(frozen.matches_draft(draft), True)
+        # Only the exact path and prefixed digest bind; unchecked .get() would raise on null/list.
+        without_assets = {key: value for key, value in draft.items() if key != "assets"}
+        exact_digest = draft["assets"][frozen.image_path]
+        for case, candidate in (
+            ("missing assets", without_assets),
+            ("null assets", {**draft, "assets": None}),
+            ("list assets", {**draft, "assets": [draft["assets"]]}),
+            ("null draft", None),
+            ("list draft", [draft]),
+            ("wrong digest", {**draft, "assets": {frozen.image_path: "sha256:" + "0" * 64}}),
+            ("missing prefix", {**draft, "assets": {frozen.image_path: frozen.image_sha256}}),
+            ("wrong path", {**draft, "assets": {frozen.image_path + ".other": exact_digest}}),
+        ):
+            with self.subTest(case=case):
+                self.assertIs(frozen.matches_draft(candidate), False)
         head = repo.head()
         _settings(repo, **{**settings, "photo_polish": False})
         self.assertEqual(repo.apply(draft)["result"], "stale")

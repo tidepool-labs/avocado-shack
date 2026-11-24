@@ -48,10 +48,19 @@ def reject_constant(_token):
     raise ValueError("expected a JSON value")
 
 
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
 def read_records(directory, key, container_type):
     try:
         with open(directory / f"{key}.json", encoding="utf-8", opener=open_regular) as source:
-            document = json.load(source, parse_constant=reject_constant)
+            document = json.load(source, parse_constant=reject_constant, object_pairs_hook=unique_object)
         records = document[key]
         if isinstance(records, container_type):
             rows = records.values() if isinstance(records, dict) else records

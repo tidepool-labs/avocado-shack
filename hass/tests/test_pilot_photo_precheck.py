@@ -133,6 +133,27 @@ class PilotPhotoPrecheckTests(unittest.TestCase):
         self.assert_report(self.invoke(sharp), 0, *self.metadata(1, sharp))
         self.assert_report(self.invoke(blur), 1, *self.metadata(1, blur, sharpness="soft"), "FAIL soft 1")
 
+    def test_pilot_requires_hass_score(self):
+        # Strict pilot readiness requires a passing Hass score for every photo:
+        # Pillow-only decoding must not silently turn absent scoring into PASS.
+        unsupported = self.save("fixture-format-canary.bmp")
+        sharp = self.save("sharp.png")
+        soft = self.save("soft.png", checkerboard().filter(ImageFilter.GaussianBlur(4)))
+        paths = (unsupported, soft, sharp)
+        before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+        unscored = self.metadata(1, unsupported, fmt="BMP", sharpness="unscored")
+        self.assert_report(self.invoke(unsupported), 0, *unscored)
+        strict = "--require-scored"
+        self.assert_report(self.invoke(strict, unsupported), 1, *unscored, "FAIL unscored 1")
+        self.assert_report(self.invoke(strict, soft), 1,
+                           *self.metadata(1, soft, sharpness="soft"), "FAIL soft 1")
+        self.assert_report(self.invoke(strict, sharp), 0, *self.metadata(1, sharp))
+        self.assert_report(self.invoke(strict, *paths), 1, *unscored, "FAIL unscored 1",
+                           *self.metadata(2, soft, sharpness="soft"), "FAIL soft 2",
+                           *self.metadata(3, sharp))
+        self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in paths], before)
+        self.assertEqual(set(self.root.iterdir()), set(paths))
+
     def test_c7_gps_reported(self):
         # Looking only at decoded pixels loses GPS; dumping tag values exposes it.
         rational = TiffImagePlugin.IFDRational

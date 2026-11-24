@@ -138,13 +138,16 @@ class LiveSelftestScript(unittest.TestCase):
 
 
 class InboxReportParserTests(unittest.TestCase):
-    """scripts/hass/live_selftest_parse.py inbox, run as a subprocess on stdin JSON (the real parser, no services)."""
+    """Saved reports run through the real stdin parser CLI, without services."""
 
     BOUNDED = "invalid inbox report: oldest_pending_minutes not a number or null\n"
 
     def parse(self, age):
         text = '{"pending": 1, "done": 3, "oldest_pending_minutes": %s}\n' % age
-        r = subprocess.run([sys.executable, "-B", str(SCRIPTS / "live_selftest_parse.py"), "inbox"], input=text,
+        return self.parse_report("inbox", text)
+
+    def parse_report(self, mode, text):
+        r = subprocess.run([sys.executable, "-B", str(SCRIPTS / "live_selftest_parse.py"), mode], input=text,
                            capture_output=True, text=True, timeout=60, cwd=ROOT)
         return r.returncode, r.stdout, r.stderr
 
@@ -161,6 +164,30 @@ class InboxReportParserTests(unittest.TestCase):
         for age in ("true", "-1", "-0.5", '"5"'):
             with self.subTest(age=age):
                 self.assertEqual(self.parse(age), (3, self.BOUNDED, ""))
+
+    def test_inbox_parser_refuses_duplicate_pending(self):
+        # Last-key-wins would let a later zero conceal pending work.
+        quiet = 'diagnostic note\n{"pending": 0, "done": 3, "oldest_pending_minutes": null}\n\n'
+        contradictory = quiet.replace('"pending": 0', '"pending": 9, "pending": 0')
+        self.assertEqual(self.parse_report("inbox", quiet), (0, "0 null 3\n", ""))
+        self.assertEqual(self.parse_report("inbox", contradictory),
+                         (3, "invalid inbox report: report is not JSON\n", ""))
+
+    def test_health_parser_refuses_duplicate_ok(self):
+        # A later true must not overwrite an earlier false and yield healthy output.
+        healthy = 'diagnostic note\n{"ok": true, "problems": []}\n\n'
+        contradictory = healthy.replace('"ok": true', '"ok": false, "ok": true')
+        self.assertEqual(self.parse_report("health", healthy), (0, "\n", ""))
+        self.assertEqual(self.parse_report("health", contradictory),
+                         (3, "invalid health report: report is not JSON\n", ""))
+
+    def test_parser_refuses_duplicate_keys_in_nested_objects(self):
+        # Checking only the top level would miss ambiguity inside an ignored nested field.
+        healthy = '{"ok": true, "problems": [], "info": [{"fixture": 1}, {"fixture": 2}]}\n'
+        duplicate = healthy.replace('{"fixture": 2}', '{"fixture": 2, "fixture": 2}')
+        self.assertEqual(self.parse_report("health", healthy), (0, "\n", ""))
+        self.assertEqual(self.parse_report("health", duplicate),
+                         (3, "invalid health report: report is not JSON\n", ""))
 
 
 class LiveModeAcquisitionFailures(unittest.TestCase):

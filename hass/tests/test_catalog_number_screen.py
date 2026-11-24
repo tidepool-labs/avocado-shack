@@ -84,11 +84,15 @@ class CatalogNumberScreenTests(unittest.TestCase):
         self.assertEqual(self.assert_report(result, 1), [f"FAIL {reason}", "FAIL catalog_number_screen"])
 
     def test_c1_full_pass(self):
-        # Screening hidden copy would incorrectly turn this successful run into a finding.
-        self.write_content(product(), product(2, status="hidden", description="12 oz jar"))
+        # Omitted alt adds no count; screening hidden or held copy would fail this run.
+        self.write_content(
+            product(), product(2, status="hidden", description="12 oz jar", imageAlt="12 jars"),
+            product(3, status="held", imageAlt="26 jars",
+                    hold={"reason": "Synthetic hold", "source": "https://example.com/hold"}),
+        )
         lines = self.assert_report(self.run_screen(), 0)
-        self.assertEqual(lines[:2], ["active 1", "screened 2"])
-        self.assertFalse(any(line.startswith("FAIL ") for line in lines))
+        self.assertEqual(lines[:-1], ["active 1", "screened 2", "count name clean 1",
+                                     "count description clean 1"])
 
     def test_c2_findings_trailer(self):
         # A finding must not leave a successful process status or a PASS trailer.
@@ -165,10 +169,10 @@ class CatalogNumberScreenTests(unittest.TestCase):
 
     def test_c6_clean(self):
         # An empty report or a skipped field does not prove the copy was screened.
-        self.write_content(product())
+        self.write_content(product(imageAlt="Honey jar with a floral label."))
         lines = self.assert_report(self.run_screen(), 0)
-        self.assertCountEqual(lines[:-1], ["active 1", "screened 2", "count name clean 1",
-                                           "count description clean 1"])
+        self.assertCountEqual(lines[:-1], ["active 1", "screened 3", "count name clean 1",
+                                           "count description clean 1", "count imageAlt clean 1"])
 
     def test_c7_reasons(self):
         # Counting all non-None values under a generic bucket would lose the reason split.
@@ -200,6 +204,18 @@ class CatalogNumberScreenTests(unittest.TestCase):
         lines = self.assert_report(self.patched_screen(product(description="Sold for $5")), 1)
         self.assertIn("count description money 1", lines)
         self.assertEqual(lines[-2], "FAIL flagged 1")
+
+        # Shape-valid alt is public copy too. Screening only name and description
+        # would erroneously exit 0 when a private-like value appears only in alt.
+        for alt, reason in (("Synthetic wholesale cost 81.47 per jar.", "money"),
+                            ("Synthetic stock marker: 81473 jars.", "unsupported-number")):
+            with self.subTest(reason=reason):
+                self.write_content(product(imageAlt=alt))
+                self.assertEqual(self.assert_report(self.run_screen(), 1), [
+                    "active 1", "screened 3", "count name clean 1", "count description clean 1",
+                    f"count imageAlt {reason} 1", "note flagged imageAlt photo-product-001",
+                    "FAIL flagged 1", "FAIL catalog_number_screen",
+                ])
 
     def test_unsafe_reason_is_not_printed_but_still_counts(self):
         # A future detector bug must not make a raw value printable or turn a finding into clean.

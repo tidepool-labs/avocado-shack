@@ -2,6 +2,7 @@
 """Check the reviewed tools checkout offline (origin is a local config check)."""
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ class Parser(argparse.ArgumentParser):
 def git(repo, *args):
     try:
         return subprocess.run(
-            ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", *args],
+            ["git", "--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", *args],
             cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
             check=True,
@@ -48,21 +49,52 @@ def remote_finding(repo, expected):
     return None
 
 
-def install_digests(repo):
-    paths = git(repo, "ls-files", "-z", "--", ":(top,glob)scripts/hass/install_*.py")
-    if paths is None or (paths and not paths.endswith(b"\0")):
+def file_digest(directory, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    finally:
+        os.close(fd)
+
+
+def install_digests(repo, sha):
+    tree = git(repo, "ls-tree", "-z", f"{sha}:scripts/hass")
+    if not tree or not tree.endswith(b"\0"):
         raise ValueError
+    helpers = {}
+    for entry in tree.split(b"\0")[:-1]:
+        header, name = entry.split(b"\t", 1)
+        if not (name.startswith(b"install_") and name.endswith(b".py")):
+            continue
+        mode, kind, oid = header.split()
+        if (mode not in (b"100644", b"100755") or kind != b"blob"
+                or name in helpers or b"/" in name or not name.decode("utf-8").isprintable()):
+            raise ValueError
+        helpers[name] = oid.decode("ascii")
+    if not helpers:
+        raise ValueError
+
     rows = []
-    for raw_path in sorted(paths.split(b"\0")[:-1]):
-        path = raw_path.decode("utf-8")
-        if not path.isprintable():
-            raise ValueError
-        source = repo / path
-        if not stat.S_ISREG(source.lstat().st_mode):
-            raise ValueError
-        with source.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()[:12]
-        rows.append(f"install_tool {path} {digest}")
+    # Do not follow checkout links at any component below the supplied root.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        scripts = os.open(repo / "scripts", flags)
+        stack.callback(os.close, scripts)
+        hass = os.open("hass", flags, dir_fd=scripts)
+        stack.callback(os.close, hass)
+        for name, oid in sorted(helpers.items()):
+            if git(repo, "cat-file", "-t", oid) != b"blob\n":
+                raise ValueError
+            blob = git(repo, "cat-file", "blob", oid)
+            if blob is None:
+                raise ValueError
+            digest = file_digest(hass, name)
+            if digest != hashlib.sha256(blob).hexdigest():
+                raise ValueError
+            rows.append(f"install_tool scripts/hass/{name.decode('utf-8')} {digest[:12]}")
     return rows
 
 
@@ -92,7 +124,7 @@ def main(argv=None):
             findings.append(remote)
         if not findings:
             try:
-                rows = install_digests(args.repo)
+                rows = install_digests(args.repo, args.sha)
             except (OSError, ValueError):
                 findings.append("dirty")
 

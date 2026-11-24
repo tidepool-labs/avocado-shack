@@ -7,6 +7,7 @@ health: the last non-empty line must be one JSON object with a boolean `ok`, a `
 carry a string `check`, and ok == (no problems). Prints the sorted, unique check ids on one line (empty line if none).
 inbox: one JSON object with integer `pending` and `done` >= 0 and `oldest_pending_minutes` a finite number or null. Prints
 `pending oldest done` (oldest as `null` when there is none).
+Both modes reject duplicate keys anywhere in the final JSON object.
 Exit 0 valid, 3 missing or invalid report (prints the reason only: never the report itself), 2 bad usage.
 Counts and check ids only: problem details, messages and paths are never printed.
 """
@@ -16,12 +17,21 @@ import json, math, re, sys  # noqa: E401
 CHECK_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
+def _unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
 def _last_object(text):
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         raise ValueError("no report")
     try:
-        obj = json.loads(lines[-1])
+        obj = json.loads(lines[-1], object_pairs_hook=_unique_object)
     except (ValueError, RecursionError):
         raise ValueError("report is not JSON") from None
     if not isinstance(obj, dict):

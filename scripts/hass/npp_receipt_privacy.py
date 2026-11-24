@@ -56,13 +56,14 @@ def findings(receipt):
     return hits
 
 
-def scan(root):
+def scan(root, selected_job=None):
     if root.is_symlink():
         return 0, 0, ["no-npp-dir"]
     try:
         with os.scandir(root) as entries:
             jobs = [Path(entry.path) for entry in entries
-                    if re.fullmatch(JOB_RE, entry.name) and entry.is_dir(follow_symlinks=False)]
+                    if (selected_job is None or entry.name == selected_job)
+                    and re.fullmatch(JOB_RE, entry.name) and entry.is_dir(follow_symlinks=False)]
     except OSError:
         return 0, 0, ["no-npp-dir"]
 
@@ -82,6 +83,8 @@ def scan(root):
         receipts += 1
         clean += not hits
         counts.update(hits)
+    if selected_job is not None and receipts == 0:
+        return 0, 0, ["missing-receipt 1"]
     return receipts, clean, [f"{reason} {counts[reason]}" for reason in REASONS if counts[reason]]
 
 
@@ -89,8 +92,12 @@ def main(argv=None):
     parser = PrivateArgumentParser(prog="npp_receipt_privacy.py", description=__doc__,
                                    allow_abbrev=False)
     parser.add_argument("--media", required=True, type=Path, metavar="DIR")
+    parser.add_argument("--job", action="append", metavar="CODE",
+                        help="scan only the exact job and require its receipt")
     args = parser.parse_args(argv)
-    receipts, clean, failures = scan(args.media / "npp")
+    if args.job is not None and (len(args.job) != 1 or not re.fullmatch(JOB_RE, args.job[0])):
+        parser.error("invalid job selector")
+    receipts, clean, failures = scan(args.media / "npp", args.job[0] if args.job else None)
     print(f"receipts {receipts}")
     print(f"clean {clean}")
     for reason in failures:

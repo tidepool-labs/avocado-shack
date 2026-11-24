@@ -97,6 +97,24 @@ class SourcesReviewTests(unittest.TestCase):
         self.assert_findings(self.run_cli(*self.args(current=alias, proposed=bad_json)),
                              "unreadable current", "unreadable proposed")
 
+        # Last-value-wins would hide a conflicting deny rule or entry field and
+        # make an ambiguous file compare equal to the unchanged control.
+        clean = sources(entry())
+        for path in (self.current, self.proposed):
+            self.save(path.name, clean)
+        self.assertEqual(self.assert_status(self.run_cli(*self.args()), 0, PASS), ["entries 1", PASS])
+        text = json.dumps(clean)
+        ambiguous = self.root / "ambiguous.json"
+        for field, before, repeated in (
+            ("deny_domains", '"deny_domains": []', '"deny_domains": ["sample.example"], "deny_domains": []'),
+            ("domain", '"domain": "sample.example"', '"domain": "hidden.invalid", "domain": "sample.example"'),
+        ):
+            ambiguous.write_text(text.replace(before, repeated), encoding="utf-8")
+            for role in ("current", "proposed"):
+                with self.subTest(field=field, role=role):
+                    lines = self.assert_status(self.run_cli(*self.args(**{role: ambiguous})), 1, FAIL)
+                    self.assertEqual(lines, [f"FAIL unreadable {role}", FAIL])
+
     def test_c2_2_entry_shape(self):
         # Subset checks, truthiness-only checks, and arbitrary added_by values would all pass bad rows.
         for invalid in ([], entry(extra="extra"), entry(reviewed_in=""), entry(reviewed_in=1),
@@ -158,14 +176,21 @@ class SourcesReviewTests(unittest.TestCase):
 
     def test_c3_usage_exit_2(self):
         # Parser errors must not look like review findings or echo unrecognized arguments.
+        # Last-value-wins would also silently accept conflicting optional maker records.
+        ambiguous = self.root / "ambiguous-makers.json"
+        ambiguous.write_text('{"makers":{"Sample Grove":{"name":"hidden-canary","name":"Sample Grove"}}}',
+                             encoding="utf-8")
         for args in ([], self.args() + ["--unknown", "synthetic-argument"],
-                     self.args() + ["--makers"], self.args(makers=self.root / "absent-makers.json")):
+                     self.args() + ["--makers"], self.args(makers=self.root / "absent-makers.json"),
+                     self.args(makers=ambiguous)):
             with self.subTest(args=args):
                 result = self.run_cli(*args)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(result.stderr.splitlines()[-1],
                                  "npp_sources_review.py: error: invalid arguments or makers file; see --help")
+                self.assertNotIn(str(ambiguous), result.stderr)
+                self.assertNotIn("hidden-canary", result.stderr)
 
     def test_c4_read_only(self):
         # Even a byte-identical rewrite or transient file in an input directory changes an mtime.

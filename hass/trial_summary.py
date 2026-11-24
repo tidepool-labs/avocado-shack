@@ -16,7 +16,8 @@ NOT_OWNER = ("ignored", "echo", "edited-ignored")  # stored with a NULL time; ne
 MESSAGE_KEYS = ("approved", "rejected", "near-approval", "no-target", "needs-details", "not-drafted", "daily-limit",
                 "too-long", "proposed", "question", "unsupported", "claim-question", "paused", "not-read", "approval-held",
                 "commands", "attachment-unsupported", "attachment-many", "attachment-failed", "photo-duplicate",
-                "photo-on-product", "photo-draft", "photo-refused", "other")
+                "photo-on-product", "photo-draft", "photo-refused", "npp-working", "npp-expired", "npp-unavailable",
+                "other")
 COMMANDS = frozenset({"status", "pause", "resume", "help", "history", "find", "show", "report", "post", "margin", "hidden",
                       "listing", "undo", "memory-list", "memory-none", "memory-forgot", "memory-saved", "memory-updated",
                       "memory-unchanged", "memory-invalid", "memory-ambiguous", "backlog-forgot", "backlog-none"})

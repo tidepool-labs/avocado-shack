@@ -4,7 +4,7 @@ from hashlib import sha256
 import re
 
 from hass import claims, live_policy, publish_live
-from hass.content_model import CATEGORIES, TEXT_LIMITS, iso_day, shop_today, valid_supplier
+from hass.content_model import CATEGORIES, ID_RE, TEXT_LIMITS, iso_day, shop_today, valid_supplier
 from hass.house_style import OWNER_IMAGE_RE
 from hass.npp import private_numbers as numbers
 from hass.npp.copy import words
@@ -188,6 +188,9 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
             or [op.get('op') for op in draft.get('ops', ())] != (['maker.add'] if new_makers else []) + ['product.add']):
         return Verdict(('listing-records',), ())
     product = products[0]['after']
+    key = products[0].get('key')
+    if not isinstance(key, str) or not ID_RE.fullmatch(key) or key != product.get('id'):
+        return Verdict(('listing-records',), ())
     text = copy.text
     if (ctx.category not in CATEGORIES or product.get('category') != ctx.category
             or any(not text.get(key) or text[key] != product.get(key) for key in ('name', 'description', 'imageAlt'))):

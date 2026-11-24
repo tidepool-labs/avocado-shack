@@ -20,17 +20,33 @@ class ReceiptParser(argparse.ArgumentParser):
         raise ReceiptError("expected --listing N and --out PATH")
 
 
+def refuse_git_marker(fd):
+    # Don't follow or read the marker: a linked worktree keeps it as a file.
+    try:
+        os.stat(".git", dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise ReceiptError("output must be outside Git worktrees")
+
+
 def open_parent(path):
     directory = Path(path)
+    if ".." in directory.parts:
+        raise ReceiptError("output parent must not contain '..'")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        fd = os.open(directory.anchor or ".", flags)
+        # Walk from the root even for a relative output, so worktree markers
+        # above the invocation cwd aren't skipped.
+        if not directory.is_absolute():
+            directory = Path.cwd() / directory
+        fd = os.open(directory.anchor, flags)
         try:
-            parts = directory.parts[1:] if directory.anchor else directory.parts
-            for part in parts:
+            for part in directory.parts[1:]:
+                refuse_git_marker(fd)
                 child = os.open(part, flags, dir_fd=fd)
                 os.close(fd)
                 fd = child
+            refuse_git_marker(fd)
             if os.fstat(fd).st_mode & 0o077:
                 raise ReceiptError("output parent allows group or other access")
         except (OSError, ValueError):

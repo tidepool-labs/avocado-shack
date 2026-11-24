@@ -92,8 +92,12 @@ def load_fixture(path=FIXTURE):
     if not isinstance(world, dict) or set(world) - WORLD_KEYS: raise RehearsalError("fixture line 1: world has an unknown field")
     for key in ("start", "ttl_seconds"):
         if key not in world: raise RehearsalError(f"fixture line 1: world.{key} is required")
-    try: datetime.fromisoformat(world["start"]).astimezone(timezone.utc)
-    except (TypeError, ValueError): raise RehearsalError("fixture line 1: world.start must be an ISO time with an offset") from None
+    try:
+        start = datetime.fromisoformat(world["start"])
+        if start.utcoffset() is None:
+            raise ValueError  # astimezone() would otherwise assume the host's time zone.
+    except (TypeError, ValueError):
+        raise RehearsalError("fixture line 1: world.start must be an ISO time with an offset") from None
     if "till" in world and world["till"] is not True: raise RehearsalError("fixture line 1: till must be true")
     rows, seen = [], set()
     for n, row in items[1:]:

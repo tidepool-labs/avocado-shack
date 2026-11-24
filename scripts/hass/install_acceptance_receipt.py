@@ -2,13 +2,15 @@
 """Check a saved Hass acceptance receipt without running acceptance.
 
 Usage: python3 -B scripts/hass/install_acceptance_receipt.py --stdout FILE
-       --metadata FILE --expected-runtime-sha SHA
+       --metadata FILE --expected-runtime-sha SHA [--require-full-roster]
 
 Metadata is a UTF-8 JSON object with stdout_sha256 (64 hex characters over
 unmodified stdout bytes), runtime_sha (full 40-hex Git commit), and exit_status
-(integer). Supply the expected commit independently of that file. This checks
-consistency, not capture authenticity, live deployment, or whether the attended
-command ran every intended ID. Keep the original capture private.
+(integer). Supply the expected commit independently of that file. By default,
+selected runs can pass the consistency check. With --require-full-roster, the
+rows must match the producer's complete ID roster, including not-covered rows.
+Neither mode authenticates the capture or proves how it was produced or what is
+deployed. Keep the original capture private.
 """
 
 import argparse
@@ -54,7 +56,8 @@ def _hex(value: object, length: int) -> TypeGuard[str]:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{%d}" % length, value) is not None
 
 
-def validate(stdout: bytes, metadata: bytes, expected_runtime_sha: str) -> dict:
+def validate(stdout: bytes, metadata: bytes, expected_runtime_sha: str, *,
+             require_full_roster: bool = False) -> dict:
     """Return counts and uncovered IDs, or raise a redacted ReceiptError."""
     if not _hex(expected_runtime_sha, 40):
         raise ReceiptError("expected runtime SHA must be a full 40-hex Git commit")
@@ -104,21 +107,30 @@ def validate(stdout: bytes, metadata: bytes, expected_runtime_sha: str) -> dict:
             not_covered.append(ident)
     if not seen or counts != summary:
         raise ReceiptError("summary counts do not match a nonempty set of stdout rows")
-    return {"summary": counts, "not_covered_ids": not_covered}
+    result = {"summary": counts, "not_covered_ids": not_covered}
+    if require_full_roster:
+        from hass.acceptance import ALL_IDS
+
+        if seen != set(ALL_IDS):
+            raise ReceiptError("saved rows do not match the full producer H ID roster")
+        result["full_roster"] = True
+    return result
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Check a saved Hass acceptance receipt.",
-                                     epilog="Checks consistency only; does not authenticate the capture.")
+                                     epilog="Does not authenticate the capture or prove how it was produced.")
     parser.add_argument("--stdout", required=True, type=Path, help="saved acceptance stdout")
     parser.add_argument("--metadata", required=True, type=Path,
                         help="JSON with stdout_sha256, runtime_sha, and exit_status")
     parser.add_argument("--expected-runtime-sha", required=True,
                         help="independently obtained full runtime commit SHA")
+    parser.add_argument("--require-full-roster", action="store_true",
+                        help="require exactly the producer's full set of H IDs, including not-covered rows")
     args = parser.parse_args(argv)
     try:
         result = validate(args.stdout.read_bytes(), args.metadata.read_bytes(),
-                          args.expected_runtime_sha)
+                          args.expected_runtime_sha, require_full_roster=args.require_full_roster)
     except (OSError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, ReceiptError) else "cannot read capture inputs"
         print(f"Receipt refused: {reason}", file=sys.stderr)
@@ -128,4 +140,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    # Direct file invocation starts with scripts/hass, not the checkout root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     sys.exit(main())

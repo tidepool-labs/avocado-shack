@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check one pilot publish commit against an operator's path patterns, offline."""
+"""Check one pilot publish commit for allowed and required paths, offline."""
 
 import argparse
 from collections import Counter
@@ -130,10 +130,12 @@ def footprint(args):
         raise Finding("git-error")
     counts = Counter()
     unexpected = []
+    missing = set(args.require_path)
     for status, name in zip(fields[::2], fields[1::2]):
         letter = chr(status[0])
         path = name.decode("utf-8", errors="surrogateescape")
         counts[letter] += 1
+        missing.discard(path)
         if not any(fnmatchcase(path, pattern) for pattern in patterns):
             unexpected.append((letter, path))
     changed = sum(counts.values())
@@ -141,10 +143,12 @@ def footprint(args):
     for letter, count in sorted(counts.items()):
         print(f"status {letter} {count}")
     print(f"allowed {changed - len(unexpected)}")
-    for letter, path in unexpected:
-        print(f"unexpected {letter} {json.dumps(path)}")
     if not changed:
         raise Finding("no-change")
+    if missing:
+        raise Finding(f"missing-required {len(missing)}")
+    for letter, path in unexpected:
+        print(f"unexpected {letter} {json.dumps(path)}")
     if unexpected:
         raise Finding(f"unexpected {len(unexpected)}")
 
@@ -155,7 +159,12 @@ def main(argv=None):
     parser.add_argument("--from", required=True, dest="before", help="the publish commit's sole parent")
     parser.add_argument("--to", required=True, help="the single publish commit")
     parser.add_argument("--allow", required=True, type=Path, help="UTF-8 file with one path pattern per line")
+    parser.add_argument("--require-path", action="append", default=[], metavar="PATH",
+                        help="exact repo-relative changed path (repeatable; not a pattern)")
     args = parser.parse_args(argv)
+    for path in args.require_path:
+        if {"", ".", ".."}.intersection(path.split("/")):
+            parser.error("required paths must be repo-relative")
     try:
         footprint(args)
     except Finding as finding:

@@ -45,8 +45,16 @@ def binding_reason(drafts, approvals):
         return "hash-mismatch"
     if latest["base"] != approval["base"]:
         return "base-mismatch"
-    if datetime.fromisoformat(approval["approved_at"]) > datetime.fromisoformat(approval["expires_at"]):
+    values = latest["proposed_at"], approval["approved_at"], approval["expires_at"]
+    if None in values:
+        return "invalid-chronology"
+    proposed, approved, expires = (datetime.fromisoformat(value) for value in values)
+    if any(value.utcoffset() is None for value in (proposed, approved, expires)):
+        return "invalid-chronology"
+    if approved > expires:
         return "expired"
+    if approved < proposed:
+        return "before-proposal"
     return None
 
 

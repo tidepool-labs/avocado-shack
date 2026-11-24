@@ -39,11 +39,19 @@ def main(argv=None):
     parser.add_argument("--from", dest="start", required=True, help="inclusive ISO-8601 instant with offset")
     parser.add_argument("--to", required=True, help="exclusive ISO-8601 instant with offset")
     parser.add_argument("--allow", required=True, action="append", help="allowed chat digest (12 lowercase hex)")
+    parser.add_argument("--expect-chat", action="append", default=[], metavar="DIGEST",
+                        help="require activity from one allowed chat digest (12 lowercase hex)")
     args = parser.parse_args(argv)
 
     findings = []
-    if any(not re.fullmatch(r"[0-9a-f]{12}", digest) for digest in args.allow):
+    allowed = set(args.allow)
+    expected = args.expect_chat[0] if args.expect_chat else None
+    if any(not re.fullmatch(r"[0-9a-f]{12}", digest) for digest in args.allow + args.expect_chat):
         findings.append("bad-digest")
+    elif len(args.expect_chat) > 1:
+        findings.append("multiple-expected-chats")
+    elif expected is not None and expected not in allowed:
+        findings.append("expected-chat-not-allowed")
     start, end = instant(args.start), instant(args.to)
     if start is None or end is None:
         findings.append("bad-time")
@@ -84,7 +92,6 @@ def main(argv=None):
         # invent one, expose an exception, or print potentially partial totals.
         return report(findings, failed=True)
 
-    allowed = set(args.allow)
     if unattributed:
         findings.append(f"unattributed {unattributed}")
     for digest, count in sorted(counts.items()):
@@ -92,6 +99,8 @@ def main(argv=None):
         print(f"chat {digest} messages {count} {verdict}")
         if verdict == "other":
             findings.append(f"other-chat {digest}")
+    if expected is not None and expected not in counts:
+        findings.append("missing-expected-chat")
     return report(findings)
 
 

@@ -48,7 +48,7 @@ def read_regular(path, findings, owner_uid, *, backup=False):
                 findings.add("backup-mode")
             if info.st_uid != owner_uid:
                 findings.add("owner")
-            return source.read()
+            return source.read(), (info.st_dev, info.st_ino)
     except OSError as error:
         findings.add("symlink" if error.errno == errno.ELOOP else "not-regular")
     except ValueError:
@@ -92,14 +92,19 @@ def main(argv=None):
     config = read_regular(args.config, findings, args.owner_uid)
     backup = read_regular(args.backup, findings, args.owner_uid, backup=True)
     if backup is not None:
-        if config is not None and config != backup:
-            findings.add("bytes-differ")
-        check_json(backup, findings)
+        backup_bytes, backup_identity = backup
+        if config is not None:
+            config_bytes, config_identity = config
+            if config_identity == backup_identity:
+                findings.add("backup-aliases-config")
+            if config_bytes != backup_bytes:
+                findings.add("bytes-differ")
+        check_json(backup_bytes, findings)
 
-    if backup is not None and not findings:
-        print(f"backup_sha256 {hashlib.sha256(backup).hexdigest()}")
-        print("PASS install_backup_receipt")
-        return 0
+        if not findings:
+            print(f"backup_sha256 {hashlib.sha256(backup_bytes).hexdigest()}")
+            print("PASS install_backup_receipt")
+            return 0
     for reason in sorted(findings):
         print(f"FAIL {reason}")
     print("FAIL install_backup_receipt")

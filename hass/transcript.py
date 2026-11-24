@@ -46,6 +46,28 @@ def event(chat, sender, direction, kind, text, provider_id=None, reply_to=None, 
                 reply_to=reply_to, disposition=disposition, draft_code=None, backend=None, model=None, latency_ms=None) | extra
 
 
+def npp_job(db, provider_id):
+    """HRM-21 C1: the listing (job id) whose accepted NPP turn this inbound message is, else None. Never raises."""
+    try:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='npp_turns'").fetchone():
+            row = db.execute("SELECT job_id FROM npp_turns WHERE provider_id=?", (provider_id,)).fetchone()
+            return row[0] if row else None
+    except Exception:  # A failed link must never cost the row itself.
+        pass
+    return None
+
+
+@contextlib.contextmanager
+def linked(outbox, code):
+    """HRM-21 C2: an NPP reply queued inside names its own listing (`<job>`) or card version (`<job>-<n>`)."""
+    before = getattr(outbox, 'transcript_link', None)
+    outbox.transcript_link = code
+    try:
+        yield
+    finally:
+        outbox.transcript_link = before
+
+
 class Capture:
     """Entered at handle's entry; finally appends even ignored/error paths, before returning.
 
@@ -86,6 +108,8 @@ class Capture:
         match = parse_keyword(m.text)
         if match and match[1] and match[1] != 'all':  # AV1052-08: `no all` names no draft
             out['draft_code'] = match[1]
+        elif (job := npp_job(c.db, m.provider_id)) is not None:  # HRM-21 C1: an accepted NPP turn names its listing
+            out['draft_code'] = job
         return out
 
     def __exit__(self, *_):
@@ -108,8 +132,13 @@ def outgoing(outbox, chat, text, attachments, reply_to):
         for p in attachments:
             try: shas.append(hashlib.sha256(Path(p).read_bytes()).hexdigest())
             except OSError: pass  # An unavailable picture must not erase the reply text.
+        meta = ctx.metadata() if ctx else {}
+        link = getattr(outbox, 'transcript_link', None)
+        if link is not None:
+            # An NPP reply names its own card: an inherited inbound code (e.g. during an early flush) may be another draft's.
+            meta['draft_code'] = link
         safe(state, **event(chat, 'hass', 'out', 'photo' if attachments else 'text', text,
-             reply_to=reply_to or outbox.msg_id, attachments=shas, **(ctx.metadata() if ctx else {})))
+             reply_to=reply_to or outbox.msg_id, attachments=shas, **meta))
     except Exception:
         logging.getLogger(__name__).error("ALERT transcript-write-failed")
 

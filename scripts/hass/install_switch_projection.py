@@ -2,9 +2,11 @@
 """Project the editor's three NPP switches for the flat preflight input."""
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 
 
@@ -28,11 +30,36 @@ def reject_constant(_token):
     raise ProjectionError("config contains a non-JSON number")
 
 
+@contextmanager
+def open_directory(directory):
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(directory.anchor or ".", dir_flags)
+    try:
+        parts = directory.parts[1:] if directory.anchor else directory.parts
+        # Open every component relative to its pinned parent, without following links.
+        for part in parts:
+            next_fd = os.open(part, dir_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
+
+
 def project(config):
     try:
-        with config.open(encoding="utf-8") as source:
-            document = json.load(source, object_pairs_hook=unique_object,
-                                 parse_constant=reject_constant)
+        with open_directory(config.parent) as parent_fd:
+            # A FIFO without a writer must not block before the descriptor check.
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            fd = os.open(config.name, flags, dir_fd=parent_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise ProjectionError("config must be a regular file")
+                with os.fdopen(fd, encoding="utf-8", closefd=False) as source:
+                    document = json.load(source, object_pairs_hook=unique_object,
+                                         parse_constant=reject_constant)
+            finally:
+                os.close(fd)
     except ProjectionError:
         raise
     except (ValueError, RecursionError):
@@ -56,23 +83,12 @@ def write_new_private(path, payload):
     parent, name = os.path.split(path)
     if not name:
         raise ProjectionError("output path must name a new file")
-    directory = Path(parent)
-    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    parent_fd = os.open(directory.anchor or ".", dir_flags)
-    try:
-        parts = directory.parts[1:] if directory.anchor else directory.parts
-        # Walk via directory FDs so a symlink swap cannot redirect the write.
-        for part in parts:
-            next_fd = os.open(part, dir_flags, dir_fd=parent_fd)
-            os.close(parent_fd)
-            parent_fd = next_fd
+    with open_directory(Path(parent)) as parent_fd:
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      0o600, dir_fd=parent_fd)
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             os.fchmod(output.fileno(), 0o600)  # Exact even with a restrictive umask.
             output.write(payload)
-    finally:
-        os.close(parent_fd)
 
 
 def main(argv=None):

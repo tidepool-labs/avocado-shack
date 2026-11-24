@@ -35,17 +35,20 @@ def capture():
 
 
 class RuntimeReadbackTest(unittest.TestCase):
-    def run_capture(self, text, target=TARGET, root=ROOT):
+    def run_capture(self, text, target=TARGET, root=ROOT, *, expected_old=None):
+        argv = ["--target", target, "--runtime", root]
+        if expected_old is not None:
+            argv += ["--expected-old", expected_old]
         stdout, stderr = StringIO(), StringIO()
         with patch("sys.stdin", StringIO(text)), redirect_stdout(stdout), redirect_stderr(stderr):
             try:
-                code = install_runtime_readback.main(["--target", target, "--runtime", root])
+                code = install_runtime_readback.main(argv)
             except SystemExit as exc:
                 code = exc.code
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def assert_refused(self, document, reason):
-        code, stdout, stderr = self.run_capture(json.dumps(document))
+    def assert_refused(self, document, reason, *, expected_old=None):
+        code, stdout, stderr = self.run_capture(json.dumps(document), expected_old=expected_old)
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
         self.assertIn(reason, stderr)
@@ -103,6 +106,28 @@ class RuntimeReadbackTest(unittest.TestCase):
                 record[key] = value
                 self.assert_refused(doc, reason)
 
+        # A target-only check would accept a stale or incomplete move receipt
+        # even though the independent checkout and running pins still agree.
+        doc = capture()
+        doc["receipt"]["old"] = OTHER
+        code, stdout, stderr = self.run_capture(json.dumps(doc), expected_old=OTHER)
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("receipt old pin matches pre-move selection", stdout)
+        self.assertIn("not process attestation", stdout)
+        self.assertNotIn(OTHER, stdout)
+
+        doc["receipt"]["old"] = "c" * 40
+        self.assert_refused(doc, "receipt old pin", expected_old=OTHER)
+        code, stdout, stderr = self.run_capture(json.dumps(doc))
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertNotIn("old", stdout)
+
+        del doc["receipt"]["old"]
+        self.assert_refused(doc, "receipt old pin", expected_old=OTHER)
+        # Exact receipt equality alone is not evidence of a move.
+        doc["receipt"]["old"] = TARGET
+        self.assert_refused(doc, "not a move", expected_old=TARGET)
+
     def test_unit_observations_must_cover_each_unit_and_succeed(self):
         # A timer cannot stand in for a missing service; 'active' with a failed
         # query or nonzero restarts does not constitute a passing observation.
@@ -153,3 +178,10 @@ class RuntimeReadbackTest(unittest.TestCase):
                 self.assertEqual(actual, code)
                 self.assertEqual(stdout, "")
                 self.assertIn("REFUSED", stderr)
+        for malformed in ("", OTHER[:12], OTHER.upper(), "g" * 40):
+            with self.subTest(expected_old=malformed):
+                doc = capture()
+                doc["receipt"]["old"] = malformed
+                code, stdout, stderr = self.run_capture(json.dumps(doc), expected_old=malformed)
+                self.assertEqual((code, stdout), (2, ""))
+                self.assertIn("--expected-old must be a full lowercase 40-hex commit", stderr)

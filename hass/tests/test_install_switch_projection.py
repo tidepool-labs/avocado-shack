@@ -1,6 +1,7 @@
 """Fixture-only CLI tests for the private preflight projection."""
 
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -24,11 +25,15 @@ class InstallSwitchProjectionTests(unittest.TestCase):
 
     def invoke(self, raw, *options, umask=-1):
         self.config.write_bytes(raw)
+        result = self.run_projection(self.config, *options, umask=umask)
+        self.assertEqual(self.config.read_bytes(), raw)
+        return result
+
+    def run_projection(self, config, *options, umask=-1):
         result = subprocess.run(
-            [sys.executable, "-B", str(SCRIPT), "--config", str(self.config), *options],
+            [sys.executable, "-B", str(SCRIPT), "--config", str(config), *options],
             cwd=self.root, capture_output=True, text=True, timeout=10, umask=umask,
         )
-        self.assertEqual(self.config.read_bytes(), raw)
         self.assertNotIn(SECRET, result.stdout + result.stderr)
         return result
 
@@ -56,6 +61,44 @@ class InstallSwitchProjectionTests(unittest.TestCase):
                 for key, value in expected.items():
                     self.assertIs(projection[key], value)
                 self.assertEqual(set(self.root.iterdir()), {self.config})
+
+    def test_reads_only_the_selected_regular_config(self):
+        # A plain path open could report staged bytes as disk readback, or hang
+        # on a FIFO before checking that the opened object is a regular file.
+        expected = dict.fromkeys(("npp", "houseRender", "photo_polish"), True)
+        raw = json.dumps({"settings": {**expected, "ignored": SECRET}}).encode()
+        self.config.write_bytes(raw)
+        staged = self.root / "staged" / "nested"
+        staged.mkdir(parents=True)
+        staged_config = staged / self.config.name
+        staged_config.write_bytes(raw)
+
+        regular = self.run_projection(staged_config.relative_to(self.root), "--stdout")
+        self.assertEqual((regular.returncode, regular.stderr), (0, ""))
+        self.assertEqual(json.loads(regular.stdout), expected)
+        selected = self.run_projection(self.config.name, "--stdout")
+        self.assertEqual((selected.returncode, selected.stdout, selected.stderr),
+                         (0, regular.stdout, ""))
+
+        leaf = self.root / "leaf.json"
+        leaf.symlink_to(staged_config)
+        parent = self.root / "alias"
+        parent.symlink_to(staged.parent, target_is_directory=True)
+        fifo = self.root / "fifo"
+        os.mkfifo(fifo)
+        for label, config, reason in (
+            ("leaf-link", leaf, "could not read config"),
+            ("parent-link", parent / "nested" / self.config.name, "could not read config"),
+            ("fifo", fifo, "config must be a regular file"),
+        ):
+            with self.subTest(input=label, output="stdout"):
+                self.assert_refused(self.run_projection(config, "--stdout"), reason)
+            with self.subTest(input=label, output="file"):
+                destination = self.root / f"{label}.projection.json"
+                self.assert_refused(self.run_projection(config, "--out", destination), reason)
+                self.assertFalse(destination.exists())
+        self.assertEqual(self.config.read_bytes(), raw)
+        self.assertEqual(staged_config.read_bytes(), raw)
 
     def test_writes_only_a_new_mode_0600_file(self):
         # An ordinary text open can use a permissive umask and overwrite on retry.

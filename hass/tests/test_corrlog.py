@@ -53,9 +53,40 @@ class LogFile(LogCase):
         self.assertNotIn("provider-msg-1", json.dumps(row))
         self.assertEqual(len(row["reply"]), 12)
 
-    def test_seconds_is_left_out_when_not_given(self):
-        self.log.record("error", "save-failed")
-        self.assertNotIn("seconds", self.lines()[0])
+    def test_unavailable_seconds_do_not_spoil_the_saved_event(self):
+        # A nonfinite JSON token breaks strict readers; float overflow used to drop the whole event.
+        def reject_constant(token):
+            raise ValueError(f"non-JSON constant: {token}")
+
+        def record(seconds):
+            return self.log.record("error", "save-failed", seconds=seconds,
+                                   msg="fixture-msg", reply="fixture-reply", excerpt="email fixture@example.invalid")
+
+        self.assertTrue(record(2.5))
+        path = self.log.dir / "2026-11-08.jsonl"
+
+        def read_last():
+            raw = path.read_text("utf-8").splitlines()[-1]
+            return json.loads(raw, parse_constant=reject_constant)
+
+        healthy = read_last()
+        self.assertEqual(healthy["seconds"], 2.5)
+        self.assertEqual(healthy["excerpt"], "email [address]")
+        untimed = {key: value for key, value in healthy.items() if key != "seconds"}
+        unavailable = {"infinity": float("inf"), "negative infinity": float("-inf"), "nan": float("nan"),
+                       "overflow": 10**400, "absent": None, "boolean": True}
+        for case, seconds in unavailable.items():
+            with self.subTest(case=case):
+                self.assertTrue(record(seconds))
+                self.assertEqual(read_last(), untimed)
+
+        self.assertEqual(self.log.rows(), [healthy] + [untimed] * len(unavailable))
+        summary = corrlog.weekly_line(self.log)
+        self.assertIn(f"something went wrong ({1 + len(unavailable)} times;", summary)
+        saved = path.read_text("utf-8")
+        for private in ("fixture-msg", "fixture-reply", "fixture@example.invalid"):
+            self.assertNotIn(private, saved)
+            self.assertNotIn(private, summary)
 
     def test_every_kind_is_accepted_and_an_unknown_kind_is_not(self):
         self.assertEqual(set(corrlog.KINDS), {"did-not-understand", "could-not-do", "asked-again", "error", "slow", "voice-fallback", "corrected"})

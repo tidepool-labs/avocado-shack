@@ -3,7 +3,8 @@
 
 Usage: python3 scripts/hass/install_quiescence.py SNAPSHOT.json
 
-The UTF-8 JSON file contains an array of four observations in any order.
+The UTF-8 JSON file must be regular (not a symlink) and contain an array
+of four observations in any order.
 Each observation has exactly these fields (example row):
     {"unit": "hass-health.service", "exit_code": 3,
      "stdout": "inactive\n", "stderr": ""}
@@ -14,7 +15,9 @@ means the snapshot does not establish that all four units were inactive.
 
 import argparse
 import json
+import os
 from pathlib import Path
+import stat
 
 
 UNITS = frozenset({
@@ -36,8 +39,14 @@ def unique_object(pairs):
 
 def snapshot_passes(path):
     try:
-        with path.open("rb") as stream:
-            data = stream.read(MAX_BYTES + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return False
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                data = stream.read(MAX_BYTES + 1)
+        finally:
+            os.close(fd)
         if len(data) > MAX_BYTES:
             return False
         rows = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object)

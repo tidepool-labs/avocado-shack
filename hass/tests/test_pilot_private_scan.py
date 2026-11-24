@@ -35,6 +35,34 @@ class PilotPrivateScanTests(unittest.TestCase):
             status = SCAN.main(["--private", str(private or self.private), *map(str, options)])
         return status, out.getvalue(), err.getvalue()
 
+    def test_pilot_privacy_requires_capture(self):
+        # Receipt evidence requires both usable capture types. Checking only
+        # option presence or raw HTML bytes would pass an empty projection.
+        reply = self.fixture("reply.txt", "Synthetic listing reply")
+        card = self.fixture("card.html", "<p>Public price: $6.75 each</p>")
+        blank_reply = self.fixture("blank.txt", " \t\n")
+        empty_card = self.fixture("empty.html", "<p>&nbsp;</p><!-- fixture --><script>47</script>")
+        leaky_card = self.fixture("leaky.html", "<p>Synthetic private number: 47</p>")
+
+        for label, options in (
+            ("no captures", ()),
+            ("text only", ("--receipt", "--text", reply)),
+            ("html only", ("--receipt", "--html", card)),
+            ("blank text", ("--receipt", "--text", blank_reply, "--html", card)),
+            ("empty extracted HTML", ("--receipt", "--text", reply, "--html", empty_card)),
+        ):
+            with self.subTest(case=label):
+                status, out, err = self.scan(*options)
+                self.assertEqual(status, 2)
+                self.assertTrue(err)
+                self.assertNotIn(str(self.root), out + err)
+                self.assertNotIn("47", out + err)
+
+        self.assertEqual(self.scan("--receipt", "--text", reply, "--html", card),
+                         (0, "reply.txt: clean\ncard.html: clean\n", ""))
+        self.assertEqual(self.scan("--receipt", "--text", reply, "--html", card, "--html", leaky_card),
+                         (1, "reply.txt: clean\ncard.html: clean\nleaky.html: private-number (1)\n", ""))
+
     def test_public_price_is_not_a_hit_in_cli(self):
         # Using the generic money rejection rule would fail this direct invocation.
         card = self.fixture("card.html", "<p>Public price: $6.75 each</p>")

@@ -90,20 +90,24 @@ class PilotSenderCheckTests(unittest.TestCase):
         self.add_message("allow", START, ALLOWED_CHAT)
         self.add_message("other-a", START, OTHER_CHAT)
         self.add_message("other-b", START, OTHER_CHAT)
-        self.assert_report(
-            self.invoke(), 1,
-            *sorted([f"chat {digest(ALLOWED_CHAT)} messages 1 allowed",
-                     f"chat {digest(OTHER_CHAT)} messages 2 other"]),
-            f"FAIL other-chat {digest(OTHER_CHAT)}",
-        )
+        for selection in ((), ("--expect-chat", digest(ALLOWED_CHAT))):
+            with self.subTest(selection=selection):
+                self.assert_report(
+                    self.invoke(*selection), 1,
+                    *sorted([f"chat {digest(ALLOWED_CHAT)} messages 1 allowed",
+                             f"chat {digest(OTHER_CHAT)} messages 2 other"]),
+                    f"FAIL other-chat {digest(OTHER_CHAT)}",
+                )
 
     def test_unattributed_messages_are_counted_despite_other_chat_rows(self):
         # An inner join silently loses these, or a wrong join assigns them a chat.
         self.add_message("with-chat", START, ALLOWED_CHAT)
         self.add_message("orphan-a", START, None)
         self.add_message("orphan-b", START, None)
-        self.assert_report(self.invoke(), 1, f"chat {digest(ALLOWED_CHAT)} messages 1 allowed",
-                           "FAIL unattributed 2")
+        for selection in ((), ("--expect-chat", digest(ALLOWED_CHAT))):
+            with self.subTest(selection=selection):
+                self.assert_report(self.invoke(*selection), 1,
+                                   f"chat {digest(ALLOWED_CHAT)} messages 1 allowed", "FAIL unattributed 2")
 
     def test_bad_digest_is_a_finding_not_a_usage_error(self):
         # Do not normalize uppercase, accept a prefix, or ignore a second bad flag.
@@ -135,6 +139,41 @@ class PilotSenderCheckTests(unittest.TestCase):
         self.assert_report(self.invoke(end="2030-01-01T07:00:00-05:00"), 1, "FAIL empty-window")
         self.assert_report(self.invoke(end="2030-01-01T11:59:59Z"), 1, "FAIL empty-window")
         self.assert_report(self.invoke(), 0)
+
+    def test_selected_owner_chat_must_appear(self):
+        # A clean allowlist is not evidence of the selected chat: accepting
+        # silence, any allowed row, or an end-boundary row would falsely pass.
+        expected, other = digest(ALLOWED_CHAT), digest(OTHER_CHAT)
+        allow_other = ("--allow", other)
+        select = (*allow_other, "--expect-chat", expected)
+        other_line = f"chat {other} messages 1 allowed"
+        missing = "FAIL missing-expected-chat"
+        with self.subTest(case="empty selection"):
+            self.assert_report(self.invoke(*select), 1, missing)
+        self.add_message("other-allowed", START, OTHER_CHAT)
+        with self.subTest(case="only the other allowed chat"):
+            self.assert_report(self.invoke(*allow_other), 0, other_line)
+            self.assert_report(self.invoke(*select), 1, other_line, missing)
+        self.add_message("end", END, ALLOWED_CHAT)
+        with self.subTest(case="expected chat at excluded boundary"):
+            self.assert_report(self.invoke(*select), 1, other_line, missing)
+        self.add_message("start", START, ALLOWED_CHAT)
+        with self.subTest(case="expected chat inside window"):
+            self.assert_report(self.invoke(*select), 0,
+                               *sorted([other_line, f"chat {expected} messages 1 allowed"]))
+
+    def test_expected_chat_must_be_one_valid_allowed_digest(self):
+        # Do not let --expect-chat extend the allowlist or silently pick the
+        # last of multiple values. Invalid arguments must not echo raw input.
+        expected = digest(ALLOWED_CHAT)
+        self.add_message("expected", START, ALLOWED_CHAT)
+        for options, finding in (
+            (("--expect-chat", ALLOWED_CHAT), "bad-digest"),
+            (("--expect-chat", digest(OTHER_CHAT)), "expected-chat-not-allowed"),
+            (("--expect-chat", expected, "--expect-chat", expected), "multiple-expected-chats"),
+        ):
+            with self.subTest(finding=finding):
+                self.assert_report(self.invoke(*options), 1, f"FAIL {finding}")
 
     def test_missing_tables_report_each_fixed_name(self):
         # A schema check must distinguish missing tables from an empty result set.

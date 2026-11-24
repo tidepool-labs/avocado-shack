@@ -23,6 +23,7 @@ HIDDEN = {"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"}
 STRING_KINDS = ("id", "maker_key", "text", "url", "enum", "date", "time", "image", "deal")  # deal: the owner's special deal line (AVO-SPECIALS-1)
 NAME_CUT = 40
 AGAIN = "Could you say it another way?"
+UNREADABLE_CHANGE = f"I couldn't read part of that message. {AGAIN}"
 UNDO_GUIDANCE = "To undo the last change, say " + voice.quote("undo") + ". To see what we changed lately, say " + voice.quote("history") + "."
 PRICE_REPLY = "The website doesn't show prices, so I haven't made any change. Could you send it without the price?"  # AV0222-03
 PLAIN_TEXT_REPLY = ("The website only takes plain words, so I haven't made any change. "
@@ -75,12 +76,12 @@ def _enum_question(op_name: str, arg_name: str, value, choices) -> str:
 def _problem(result: dict, registry, pending_codes, from_intake):
     calls = result["ops"]
     if not calls: return "I couldn't find a change in that message. What would you like to change?"
-    if len(calls) > MAX_OPS:  # RF2030-7: counted before shapes, repeats and the revises code
+    if len(calls) > MAX_OPS:  # RF2030-7: counted before call shapes, repeats and waiting-code checks
         return "That's a lot of changes at once. Could you send them a few at a time?"
     for n, call in enumerate(calls, 1):
         if not (isinstance(call, dict) and set(call) == {"op", "args"} and isinstance(call["op"], str)
                 and isinstance(call["args"], dict)):
-            return f"I couldn't read part of that message. {AGAIN}"
+            return UNREADABLE_CHANGE
     if any(call["op"] == "history.revert" for call in calls): return UNDO_GUIDANCE  # AV0007-02: whole result refused
     seen = {}
     for i, call in enumerate(calls, 1):
@@ -131,6 +132,9 @@ def lookup_command(text):
 def check(result: dict, registry, pending_codes, *, from_intake=False) -> dict:
     """``result`` unchanged when it is fine (or is already a question/unsupported reply), else {"question": text}.
     AV1104-06: a lookup is unchanged when it names an allowed read-only command, else {"unsupported": LOOKUP_REFUSED}."""
+    if "ops" in result and (not isinstance(result["ops"], list) or "revises" not in result
+                            or (result["revises"] is not None and not isinstance(result["revises"], str))):
+        return {"question": UNREADABLE_CHANGE}
     if "lookup" in result: return result if lookup_command(result["lookup"]) else {"unsupported": LOOKUP_REFUSED}
     if "ops" not in result: return result
     problem = _problem(result, registry, set(pending_codes), from_intake)

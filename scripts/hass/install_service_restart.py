@@ -65,6 +65,8 @@ def unit_findings(first, second, state, installed):
     if state == STATES[".service"]:
         if a["NRestarts"] != b["NRestarts"]:
             yield "restarted"
+        if min(a["MainPID"], b["MainPID"]) <= 0:
+            yield "missing-process"
         if a["MainPID"] != b["MainPID"]:
             yield "pid-changed"
         if min(a["ExecMainStartTimestampMonotonic"], b["ExecMainStartTimestampMonotonic"]) <= installed:

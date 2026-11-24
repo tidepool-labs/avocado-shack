@@ -140,13 +140,15 @@ class NlCorpusOpsCheckTests(unittest.TestCase):
         )
         self.assert_fixture_report(self.check(), 1, 3, 0, "FAIL arg-problem bad")
 
-        # No site directory is supplied, so replay checks image syntax only: a well-formed
-        # path passes, a malformed one is still a finding (a name-only check would pass both).
+        # No site directory is supplied: a well-formed image path passes on syntax alone (no file
+        # probe, no crash), while a malformed one is still a finding. Contract: offline replay keeps
+        # syntax refusals (ops/__init__.py _image_file_problem); a checker that flags every image
+        # call, or one that accepts any string, would fail one of these two.
         self.fixture_corpus(case("image", call("product.edit", id="photo-product-001",
                                               image="assets/products/photo-product-001.webp")))
         self.assert_fixture_report(self.check(), 0, 1, 0)
         self.fixture_corpus(case("image", call("product.edit", id="photo-product-001",
-                                              image="elsewhere/photo-product-001.webp")))
+                                              image="../outside.webp")))
         self.assert_fixture_report(self.check(), 1, 1, 0, "FAIL arg-problem image")
 
     def test_c3_usage_exit_2(self):

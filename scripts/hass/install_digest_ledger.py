@@ -75,7 +75,7 @@ def lookup(ledger, label):
                 and valid_time(entry["at"])):
             raise Refusal("bad-ledger")
         if entry["label"] == label:
-            last = entry["sha256"]
+            last = (entry["sha256"], entry["size"])
         terminated = line.endswith(b"\n")
     return last, terminated
 
@@ -135,7 +135,7 @@ def use_ledger(args, digest, size):
                 ledger.write((prefix + json.dumps(entry) + "\n").encode("utf-8"))
             elif last is None:
                 raise Refusal("no-entry")
-            elif last != digest:
+            elif last != (digest, size):
                 raise Refusal("drift")
     finally:
         os.close(parent_fd)

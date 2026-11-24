@@ -30,16 +30,20 @@ class InstallSwitchReadbackTests(unittest.TestCase):
         stdout, stderr = StringIO(), StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             status = install_switch_readback.main(self.argv)
-        if difference is None:
+        if difference is None and diagnostic is None:
             self.assertEqual((status, stdout.getvalue(), stderr.getvalue()), (
                 0, 'PASS "/settings/npp" "/settings/houseRender" "/settings/photo_polish"\n', "",
             ))
         else:
             self.assertEqual((status, stdout.getvalue()), (1, ""))
-            self.assertTrue(stderr.getvalue().endswith(f" at {json.dumps(difference)}\n"), stderr.getvalue())
-            if diagnostic:
-                self.assertTrue(stderr.getvalue().startswith(diagnostic), stderr.getvalue())
+            if difference is None:
+                self.assertEqual(stderr.getvalue(), f"{diagnostic}\n")
+            else:
+                self.assertTrue(stderr.getvalue().endswith(f" at {json.dumps(difference)}\n"), stderr.getvalue())
+                if diagnostic:
+                    self.assertTrue(stderr.getvalue().startswith(diagnostic), stderr.getvalue())
         self.assertNotIn(SENTINEL, stdout.getvalue() + stderr.getvalue())
+        return stdout.getvalue(), stderr.getvalue()
 
     def test_inserts_absent_switches_and_accepts_reordered_objects(self):
         # Byte/dict-order comparisons would reject this otherwise exact edit.
@@ -80,21 +84,22 @@ class InstallSwitchReadbackTests(unittest.TestCase):
 
     def test_detects_unrelated_changes_even_with_all_switches_on(self):
         # A switch projection misses other edits, including nested Python-equal types.
-        for old, new, path in (
-            ('true', '1', ''), ('0', 'false', ''), ('1', '1.0', ''), ('true', '1.0', ''),
-            ('null', 'false', ''), ('[]', '{}', ''), ('1', '"1"', ''),
-            ('[{"x":true}]', '[{"x":1}]', '/0/x'),
-            ('[1,2]', '[2,1]', '/0'), ('[1]', '[1,2]', '/1'), ('[1,2]', '[1]', '/1'),
-            ('{}', '{"added":1}', '/added'), ('{"removed":1}', '{}', '/removed'),
-            ('1.0000000000000000001', '1.0000000000000000002', ''),
-            ('1e400', '2e400', ''), ('1e-400', '2e-400', ''),
+        diagnostic = "FAIL after: unrelated config change"
+        for old, new in (
+            ('true', '1'), ('0', 'false'), ('1', '1.0'), ('true', '1.0'),
+            ('null', 'false'), ('[]', '{}'), ('1', '"1"'),
+            ('[{"x":true}]', '[{"x":1}]'),
+            ('[1,2]', '[2,1]'), ('[1]', '[1,2]'), ('[1,2]', '[1]'),
+            ('{}', '{"added":1}'), ('{"removed":1}', '{}'),
+            ('1.0000000000000000001', '1.0000000000000000002'),
+            ('1e400', '2e400'), ('1e-400', '2e-400'),
         ):
             with self.subTest(old=old, new=new):
                 self.check(OFF[:-1] + ',"other":' + old + '}', ON[:-1] + ',"other":' + new + '}',
-                           difference="/other" + path)
+                           diagnostic=diagnostic)
         self.check(OFF, ON.replace('"houseRender"', '"added":null,"houseRender"'),
-                   difference="/settings/added")
-        self.check(OFF, '[]', difference="")
+                   diagnostic=diagnostic)
+        self.check(OFF, '[]', diagnostic=diagnostic)
 
     def test_refuses_ambiguous_or_invalid_json_in_either_input(self):
         # Last-key-wins and Python's non-standard constants must not normalize invalid inputs.
@@ -114,12 +119,18 @@ class InstallSwitchReadbackTests(unittest.TestCase):
         duplicate = ON.replace('"npp":true', '"npp":false,"npp":true')
         self.check(OFF, duplicate, difference="", diagnostic="FAIL after: duplicate JSON key")
 
-    def test_diagnostic_escapes_keys_without_printing_values(self):
-        # A key with a slash, tilde or newline must still identify a single path.
+    def test_diagnostic_omits_private_keys_and_values(self):
+        # Escaping a JSON Pointer alone would still disclose a private map key.
+        key_canary = "synthetic-line\n/~key-canary"
         before, after = json.loads(OFF), json.loads(ON)
-        before["line\n/~"] = SENTINEL + "-before"
-        after["line\n/~"] = SENTINEL + "-after"
-        self.check(json.dumps(before), json.dumps(after), difference="/line\n~1~0")
+        before["nested"] = {key_canary: SENTINEL + "-before"}
+        after["nested"] = {key_canary: SENTINEL + "-after"}
+        streams = self.check(json.dumps(before), json.dumps(after),
+                             diagnostic="FAIL after: unrelated config change")
+        for stream in streams:
+            self.assertNotIn(key_canary, stream)
+            self.assertNotIn(json.dumps(key_canary)[1:-1], stream)
+            self.assertNotIn(r"synthetic-line\n~1~0key-canary", stream)
 
     def test_cli_reads_both_files_without_editing_them_or_echoing_argv(self):
         # Verify the actual script entrypoint, unchanged input bytes and redacted I/O/usage errors.

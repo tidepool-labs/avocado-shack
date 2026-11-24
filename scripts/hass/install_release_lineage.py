@@ -107,23 +107,36 @@ def check_release(git, target, gates, paths):
               f"ancestor={status}")
         ok &= ancestor
     for path in paths:
-        result = git.run("ls-tree", "--full-tree", "--name-only", "-z", target, "--", path)
-        present = result.returncode == 0 and os.fsencode(path) in result.stdout.split(b"\0")
-        status = "unknown (Git error)" if result.returncode else "yes" if present else "no"
+        result = git.run("ls-tree", "--full-tree", "-z", target, "--", path)
+        status = "unknown (Git error)"
+        if not result.returncode and (not result.stdout or result.stdout.endswith(b"\0")):
+            status = "no"
+            encoded_path = os.fsencode(path)
+            for record in result.stdout.split(b"\0"):
+                metadata, _, name = record.partition(b"\t")
+                if name == encoded_path:
+                    fields = metadata.split(b" ")  # mode, type, object ID
+                    if len(fields) != 3:
+                        status = "unknown (Git error)"
+                    elif fields[0] in {b"100644", b"100755"} and fields[1] == b"blob":
+                        status = "yes"
+                    else:
+                        status = "no (not a regular file blob)"
+                    break
         print(f"Path {ascii(path)}: present={status}")
-        ok &= present
+        ok &= status == "yes"
     return 0 if ok else 1
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         'Manifest format: {"gates": {"LABEL": "FULL_COMMIT_SHA"}, '
-        '"paths": ["relative/tree/path"]}. Exit 1 for failed checks, 2 for invalid inputs.'))
+        '"paths": ["relative/tree/file"]}. Exit 1 for failed checks, 2 for invalid inputs.'))
     parser.add_argument("--repo", type=Path, required=True, help="local Git checkout root")
     parser.add_argument("--target", required=True, help="full commit SHA to check")
     parser.add_argument("--manifest", type=Path, required=True, help="JSON gate and path list")
     args = parser.parse_args()
-    print("Local ancestry and path presence only; this does not check CI or review approval, "
+    print("Local ancestry and regular file presence only; this does not check CI or review approval, "
           "or whether a present file still has its reviewed contents.", flush=True)
     try:
         gates, paths = load_manifest(args.manifest)

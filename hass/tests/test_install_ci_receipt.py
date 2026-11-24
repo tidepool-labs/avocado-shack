@@ -100,6 +100,13 @@ class InstallCiReceiptTests(unittest.TestCase):
                 getattr(self, target).write_text(raw, encoding="utf-8")
                 self.assert_receipt(self.invoke_files(), "FAIL bad-json")
 
+    def test_empty_required_checks_refuses(self):
+        # Without a nonempty-list guard, the check loop can report PASS after
+        # evaluating zero required names even though the capture is valid.
+        capture = run(private=PRIVATE)
+        self.assert_receipt(self.invoke(capture, names=("lint",)), "lint success", passed=True)
+        self.assert_receipt(self.invoke(capture, names=()), "FAIL bad-json")
+
     def test_truncated_even_if_every_required_check_on_this_page_passes(self):
         # Checking only the required names on page one could miss a newer rerun.
         self.assert_receipt(self.invoke(run(), total=2), "FAIL truncated")

@@ -110,6 +110,17 @@ class InstallDigestLedgerTests(unittest.TestCase):
         self.source.write_bytes(changed)
         self.assert_match(payload=changed)
 
+    def test_latest_receipt_size_must_match(self):
+        # A digest-only check would accept this latest row despite its wrong size.
+        good = self.seed()
+        self.assert_match()
+        wrong_size = self.entry() | {"size": len(PAYLOAD) + 1}
+        self.seed(good + (json.dumps(wrong_size) + "\n").encode())
+        mtime = self.path.stat().st_mtime_ns
+        self.assert_refused("drift", "check")
+        self.assertEqual(self.path.stat().st_mtime_ns, mtime)
+        self.assertEqual(self.source.read_bytes(), PAYLOAD)
+
     def test_bad_label(self):
         # Invalid CLI values must be findings, not argparse usage errors or writes.
         self.seed()

@@ -30,11 +30,6 @@ def _has_type(path, predicate):
         return False
 
 
-def _has_image_arg(op, args):
-    return isinstance(args, dict) and any(
-        name in op.args and op.args[name].kind == "image" for name in args)
-
-
 def _finish(findings):
     for finding in findings:
         print(f"FAIL {finding}")
@@ -77,13 +72,17 @@ def main(argv=None):
             try:
                 problems, missing = check_args(op, call["args"], content.makers, None)
             except TypeError:
-                # An argument the validator cannot check is a finding.
+                # The current image validator needs a site directory even for
+                # a well-formed image path. An uncheckable call is a finding.
                 reasons["arg-problem"] = None
             else:
                 missing_required += bool(missing)
-                # Without a site directory the validator checks only image path
-                # syntax, so the file is unchecked. An uncheckable call is a finding.
-                if problems or _has_image_arg(op, call["args"]):
+                # check_args validates only image syntax without a site root.
+                # This checker must not certify an image it cannot inspect.
+                if problems or any(
+                    name in call["args"] and arg.kind == "image"
+                    for name, arg in op.args.items()
+                ):
                     reasons["arg-problem"] = None
         findings.extend(reason + suffix for reason in reasons)
 

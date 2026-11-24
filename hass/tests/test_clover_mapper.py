@@ -2,7 +2,7 @@
 Run: python3 -B -m unittest hass.tests.test_clover_mapper
 """
 import unittest
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from hass.clover import mapper as m
 from hass.tests.test_clover_client import fixture
@@ -63,6 +63,39 @@ class MoneyTests(unittest.TestCase):
     def test_quantities(self):
         for q, text in ((12, "12"), (Decimal("12.0"), "12"), (Decimal("7.5"), "7.5"), (Decimal("0"), "0"), (Decimal("2.250"), "2.25"), (Decimal("100"), "100")):
             self.assertEqual(m.format_quantity(q), text)
+
+    # Contract: a printed count never contradicts a nonzero count. Bug caught: rounding to 3 places printed a 0.0004 lb count as '0'
+    # next to 'Yes, Saffron: 0 in the till.'; and a tiny negative as '-0'.
+    def test_tiny_count_is_not_zero(self):
+        for q, text in (("0.0004", "0.0004"), ("-0.0004", "-0.0004"), ("0.00040", "0.0004"), ("0.0005", "0.0005"), ("0.000499", "0.000499"), ("4E-10", "0.0000000004")):
+            with self.subTest(q=q):
+                self.assertEqual(m.format_quantity(Decimal(q)), text)
+
+    def test_negative_zero_prints_zero(self):
+        for q in (Decimal("-0"), Decimal("-0.000"), Decimal("0E-10"), Decimal("0.000")):
+            with self.subTest(q=q):
+                self.assertEqual(m.format_quantity(q), "0")
+
+    # Bug caught: a count of more than 27 digits made quantize raise decimal.InvalidOperation out of the reply.
+    def test_huge_count_does_not_raise(self):
+        for q, text in (("1E+30", "1" + "0" * 30), ("-1E+30", "-1" + "0" * 30), ("12345678901234567890123456789.5", "12345678901234567890123456789.5"),
+                        ("12345678901234567890123456789.1230", "12345678901234567890123456789.123")):
+            with self.subTest(q=q):
+                self.assertEqual(m.format_quantity(Decimal(q)), text)
+
+    # Contract (existing, hass.tests.test_clover_drafts_extreme_count): an absurd count is still refused with InvalidOperation, which
+    # drafts._qty turns into a short named refusal. Bug caught: echoing a million-digit plain string into a reply.
+    def test_absurdly_long_count_is_still_refused_not_echoed(self):
+        for q in ("1E+100", "9" * 100, "1E+1000000", "4E-100"):
+            with self.subTest(q=q), self.assertRaises(InvalidOperation):
+                m.format_quantity(Decimal(q))
+
+    # Healthy control: values the function already formatted correctly stay byte-identical.
+    def test_ordinary_counts_unchanged(self):
+        for q, text in (("12", "12"), ("12.0", "12"), ("12.5", "12.5"), ("0.001", "0.001"), ("0.0006", "0.001"), ("0.000999", "0.001"), ("-0.0006", "-0.001"), ("-3.5", "-3.5"),
+                        ("0.0015", "0.002"), ("100", "100"), ("1E+3", "1000"), ("1234567890123456789012345.6789", "1234567890123456789012345.679")):
+            with self.subTest(q=q):
+                self.assertEqual(m.format_quantity(Decimal(q)), text)
 
 
 class NameTests(unittest.TestCase):

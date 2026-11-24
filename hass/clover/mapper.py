@@ -21,6 +21,7 @@ AVAILABILITY = ("yes", "limited", "no")                                         
 PRICE_TYPES = ("FIXED", "VARIABLE", "PER_UNIT")
 MAX_PRICE_CENTS = 100_000          # $1,000.00: a typo guard (a misread number), changed in config, not a business rule
 MAX_NAME = 100
+MAX_PLAIN_DIGITS = 64              # format_quantity prints exact digits up to this many; longer is refused, never echoed whole
 
 
 class MapError(ValueError):
@@ -66,8 +67,24 @@ def pct_change(old_cents, new_cents):
 
 
 def format_quantity(q):
-    """12, 12.5 (never 12.0, never an exponent)."""
-    return format(Decimal(q).quantize(Decimal("0.001")).normalize(), "f")
+    """12, 12.5 (never 12.0, never an exponent). Rounds to three places, but a nonzero count that would round to 0 (or -0) and a count too
+    long to round print their exact plain digits instead (0.0004 -> '0.0004'; no InvalidOperation). Zero of either sign is '0'."""
+    d = Decimal(q)
+    if not d.is_finite():
+        return format(d.quantize(Decimal("0.001")).normalize(), "f")    # NaN / Infinity: refused as before
+    if not d:
+        return "0"
+    try:
+        rounded = d.quantize(Decimal("0.001"))
+    except InvalidOperation:            # more digits than the default context holds
+        rounded = None
+    if rounded:                         # nonzero after rounding: unchanged behaviour (0.0006 -> '0.001')
+        return format(rounded.normalize(), "f")
+    _, digits, exp = d.as_tuple()
+    if (len(digits) + exp if exp >= 0 else max(len(digits), -exp) + 1) > MAX_PLAIN_DIGITS:
+        raise InvalidOperation("count too long to print")   # drafts._qty refuses such a count without echoing it (RF1810-11)
+    text = format(d, "f")               # exact digits, no rounding, no exponent
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 # ---------------------------------------------------------------------------------------------------------- names

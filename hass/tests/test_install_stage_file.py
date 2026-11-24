@@ -1,6 +1,7 @@
 """Offline fixtures for the stage-file preflight CLI contract."""
 
 from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 import importlib.util
 import io
 import os
@@ -50,13 +51,25 @@ class InstallStageFileTests(unittest.TestCase):
     def test_cli_accepts_adjacent_private_stage_without_replacing_config(self):
         # Requiring JSON in the old config or committing during preflight breaks this.
         before = [path.stat().st_ino for path in (self.config, self.stage)]
-        result = subprocess.run([sys.executable, "-B", str(SCRIPT), *self.args()],
-                                capture_output=True, text=True, timeout=10)
-        self.assert_result(result.returncode, result.stdout, result.stderr)
-        self.assertEqual(set(self.root.iterdir()), {self.config, self.stage})
-        self.assertEqual([path.stat().st_ino for path in (self.config, self.stage)], before)
-        self.assertEqual(self.config.read_bytes(), PRIVATE)
-        self.assertEqual(self.stage.read_bytes(), DOCUMENT)
+        selected = DOCUMENT[:-1] + b', "unrelated": 1 }\r\n'
+        changed = selected.replace(b'"unrelated": 1', b'"unrelated": 2')
+        digest = hashlib.sha256(selected).hexdigest()
+        # Bind the exact bytes (including whitespace); checking only JSON shape or
+        # byte length would accept a stage with an unrelated setting changed.
+        for raw, options, findings in (
+            (selected, [], ()),
+            (selected, ["--expect-stage-sha256", digest], ()),
+            (changed, ["--expect-stage-sha256", digest], ("stage-sha256-mismatch",)),
+        ):
+            with self.subTest(expect_digest=bool(options), changed=raw != selected):
+                self.stage.write_bytes(raw)
+                result = subprocess.run([sys.executable, "-B", str(SCRIPT), *self.args(), *options],
+                                        capture_output=True, text=True, timeout=10)
+                self.assert_result(result.returncode, result.stdout, result.stderr, *findings)
+                self.assertEqual(set(self.root.iterdir()), {self.config, self.stage})
+                self.assertEqual([path.stat().st_ino for path in (self.config, self.stage)], before)
+                self.assertEqual(self.config.read_bytes(), PRIVATE)
+                self.assertEqual(self.stage.read_bytes(), raw)
 
     def test_compares_physical_parent_identity(self):
         # A textual comparison rejects aliases and a device-only test accepts siblings.

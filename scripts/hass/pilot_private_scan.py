@@ -86,6 +86,8 @@ def main(argv=None):
     parser.add_argument("--private", required=True, type=Path, help="UTF-8 file, one decimal number per line")
     parser.add_argument("--text", action="append", type=Path, default=[], help="captured reply text (repeatable)")
     parser.add_argument("--html", action="append", type=Path, default=[], help="captured card HTML (repeatable)")
+    parser.add_argument("--receipt", action="store_true",
+                        help="require nonempty reply and extracted card text; static scan only, not OCR or live verification")
     args = parser.parse_args(argv)
     try:
         private = load_private(args.private)
@@ -93,8 +95,13 @@ def main(argv=None):
         print("error: private list must be readable and contain decimal numbers", file=sys.stderr)
         return 2
 
+    if not (args.text or args.html):
+        print("error: provide at least one --text or --html capture", file=sys.stderr)
+        return 2
+
     status = 0
-    for is_html, paths in ((False, args.text), (True, args.html)):
+    usable_kinds = set()
+    for kind, paths in (("text", args.text), ("html", args.html)):
         for path in paths:
             try:
                 source = path.read_text(encoding="utf-8")
@@ -102,7 +109,7 @@ def main(argv=None):
                 print("error: could not read captured input as UTF-8", file=sys.stderr)
                 status = 2
                 continue
-            if is_html:
+            if kind == "html":
                 card = CardText()
                 try:
                     card.feed(source)
@@ -111,15 +118,21 @@ def main(argv=None):
                     print("error: could not parse captured HTML", file=sys.stderr)
                     status = 2
                     continue
-                count = sum(hit_count(field, private) for field in card.fields())
+                fields = list(card.fields())
             else:
-                count = hit_count(source, private)
+                fields = [source]
+            if args.receipt and any(field.strip() for field in fields):
+                usable_kinds.add(kind)
+            count = sum(hit_count(field, private) for field in fields)
             basename = path.name
             if not basename.isprintable() or hit_count(basename, private):
                 basename = "[redacted filename]"
             print(f"{basename}: " + (f"private-number ({count})" if count else "clean"))
             if count:
                 status = max(status, 1)
+    if args.receipt and usable_kinds != {"text", "html"}:
+        print("error: receipt requires nonempty reply text and extracted card text", file=sys.stderr)
+        return 2
     return status
 
 

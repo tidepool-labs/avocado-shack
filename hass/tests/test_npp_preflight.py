@@ -13,6 +13,7 @@ import unittest
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/hass/npp_preflight.py"
 STAGES = [f"hass/npp/{name}.py" for name in (
     "job", "identify", "missing", "research", "copy", "validate", "private_numbers", "picture", "reply", "edits",
+    "stages",
 )] + ["hass/tests/npp/run_npp.py"]
 SKILLS = [f"docs/hass/skills/hass-npp-{name}/SKILL.md" for name in ("maintain", "review")]
 ASSETS = "hass/npp/assets"
@@ -93,13 +94,15 @@ class PreflightTests(unittest.TestCase):
 
     def test_missing_stage_and_fleet_skill_block_independently(self):
         # Neither a partially merged release nor an unrelated skill may satisfy readiness.
-        for missing in (STAGES[2], SKILLS[1]):
+        # All constituent modules can be present while the driver that composes them is missing.
+        for missing in (STAGES[2], "hass/npp/stages.py", SKILLS[1]):
             with self.subTest(missing=missing):
                 (self.release / missing).unlink()
                 result = self.preflight(3)
                 group = result if missing in STAGES else result["skills"]
                 self.assertEqual(group["missing"], [missing])
                 self.put(missing, b"fixture\n")
+                self.preflight(0)
 
     def test_changed_and_deleted_assets_are_named(self):
         # A file's existence, length or extension doesn't establish its pinned bytes.

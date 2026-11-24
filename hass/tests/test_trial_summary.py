@@ -1,5 +1,6 @@
 """AV1104-09 (H18): hass/trial_summary.py counts the owner trial per Pacific day, never contents."""
 import contextlib, io, json, os, re, sqlite3, subprocess, sys, tempfile, unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -120,6 +121,28 @@ class TrialSummaryTest(unittest.TestCase):
         self.assertEqual(set(m), set(ts.MESSAGE_KEYS))
         self.assertEqual(ts.PHOTO_REFUSED, frozenset(media.REPLIES))
         self.assertNotIn(CANARY, json.dumps(report(self.tmp)))
+
+    def test_listing_outcomes_are_counted_by_pacific_day(self):
+        # The weekly counts must distinguish persisted listing outcomes. Missing allowlist entries hide them in other.
+        before = "2026-11-02T07:59:59+00:00"
+        midnight = "2026-11-02T08:00:00+00:00"
+        unknown = "npp-invented-disposition"
+        make_state(self.tmp, messages=[("npp-working", before), ("question", before), ("npp-expired", midnight),
+                                       ("npp-unavailable", midnight), (unknown, midnight)])
+        result = ts.summarize(self.tmp, date(2026, 11, 1), 2)
+        for extra in ((), ("--json",)):
+            code, out, err = run("--state", self.tmp, "--from", "2026-11-01", "--days", "2", *extra)
+            self.assertEqual((code, err), (0, ""))
+            self.assertNotIn(unknown, out)
+        self.assertEqual(result["daysSummary"][0]["messages"]["question"], 1)
+        self.assertEqual(sum(result["totals"]["messages"].values()), 5)
+        self.assertEqual(
+            {d["day"]: {k: v for k, v in d["messages"].items() if v} for d in result["daysSummary"]},
+            {"2026-11-01": {"npp-working": 1, "question": 1},
+             "2026-11-02": {"npp-expired": 1, "npp-unavailable": 1, "other": 1}},
+        )
+        self.assertEqual({k: v for k, v in result["totals"]["messages"].items() if v},
+                         {"npp-working": 1, "npp-expired": 1, "npp-unavailable": 1, "question": 1, "other": 1})
 
     def test_drafts_current_states_not_implied_expiry(self):
         at = "2026-11-02T10:00:00-08:00"
@@ -364,7 +387,7 @@ class ForgetDispositionTest(unittest.TestCase):
         d = Path(self.tmp)
         before = {p.name: p.read_bytes() for p in sorted(d.iterdir())}
         r = report(self.tmp)
-        self.assertEqual(list(r["totals"]["messages"]), list(ts.MESSAGE_KEYS)); self.assertEqual(len(ts.MESSAGE_KEYS), 24)
+        self.assertEqual(list(r["totals"]["messages"]), list(ts.MESSAGE_KEYS)); self.assertEqual(len(ts.MESSAGE_KEYS), 27)
         self.assertEqual(set(r), {"result", "from", "days", "timezone", "daysSummary", "unknown", "totals"})
         text = run("--state", self.tmp, "--from", "2026-11-01")[1].splitlines()
         pairs = re.findall(r"[\[\s]([^\s\[\]=]+)=(\d+)", text[8])  # messages come first; drafts also have an `other`

@@ -10,11 +10,12 @@ A row: {"at", "kind", "reason", "msg", "reply", "excerpt", "seconds"}.
   reason  a short neutral code (letters, digits, dashes), never a sentence
   msg     12 hex characters, one way: the message it was about (stagelog.short); reply: the same for our reply
   excerpt at most 80 characters of what Mike wrote, with numbers, addresses and links blanked; "" when none is needed
+  seconds optional finite elapsed time, rounded to one decimal place
 Writing never raises: a full disk or a bad folder means no row, never a lost reply.
 
 Command line (for G, on the box):  python3 hass/corrlog.py problems --state DIR   |   weekly --state DIR
 """
-import argparse, json, os, re, stat, sys  # noqa: E401
+import argparse, json, math, os, re, stat, sys  # noqa: E401
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -83,7 +84,13 @@ class CorrLog:
             row = {"at": now.isoformat(timespec="seconds"), "kind": kind, "reason": reason,
                    "msg": short(msg) if msg is not None else "", "reply": short(reply) if reply is not None else "",
                    "excerpt": _clean(excerpt)}
-            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool): row["seconds"] = round(float(seconds), 1)
+            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+                try:
+                    elapsed = round(float(seconds), 1)
+                except OverflowError:
+                    pass  # The timing is unavailable, not the event.
+                else:
+                    if math.isfinite(elapsed): row["seconds"] = elapsed
             self.dir.mkdir(mode=0o700, exist_ok=True)
             if not self._real_directory(): return False
             if self._pruned_on != now.date():  # at most one directory scan a day; prune never raises

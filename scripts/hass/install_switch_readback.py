@@ -2,7 +2,7 @@
 """Check a candidate or installed JSON config against its pre-switch backup.
 
 Read-only: does not replace files, verify service state, or authorize install.
-Diagnostics use escaped JSON Pointer paths, with the empty path at the root.
+Diagnostics use only fixed JSON Pointer paths, never operator-defined keys.
 """
 
 import argparse
@@ -113,7 +113,12 @@ def main(argv=None):
     except RecursionError:
         return _fail("after", "config is too deeply nested to compare")
     if difference is not None:
-        return _fail("after", "config differs from the expected edit", difference)
+        for key in SWITCHES:
+            switch_path = ("settings", key)
+            if difference == switch_path:
+                return _fail("after", "config differs from the expected edit", switch_path)
+        print("FAIL after: unrelated config change", file=sys.stderr)
+        return 1
     print("PASS " + " ".join(_pointer(("settings", key)) for key in SWITCHES))
     return 0
 

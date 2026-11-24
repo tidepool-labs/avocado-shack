@@ -84,6 +84,8 @@ def main(argv=None):
         return fail("not-utf8")
     # Use physical line numbers; Unicode separators inside JSON strings are text.
     rows = [(k, line) for k, line in enumerate(text.split("\n"), 1) if line.strip()]
+    if not rows:
+        return fail("no-reads")
     if len(rows) > MAX_LINES:
         return fail("too-many-lines")
 

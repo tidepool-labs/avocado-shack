@@ -147,8 +147,10 @@ renderCatalog();
 // Prefer load, after the browser's #market jump, but do not wait indefinitely for a nonessential asset.
 let linkedShown=false;
 function showLinked(){const el=[...document.querySelectorAll('#catalog-grid article')].find(a=>a.dataset.productId===linkedItem);
- // A late load may repair the anchor jump only while the visitor has not moved focus elsewhere.
- if(el&&(!linkedShown||document.activeElement===el)){linkedShown=true;el.setAttribute('tabindex','-1');el.scrollIntoView({block:'center'});el.focus({preventScroll:true})}}
+ const active=document.activeElement;
+ const untouched=!active||active===document.body||active===document.documentElement;
+ // First reveal only on an untouched page; repair the anchor jump only while the card has focus.
+ if(el&&(active===el||(!linkedShown&&untouched))){linkedShown=true;el.setAttribute('tabindex','-1');el.scrollIntoView({block:'center'});el.focus({preventScroll:true})}}
 if(linkedItem){if(document.readyState==='complete')showLinked();else{
  const fallback=setTimeout(showLinked,1000);
  addEventListener('load',()=>{clearTimeout(fallback);requestAnimationFrame(showLinked)},{once:true});

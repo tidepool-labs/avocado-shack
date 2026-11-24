@@ -68,6 +68,17 @@ class InstallRollbackProofTests(unittest.TestCase):
         self.assertEqual(self.backup.read_bytes(), CANDIDATE)
         self.assertEqual(self.restored.read_bytes(), CANDIDATE)
 
+    def test_post_needs_distinct_restored_inode(self):
+        # A digest-only or pathname-only check can mistake a hardlink for a
+        # separate restore readback, even though it rereads the backup itself.
+        alias = self.root / "backup-alias.json"
+        alias.hardlink_to(self.backup)
+        for path in (self.backup, alias):
+            with self.subTest(path=path.name):
+                self.check_cli(1, "backup and restored must be distinct files",
+                               *self.post(restored=path))
+        self.check_cli(0, "PASS post", *self.post())
+
     def test_post_refuses_semantically_equal_but_different_bytes(self):
         # A JSON comparison would accept the missing newline.
         changed = ORIGINAL.rstrip(b"\n")
@@ -91,6 +102,8 @@ class InstallRollbackProofTests(unittest.TestCase):
         alias = self.root / "alias"
         alias.symlink_to(self.root, target_is_directory=True)
         self.check_cli(1, "cannot read current", *self.pre(alias / self.current.name))
+        self.check_cli(1, "cannot read restored", *self.post(alias / self.restored.name))
+        self.check_cli(1, "cannot read backup", *self.post(backup=alias / self.backup.name))
 
     def test_refuses_missing_or_non_regular_input(self):
         # An unreadable path must fail closed; a FIFO must not block the operator.

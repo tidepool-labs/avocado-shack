@@ -165,6 +165,21 @@ class SizeTextStageCheckTests(unittest.TestCase):
         self.assert_report(self.sizes(b"1 1/2 lb\n500 mg\n12 count\n2 pack\n"),
                            counts=(4, 0, 2, 2, 0), finding="stage-disagree 4")
 
+    def test_c7_1_no_sizes(self):
+        # A stage-agreement PASS over zero examined sizes (empty or blank-only list, or an empty
+        # --examples selection) is a false green: it must be FAIL no-sizes, exit 1, no input text.
+        for name, data in (("empty", b""), ("blank-lines", b"\n  \r\n\t\n")):
+            with self.subTest(kind=name):
+                result = self.sizes(data)
+                self.assert_report(result, finding="no-sizes")
+                self.assertNotIn("sizes 0", result.stdout)
+        # An empty selection reaches the same boundary in process (the pinned examples are not empty).
+        with patch.object(CHECK.npp, "assets", return_value=(None, {
+            CHECK.ASSET + "identify.schema.json": b"{}",
+            CHECK.ASSET + "examples.json": b'{"examples": [{"output": {"size_text": null}}]}',
+        }, None)):
+            self.assert_report(self.in_process("--examples"), finding="no-sizes")
+
     def test_c8_live_examples(self):
         # Reading every row (including nulls) or misloading the pinned source changes the total.
         self.assert_report(self.run_cli("--examples"), counts=(3, 3, 0, 0, 0))

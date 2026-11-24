@@ -5,7 +5,6 @@ from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 import re
-from unittest import expectedFailure
 
 from hass.clover.qty_words import CountIntent, parse
 from hass.tests.test_clover_client import NoNetwork
@@ -60,6 +59,8 @@ PHRASES = (
     ("money", "$19 for the linen roll", None),
     ("money", "got 17 dollars for the apron", None),
     ("money", "the deposit was $31", None),
+    ("money", "12 bucks for the tea tin", None),
+    ("two products", "6 cloth bags and a fruit basket", None),
     ("two products", "we got 6 honey jars plus 5 pickle jars", None),
     ("two products", "we have 7 blue plates and 4 yellow ones", None),
     ("two products", "12 jam jars, 8 jam spoons", None),
@@ -75,20 +76,12 @@ PHRASES = (
     ("prices", "price the berry bowl at $18 each", None),
     ("hikes", "meet at 8 for the bluff walk", None),
     ("hikes", "move the loop hike to the 16th", None),
+    ("hikes", "9 miles for the ridge hike", None),
+    ("website edits", "set the website photo of the wooden ladle to 3", None),
     ("website edits", "hide the 4 gift bundles on the website", None),
     ("website edits", "put the 7 tea listings under pantry", None),
     ("website edits", "show 8 featured items on the home page", None),
 )
-
-# Each known false accept gets its own expectedFailure, never a KNOWN_GAPS entry.
-FALSE_ACCEPTS = (
-    ("bucks", "money", "12 bucks for the tea tin", "Treats bucks as part of the product name."),
-    ("two_products", "two products", "6 cloth bags and a fruit basket", "Combines two products into one query."),
-    ("hike_miles", "hikes", "9 miles for the ridge hike", "Treats the hike distance as a count."),
-    ("website_photo", "website edits", "set the website photo of the wooden ladle to 3",
-     "Treats a photo choice as a stock set."),
-)
-PHRASES += tuple((category, text, None) for _, category, text, _ in FALSE_ACCEPTS)
 
 KNOWN_GAPS = (
     ("12 apricot jams just came in", "code"),
@@ -162,13 +155,33 @@ class CountPhraseTests(NoNetwork):
 
     def test_c3_no_false_accepts(self):
         # C3: A loose numeric grammar could interpret a price, two products,
-        # or a website edit as a stock change; only measured exceptions fail softly.
-        exceptions = {text for _, _, text, _ in FALSE_ACCEPTS}
-        self.assertTrue(exceptions.isdisjoint(dict(KNOWN_GAPS)))
+        # or a website edit as a stock change.
         for _, text, expected in PHRASES:
-            if expected is None and text not in exceptions:
+            if expected is None:
                 with self.subTest(text=text):
                     self.assertIsNone(parse(text))
+
+    def test_c5_look_alikes_refused_but_milestone_counts(self):
+        # C5: A price, a hike distance, two products or a website photo choice that
+        # parse() accepts would reach the till-change preview with a wrong item and
+        # a wrong number. Each rule also needs its healthy twin to keep parsing.
+        for text in (
+            "12 bucks for the tea tin", "got 5 euros for the jar",   # money word
+            "6 cloth bags and a fruit basket", "3 pots plus 2 lids", "4 cups & 2 saucers",  # two products
+            "9 miles for the ridge hike", "we have 2 hours of the guided walk", "3 km of trail",  # measure first
+            "set the website photo of the wooden ladle to 3", "set the ladle picture to 2",
+            "set the shop page of the ladle to 4", "set the listing for the ladle to 5",  # site choice
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(parse(text))
+        for text, expected in (
+            ("30 of the blue mugs", intent("count", "30", None, "blue mugs")),
+            ("set the blue mugs to 30", intent("set", "30", None, "blue mugs")),
+            ("we have 4 sandbox pails", intent("count", "4", None, "sandbox pails")),
+            ("got 6 hourglass timers", intent("add", "6", None, "hourglass timers")),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(parse(text), expected)
 
     def test_c4_report_matches(self):
         # C4: A stale report could still show the old pass rate, omit a gap,
@@ -187,20 +200,4 @@ class CountPhraseTests(NoNetwork):
         self.assertIn(f"got {hits - refused}/{intended} counts or arrivals right and refused "
                       f"{refused}/{size - intended} non-counts", report)
         self.assertCountEqual(re.findall(r"^\| `([^`]+)` \| (code|ask) \|$", report, re.M), KNOWN_GAPS)
-        self.assertCountEqual(re.findall(r"^\| `([^`]+)` \| False accept: (.+) \|$", report, re.M),
-                              [(text, reason) for _, _, text, reason in FALSE_ACCEPTS])
-
-
-def _expected_refusal_failure(text, reason):
-    @expectedFailure
-    def test(self):
-        # C3: Pin this false accept individually. If it starts returning None,
-        # unexpected success prompts moving it back to the ordinary refusal table.
-        self.assertIsNone(parse(text), reason)
-
-    test.__doc__ = reason
-    return test
-
-
-for suffix, _, text, reason in FALSE_ACCEPTS:
-    setattr(CountPhraseTests, f"test_c3_no_false_accepts_{suffix}", _expected_refusal_failure(text, reason))
+        self.assertNotIn("False accept", report)  # No known false accepts remain.

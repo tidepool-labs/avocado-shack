@@ -111,6 +111,8 @@ def main(argv=None):
         if blob is None:
             return finish("bad-commit")
         templates[name] = blob
+    if not templates:
+        return finish("bad-commit")
     return compare(templates, args.installed, installed_entries)
 
 

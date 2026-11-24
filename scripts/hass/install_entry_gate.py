@@ -43,6 +43,8 @@ def load_units(source):
             raise GateError("malformed units JSON: pr must be a positive integer or null")
         if not isinstance(paths, list):
             raise GateError("malformed units JSON: paths must be an array")
+        if pr is not None and not paths:
+            raise GateError("malformed units JSON: known pr requires at least one path")
         for path in paths:
             if (not isinstance(path, str) or "\0" in path
                     or any(part in {"", ".", ".."} for part in path.split("/"))):
@@ -139,7 +141,8 @@ def main(argv=None):
     parser = ArgumentParser(description=__doc__, epilog="Path statuses are numbered in units-file order.")
     parser.add_argument("--repo", required=True, help="local Git checkout root")
     parser.add_argument("--target", required=True, help="full target commit SHA")
-    parser.add_argument("--units", required=True, type=Path, help='JSON object: {"B": {"pr": 1, "paths": []}}')
+    parser.add_argument("--units", required=True, type=Path,
+                        help='JSON object: {"B": {"pr": 1, "paths": ["path/to/file"]}}')
     args = parser.parse_args(argv)
     try:
         units = load_units(args.units)

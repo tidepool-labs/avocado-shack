@@ -11,11 +11,24 @@ import sys
 # Direct script execution puts scripts/hass, not the checkout root, on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from hass.tests.test_npp_assets import load, validate
+from scripts.hass import npp_findings
 
 TERMINALS = {"listing": "published", "question": "asking", "contract": "card_out"}
 
 
-def scaffold(cases, day, words, path, title):
+def finding_defaults(ledger, finding_id):
+    for row in npp_findings.read_ledger(npp_findings.ledger_path(ledger)):
+        if row["id"] == finding_id:
+            # A closed repeat retains its state marker but has a closure card.
+            if row["card"]:
+                raise ValueError("finding is closed")
+            stage = int(row["stage"][1:])
+            path = "contract" if 9 <= stage <= 13 else "question" if stage == 3 else "listing"
+            return path, row["summary"]
+    raise ValueError("finding not found")
+
+
+def scaffold(cases, day, words, path, title, *, finding_id=None):
     if not re.fullmatch(r"[a-z0-9-]{3,40}", words):
         raise ValueError("slug must match [a-z0-9-]{3,40}")
     try:
@@ -42,6 +55,9 @@ def scaffold(cases, day, words, path, title):
     # FORMAT.md uses the slug in the file name; prefix it with the real-failure tag.
     case_id = highest_id + 1
     slug = f"{tag}{highest_serial + 1}-{words}"
+    if finding_id is not None:
+        # The case schema has no finding-reference field; its id is the case number.
+        title = f"{title} [{finding_id}]"
     case = {
         "id": case_id,
         "slug": slug,
@@ -61,6 +77,8 @@ def scaffold(cases, day, words, path, title):
     if problems:
         raise ValueError("; ".join(problems))
     target = cases / f"case-{case_id:02d}-{slug}.json"
+    if finding_id is not None:
+        npp_findings.ledger_path(target)  # Keep copied ledger text outside Git, too.
     with target.open("x", encoding="utf-8") as handle:
         handle.write(json.dumps(case, indent=2) + "\n")
     return target.name
@@ -68,14 +86,26 @@ def scaffold(cases, day, words, path, title):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cases", required=True, type=Path)
+    parser.add_argument("--cases", required=True, type=Path, help="case directory (outside Git for findings)")
     parser.add_argument("--day", required=True, metavar="YYYY-MM-DD")
     parser.add_argument("--slug", required=True)
-    parser.add_argument("--path", required=True, choices=TERMINALS)
-    parser.add_argument("--title", required=True)
+    parser.add_argument("--path", choices=TERMINALS)
+    parser.add_argument("--title")
+    parser.add_argument("--finding", metavar="ID", help="derive path and title from an open finding")
+    parser.add_argument("--ledger", type=Path, metavar="FILE", help="private ledger to read with --finding")
     args = parser.parse_args(argv)
+    if args.finding is not None or args.ledger is not None:
+        if args.finding is None or args.ledger is None:
+            parser.error("--finding and --ledger must be used together")
+        if args.path is not None or args.title is not None:
+            parser.error("--finding supplies --path and --title; do not pass them together")
+    elif args.path is None or args.title is None:
+        parser.error("--path and --title are required without --finding and --ledger")
     try:
-        name = scaffold(args.cases, args.day, args.slug, args.path, args.title)
+        path, title = args.path, args.title
+        if args.finding is not None:
+            path, title = finding_defaults(args.ledger, args.finding)
+        name = scaffold(args.cases, args.day, args.slug, path, title, finding_id=args.finding)
     except OSError as exc:
         print(f"FAIL {exc.strerror}")
         return 1

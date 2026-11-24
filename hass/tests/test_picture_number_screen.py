@@ -157,6 +157,14 @@ class PictureNumberScreenTests(unittest.TestCase):
                            ["line 1 clean", "line 2 clean", "line 3 clean", "line 4 clean",
                             "reads 4", "count clean 4", PASS])
 
+        # Counting only findings used to let a missing export pass vacuously.
+        # Require a recorded row, not that the recorded OCR found any text.
+        for data in (b"", b" \t\r\n\n"):
+            with self.subTest(data=data):
+                self.assert_refused(self.replay(data), "no-reads")
+        self.assert_result(self.replay(b'{"read":"","source_read":""}'), 0,
+                           ["line 1 clean", "reads 1", "count clean 1", PASS])
+
     def test_c7_pinned_rows(self):
         # Real checker reasons must remain distinct and in input order, not collapsed.
         self.assert_result(self.replay(pinned_bytes(PINNED)), 1, [

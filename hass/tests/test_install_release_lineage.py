@@ -71,6 +71,36 @@ class InstallReleaseLineageTests(unittest.TestCase):
         self.assertEqual(before, {p.relative_to(self.repo): p.read_bytes()
                                   for p in self.repo.rglob("*") if p.is_file()})
 
+    def test_named_release_file_must_be_a_regular_blob(self):
+        # A later commit can replace a file with a link or directory without
+        # changing its tree path or losing the reviewed merge from its ancestry.
+        entry = self.repo / RUNTIME
+        for kind, expected_exit, status in (
+            ("ordinary", 0, "yes"),
+            ("executable", 0, "yes"),
+            ("symlink", 1, "no (not a regular file blob)"),
+            ("directory", 1, "no (not a regular file blob)"),
+        ):
+            with self.subTest(kind=kind):
+                if kind == "executable":
+                    self.git("update-index", "--chmod=+x", RUNTIME)
+                elif kind == "symlink":
+                    entry.unlink()
+                    entry.symlink_to(Path(LITERAL).name)
+                    self.git("add", "--", RUNTIME)
+                elif kind == "directory":
+                    entry.unlink()
+                    entry.mkdir()
+                    (entry / "child").touch()
+                    self.git("add", "--", RUNTIME)
+                if kind != "ordinary":
+                    self.git("commit", "-m", kind)
+                result = self.check(self.git("rev-parse", "HEAD"))
+                self.assertIn(f"Gate 'reviewed' {self.merge}: object present=yes; ancestor=yes", result.stdout)
+                self.assertIn(f"Path {LITERAL!r}: present=yes", result.stdout)
+                self.assertEqual(result.returncode, expected_exit, result.stdout + result.stderr)
+                self.assertIn(f"Path {RUNTIME!r}: present={status}\n", result.stdout)
+
     def test_missing_object_is_not_a_found_nonancestor(self):
         missing = "1" * 40
         result = self.check(gates={"missing": missing, "reviewed": self.merge})

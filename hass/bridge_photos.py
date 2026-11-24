@@ -29,12 +29,33 @@ MESSAGE_PATH, DOWNLOAD_PATH = "/api/v1/message/{}?with=attachment&", "/api/v1/at
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)  # no proxy, no redirect
 
 
+class _ShortBody(Exception):
+    """The body ended before its announced Content-Length, or came under an unsupported transfer coding (internal: _get
+    turns it into `size-mismatch`)."""
+
+
+def _announced(response):
+    """The announced Content-Length as an int, or None when absent or malformed, or when http.client itself decoded the
+    body as chunked (response.chunked is True; that overrides Content-Length). Any other Transfer-Encoding value (identity,
+    gzip, a list, `chunked ` with trailing whitespace...) is not decoded by http.client, so the body cannot be shown
+    complete: _ShortBody. The decoder's own decision is used, not a re-implementation of its header test."""
+    if getattr(response, "chunked", None) is True: return None
+    if isinstance(response.headers.get("Transfer-Encoding"), str):  # a non-str stub value is treated as absent
+        raise _ShortBody()
+    value = response.headers.get("Content-Length")
+    return int(value) if isinstance(value, str) and value.isascii() and value.isdigit() else None
+
+
 def _urllib_transport(url, headers, timeout, limit):
-    """(status, body) for one GET; reads at most limit + 1 bytes so an oversized body is seen, never held whole."""
+    """(status, body) for one GET; reads at most limit + 1 bytes so an oversized body is seen, never held whole.
+    A body of at most limit bytes that is shorter than its announced Content-Length raises _ShortBody (read() alone
+    returns the cut-off bytes without error); an oversized body is left to the caller's too-large check."""
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with _OPENER.open(request, timeout=timeout) as response:
-            return response.status, response.read(limit + 1)
+            body, announced = response.read(limit + 1), _announced(response)
+            if announced is not None and len(body) <= limit and len(body) < announced: raise _ShortBody()
+            return response.status, body
     except urllib.error.HTTPError as exc:
         exc.close()
         return exc.code, b""
@@ -90,6 +111,8 @@ class BlueBubblesPhotos:
         """(code, status, body): code None on a 2xx within limit; the transport's error text is dropped."""
         try:
             status, body = self._transport(self._base + path, {"Accept": accept}, self._timeout, limit)
+        except _ShortBody:
+            return "size-mismatch", None, b""  # the same fixed code as a totalBytes mismatch: a cut-off body is a failed fetch
         except Exception:  # noqa: BLE001 - any transport failure; its text may hold the URL, so it is dropped
             return "transport-error", None, b""
         if not (type(status) is int and 200 <= status < 300):

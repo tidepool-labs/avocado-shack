@@ -28,7 +28,7 @@ READ_PATHS = tuple(re.compile(p) for p in READ_PATH_TEXT)
 READ_METHODS = frozenset({"GET"})
 PAGE_SIZE = 1000                 # documented maximum `limit` for GET /items
 MAX_PAGES = 50                   # 50,000 items is far beyond a shop; a longer loop is a bug
-RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+RETRY_STATUS = frozenset({429, 500, 502, 503, 504, 507})
 BODY_LIMIT = 8 * 1024 * 1024
 EXPAND = "itemStock,categories,tags"
 

@@ -2,6 +2,7 @@
 """Check fragment targets in an offline render without writing site files."""
 
 import argparse
+from collections import Counter
 from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
@@ -17,12 +18,14 @@ from hass import content_model, sitegen  # noqa: E402
 
 PRINTABLE_FRAGMENT = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+# Match hass.npp.reply.posted's public URL and product-ID grammar literally.
+ITEM_LINK = re.compile(r"https://theavocadoman\.com/\?item=[a-z0-9][a-z0-9-]{0,63}#market")
 
 
 class PageAnchors(HTMLParser):
     def __init__(self, html: bytes):
         super().__init__(convert_charrefs=True)
-        self.ids: set[str] = set()
+        self.ids: Counter[str] = Counter()
         self.hrefs: list[str] = []
         self.feed(html.decode("utf-8"))
         self.close()
@@ -32,7 +35,7 @@ class PageAnchors(HTMLParser):
             if value is None:
                 continue
             if name == "id":
-                self.ids.add(value)
+                self.ids[value] += 1
             elif name == "href":
                 self.hrefs.append(value)
 
@@ -62,7 +65,11 @@ def main(argv=None) -> int:
     parser.add_argument("--content", type=Path, required=True)
     parser.add_argument("--templates", type=Path, default=ROOT / "hass/templates")
     parser.add_argument("--today", type=date.fromisoformat)
+    parser.add_argument("--item-link", action="append", metavar="URL",
+                        help="also check the Market anchor of one saved posted item link (offline)")
     args = parser.parse_args(argv)
+    if args.item_link is not None and (len(args.item_link) != 1 or not ITEM_LINK.fullmatch(args.item_link[0])):
+        return fail("item-link-invalid")
     if any(path.is_symlink() or not path.is_dir() for path in (args.content, args.templates)):
         return fail("unsafe-input")
     try:
@@ -75,6 +82,10 @@ def main(argv=None) -> int:
         return fail("render-failed")
     pages = {key.removeprefix(sitegen.SITE_PREFIX): PageAnchors(html)
              for key, html in rendered.items() if key.endswith(".html")}
+    if args.item_link is not None:
+        index = pages.get("index.html")
+        if index is None or index.ids["market"] != 1:
+            return fail("item-link-market-anchor")
 
     checked = offpage = 0
     missing = set()

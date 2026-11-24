@@ -55,6 +55,15 @@ class InstallBackupReceiptTests(unittest.TestCase):
         lines = [f"FAIL {reason}" for reason in reasons] + ["FAIL install_backup_receipt"]
         self.assert_result(self.invoke(self.args(owner_uid)), 1, lines)
 
+    def assert_inputs_unchanged(self, before, raw):
+        self.assertEqual({path.name for path in self.root.iterdir()}, set(before))
+        for path in (self.config, self.backup):
+            old, new = before[path.name], path.lstat()
+            # Reading may update atime; it must not rewrite or replace the files.
+            self.assertEqual((new.st_dev, new.st_ino, new.st_mode, new.st_uid, new.st_mtime_ns, new.st_ctime_ns),
+                             (old.st_dev, old.st_ino, old.st_mode, old.st_uid, old.st_mtime_ns, old.st_ctime_ns))
+            self.assertEqual(path.read_bytes(), raw)
+
     def test_pass_hashes_exact_backup_bytes_without_changes_or_disclosure(self):
         # Hashing normalized JSON, overwriting a file, or exposing a value breaks the receipt.
         for raw in (OFF, b'{ "settings" : { }, "npp":true }\r\n', b"{}"):
@@ -68,13 +77,18 @@ class InstallBackupReceiptTests(unittest.TestCase):
                 self.assert_result((cli.returncode, cli.stdout, cli.stderr), 0,
                                    [f"backup_sha256 {hashlib.sha256(raw).hexdigest()}",
                                     "PASS install_backup_receipt"])
-                self.assertEqual({path.name for path in self.root.iterdir()}, set(before))
-                for path in (self.config, self.backup):
-                    old, new = before[path.name], path.stat()
-                    # Reading may update atime; it must not rewrite or replace the files.
-                    self.assertEqual((new.st_ino, new.st_mode, new.st_uid, new.st_mtime_ns, new.st_ctime_ns),
-                                     (old.st_ino, old.st_mode, old.st_uid, old.st_mtime_ns, old.st_ctime_ns))
-                    self.assertEqual(path.read_bytes(), raw)
+                self.assert_inputs_unchanged(before, raw)
+
+    def test_hardlink_is_not_backup_copy(self):
+        # Checking names or bytes alone accepts a hardlink as an independent copy.
+        self.backup.unlink()
+        os.link(self.config, self.backup)
+        before = {path.name: path.stat() for path in self.root.iterdir()}
+        cli = subprocess.run([sys.executable, "-B", str(SCRIPT), *self.args()],
+                             cwd=self.root, capture_output=True, text=True, timeout=10)
+        self.assert_inputs_unchanged(before, OFF)
+        self.assert_result((cli.returncode, cli.stdout, cli.stderr), 1,
+                           ["FAIL backup-aliases-config", "FAIL install_backup_receipt"])
 
     def test_refuses_one_byte_difference_even_when_json_is_equal(self):
         self.config.write_bytes(OFF[:-1] + b" ")

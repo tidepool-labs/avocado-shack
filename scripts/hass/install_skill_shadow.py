@@ -47,24 +47,31 @@ def mode(path):
 def root_entries(raw, skills, fail):
     if not isinstance(raw, str) or "\x00" in raw:
         return None, "bad-roots"
-    root = Path(raw)
-    if not root.is_absolute():
+    if not raw.startswith("/"):
         return None, "not-absolute"
+    # Check the roster spelling before Path can discard a dot component.
+    if any(part in (".", "..") for part in raw.split("/")):
+        return None, "bad-roots"
+    root = Path(raw)
     try:
-        root_mode = mode(root)
-        if stat.S_ISLNK(root_mode):
-            return None, "symlink"
-        if stat.S_ISDIR(root_mode):
-            entries = [root]
-            for entry in root.iterdir():
-                entry_mode = mode(entry)
-                if stat.S_ISDIR(entry_mode):
-                    entries.append(entry)
-                elif stat.S_ISLNK(entry_mode) and entry.name not in skills:
-                    # Only real directories are scanned as categories. A link
-                    # named for a requested skill is already flagged by scan().
-                    fail("symlink")
-            return entries, None
+        # Check top-down so even a normal directory below a link is refused.
+        # This is point-in-time evidence, not an attestation of loader behavior.
+        for component in (*reversed(root.parents), root):
+            component_mode = mode(component)
+            if stat.S_ISLNK(component_mode):
+                return None, "symlink"
+            if not stat.S_ISDIR(component_mode):
+                return None, "bad-roots"
+        entries = [root]
+        for entry in root.iterdir():
+            entry_mode = mode(entry)
+            if stat.S_ISDIR(entry_mode):
+                entries.append(entry)
+            elif stat.S_ISLNK(entry_mode) and entry.name not in skills:
+                # Only real directories are scanned as categories. A link
+                # named for a requested skill is already flagged by scan().
+                fail("symlink")
+        return entries, None
     except (OSError, ValueError):
         pass
     return None, "bad-roots"

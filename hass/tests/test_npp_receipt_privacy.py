@@ -39,8 +39,9 @@ class NppReceiptPrivacyTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10,
         )
 
-    def assert_report(self, code, receipts, clean, *findings):
-        result = self.invoke("--media", str(self.media))
+    def assert_report(self, code, receipts, clean, *findings, job=None):
+        args = () if job is None else ("--job", job)
+        result = self.invoke("--media", str(self.media), *args)
         expected = [f"receipts {receipts}", f"clean {clean}", *findings, FAIL if code else PASS]
         self.assertEqual(result.returncode, code)
         self.assertTrue(result.stdout == "\n".join(expected) + "\n", "unexpected scan report")
@@ -166,5 +167,29 @@ class NppReceiptPrivacyTests(unittest.TestCase):
 
     def test_c6_clean_receipt_passes(self):
         # The cost-presence boolean and role word aren't themselves private findings.
-        self.receipt("a001", {"has_cost": True, "approver": "owner"})
+        good = self.receipt("a001ffffeeee", {"has_cost": True, "approver": "owner"})
+        missing = self.job("a001")
         self.assert_report(0, 1, 1)
+
+        # A selected scan must read exactly that job's receipt; falling back to
+        # the batch result or a prefix match lets the clean sibling mask a gap.
+        self.assert_report(0, 1, 1, job=good.parent.name)
+        self.assert_report(1, 0, 0, "FAIL missing-receipt 1", job=missing.name)
+        self.assert_report(1, 0, 0, "FAIL missing-receipt 1", job="a003")
+        self.raw_receipt("a002", b'{"fixture":')
+        self.assert_report(1, 1, 0, "FAIL unreadable-receipt 1", job="a002")
+        self.assert_report(0, 1, 1, job=good.parent.name)
+
+        # Selection must keep both directory and receipt symlink refusals.
+        (self.npp / "a004").symlink_to(good.parent, target_is_directory=True)
+        self.assert_report(1, 0, 0, "FAIL missing-receipt 1", job="a004")
+        (missing / "receipt.json").symlink_to(good)
+        self.assert_report(1, 1, 0, "FAIL unreadable-receipt 1", job=missing.name)
+
+        # Invalid and repeated selectors must fail without echoing the inputs.
+        for selectors in (("--job", "a001-fixture"), ("--job", "a001", "--job", good.parent.name)):
+            with self.subTest(selector_count=len(selectors) // 2):
+                result = self.invoke("--media", str(self.media), *selectors)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(any(value in result.stderr for value in selectors[1::2]))

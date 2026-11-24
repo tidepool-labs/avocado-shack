@@ -3,7 +3,10 @@
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -28,12 +31,15 @@ class InstallQuiescenceTests(unittest.TestCase):
             stdout, stderr = StringIO(), StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 code = install_quiescence.main([str(path)])
-            self.assertEqual(code, expected)
-            self.assertEqual(stderr.getvalue(), "")
-            self.assertEqual(len(stdout.getvalue().splitlines()), 1)
-            self.assertTrue(stdout.getvalue().startswith("PASS:" if expected == 0 else "FAIL:"))
-            self.assertIn("saved snapshot", stdout.getvalue())
-            self.assertNotIn("fixture-marker", stdout.getvalue())
+            self.assert_verdict(code, stdout.getvalue(), stderr.getvalue(), expected)
+
+    def assert_verdict(self, code, stdout, stderr, expected):
+        self.assertEqual(code, expected)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(stdout.splitlines()), 1)
+        self.assertTrue(stdout.startswith("PASS:" if expected == 0 else "FAIL:"))
+        self.assertIn("saved snapshot", stdout)
+        self.assertNotIn("fixture-marker", stdout)
 
     def check_rows(self, rows, expected=1):
         self.verdict(json.dumps(rows).encode(), expected)
@@ -85,3 +91,20 @@ class InstallQuiescenceTests(unittest.TestCase):
         self.check_rows(rows)
         rows[0].update(stderr="", other="fixture-marker")
         self.check_rows(rows)
+
+        # Require a regular capture at the selected leaf: an ordinary open
+        # would follow this link to good evidence or wait for a FIFO writer.
+        with TemporaryDirectory() as folder:
+            capture = Path(folder) / "capture.json"
+            capture.write_bytes(good)
+            linked = capture.with_name("linked.json")
+            linked.symlink_to(capture.name)
+            fifo = capture.with_name("pipe.json")
+            os.mkfifo(fifo)
+            for path in (linked, fifo):
+                with self.subTest(leaf=path.name):
+                    result = subprocess.run(
+                        [sys.executable, "-B", install_quiescence.__file__, str(path)],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    self.assert_verdict(result.returncode, result.stdout, result.stderr, 1)

@@ -29,13 +29,20 @@ def findings(raw, kind, owner_uid):
     if not os.path.isabs(raw):
         return ["not-absolute"]
 
-    # Inspect components before normalizing: a symlink hidden by '..' still
-    # makes the input unsafe. This is a point-in-time metadata check.
-    parts = [part for part in raw.split("/") if part]
+    parts = raw[1:].split("/")
+    # Allow one trailing slash for directories only; the file type check
+    # below still refuses it for files. Preserve any other empty component.
+    if raw.endswith("/"):
+        parts.pop()
+
+    # Inspect the components in order before rejecting ambiguous spellings:
+    # a symlink hidden by '..' is still a symlink finding. Metadata only.
     current = "/"
     try:
         info = os.lstat(current)
         for part in parts:
+            if not part:
+                continue
             if not stat.S_ISDIR(info.st_mode):
                 return ["not-dir"]
             current = os.path.join(current, part)
@@ -44,6 +51,9 @@ def findings(raw, kind, owner_uid):
                 return ["symlink"]
     except (OSError, ValueError):
         return ["missing"]
+
+    if any(part in ("", ".", "..") for part in parts):
+        return ["non-canonical"]
 
     result = []
     directory = stat.S_ISDIR(info.st_mode)
@@ -59,7 +69,7 @@ def findings(raw, kind, owner_uid):
         if info.st_uid != owner_uid:
             result.append("owner")
 
-    path = Path(os.path.normpath(current))
+    path = Path(current)
     git = git_finding(path if directory else path.parent)
     if git is not None:
         result.append(git)

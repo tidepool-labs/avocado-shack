@@ -49,7 +49,7 @@ class PageCheck(HTMLParser):
             self.ids[attributes["id"] or ""] += 1
         if tag == "html":
             self.has_lang |= bool((attributes.get("lang") or "").strip())
-        elif tag == "h1":
+        elif tag == "h1" and not hidden:
             self.headings += 1
         elif tag == "a":
             self.finish_link()

@@ -124,6 +124,22 @@ class PilotContentDiffTests(unittest.TestCase):
         self.assert_result(self.invoke(bad, valid_again), FAIL, "FAIL bad-content from")
         self.assert_result(self.invoke(self.empty, bad), FAIL, "FAIL no-content from", "FAIL bad-content to")
 
+    def test_duplicate_status_key_is_refused(self):
+        # Contract: a committed catalog is read as written, so a repeated key cannot hide a
+        # product's real status. Bug caught: json.loads keeps the last duplicate, so a
+        # hidden-then-active product read as an unchanged, passing diff.
+        row = b'{"id":"pilot-fixture","status":"%s"%s}'
+        wrap = b'{"products":[%s]}'
+        single = self.commit_raw(wrap % (row % (b"active", b"")))
+        same = self.commit_raw(wrap % (row % (b"active", b"")) + b"\n")
+        dup = self.commit_raw(wrap % (row % (b"hidden", b',"status":"active"')))
+        nested = self.commit_raw(b'{"products":[{"id":"x","detail":{"a":1,"a":2}}]}')
+        healthy = self.commit_raw(wrap % (row % (b"active", b"")))
+        self.assert_result(self.invoke(single, same), PASS, "added-total 0")
+        self.assert_result(self.invoke(single, dup), FAIL, "FAIL bad-content to")
+        self.assert_result(self.invoke(dup, healthy), FAIL, "FAIL bad-content from")
+        self.assert_result(self.invoke(single, nested), FAIL, "FAIL bad-content to")
+
     def test_c2_6_added_count(self):
         # Compare to additions, not total products, and report the actual count.
         old = self.commit({"id": "existing-fixture"})

@@ -64,8 +64,9 @@ def read_makers(repo, sha, side, findings):
     try:
         document = json.loads(blob.stdout.decode("utf-8"), object_pairs_hook=unique_object,
                               parse_constant=reject_constant)
-        if isinstance(document, dict) and isinstance(document.get("makers"), dict):
-            return document["makers"]
+        makers = document.get("makers") if isinstance(document, dict) else None
+        if isinstance(makers, dict) and all(isinstance(record, dict) for record in makers.values()):
+            return makers
     except (ValueError, RecursionError):
         pass
     findings.append(f"bad-json {side}")
@@ -73,10 +74,7 @@ def read_makers(repo, sha, side, findings):
 
 
 def changed_fields(old, new):
-    # This is a field projection, not full catalog validation. Non-object
-    # entries have no named fields; absent fields are distinct from JSON null.
-    old = old if isinstance(old, dict) else {}
-    new = new if isinstance(new, dict) else {}
+    # This is a field projection: absent fields are distinct from JSON null.
     fields = []
     for field in FIELDS:
         before, after = old.get(field, MISSING), new.get(field, MISSING)

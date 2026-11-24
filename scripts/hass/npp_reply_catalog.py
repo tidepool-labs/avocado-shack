@@ -130,6 +130,8 @@ def main(argv=None):
     findings.extend(content_findings)
     if findings:
         return fail(*findings)
+    if not rendered:
+        return fail("no-templates")
 
     try:
         fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -105,12 +105,38 @@ class InstallCitationDriftTests(unittest.TestCase):
 
     def test_rejects_invalid_ranges_and_non_relative_paths(self):
         # Reject malformed input before lookup, even when a normalized path would exist.
+        # Echoing a rejected operand could expose pasted text in shared CLI evidence.
+        marker = "SYNTHETIC_PRIVATE_VALUE"
         invalid = ("run.sh", "run.sh:0-1", "run.sh:2-1", "run.sh:-1-2", "run.sh:1",
                    "run.sh:1-2junk", "/run.sh:1-1", "./run.sh:1-1", "docs/../run.sh:1-1",
                    "docs//fixture.txt:1-1", ":1-1")
-        result = self.cli(*invalid)
+        result = self.cli(marker, "run.sh:1-1", *invalid)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count(": invalid citation"), len(invalid))
+        self.assertNotIn(marker, result.stdout + result.stderr)
+        self.assertIn("OK 'run.sh:1-1'", result.stdout)
+        self.assertEqual(result.stdout.count(": invalid citation"), 1 + len(invalid))
+        for ordinal in (1, *range(3, len(invalid) + 3)):
+            self.assertIn(f"FAIL citation #{ordinal}: invalid citation", result.stdout)
+
+    def test_parser_errors_do_not_echo_option_like_operands(self):
+        # Contract: shareable CLI output never contains pasted operands. A parser that
+        # reports "unrecognized arguments: <operand>" (or ignored/ambiguous-option text)
+        # leaks an option-like pasted non-reference when no `--` separator is used.
+        marker = "SYNTHETIC_PRIVATE_VALUE"
+        base = [sys.executable, "-B", str(SCRIPT), "--repo", str(self.repo), "--commit", self.commit]
+        for bad in (f"--{marker}", f"-{marker}", f"-h{marker}", f"--help={marker}",
+                    f"--repo={marker}x", f"--commit={marker}"):
+            with self.subTest(bad=bad[:8]):
+                result = subprocess.run([*base, "run.sh:1-1", bad], cwd=self.root,
+                                        text=True, capture_output=True, check=False)
+                # -h<text> may legitimately print help on newer Python; only echo matters.
+                self.assertNotIn(marker, result.stdout + result.stderr)
+        # An option-like operand placed before the references, and a missing value.
+        for argv in ([f"--{marker}", "run.sh:1-1"], ["--repo", f"--{marker}"]):
+            result = subprocess.run([sys.executable, "-B", str(SCRIPT), *argv], cwd=self.root,
+                                    text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertNotIn(marker, result.stdout + result.stderr)
 
     def test_requires_available_full_commit_not_revision_or_other_object(self):
         # A generic revision parser can silently allow a branch, abbreviated ID or non-commit.

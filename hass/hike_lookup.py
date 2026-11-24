@@ -567,7 +567,7 @@ def _geometry(raw, what: str) -> list:
 
 def _element_id(el) -> int | str:
     ident = el.get("id")
-    if isinstance(ident, bool) or not (isinstance(ident, int) or (isinstance(ident, str) and ident.isdigit())):
+    if isinstance(ident, bool) or not (isinstance(ident, int) or (isinstance(ident, str) and ident.isascii() and ident.isdigit())):
         raise _bad("element id")
     return ident
 
@@ -1178,7 +1178,7 @@ def route_id(title: str, used=()) -> str:
 
 def source_url(c: Candidate) -> str:
     kind, _, num = (c.osm[0] if c.osm else "").partition("/")
-    return f"https://www.openstreetmap.org/{kind}/{num}" if kind in ("way", "relation") and num.isdigit() else "https://www.openstreetmap.org/"
+    return f"https://www.openstreetmap.org/{kind}/{num}" if kind in ("way", "relation") and num.isascii() and num.isdigit() else "https://www.openstreetmap.org/"
 
 
 def route_add_args(c: Candidate) -> dict:

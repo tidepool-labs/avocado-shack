@@ -105,6 +105,55 @@ class LinkTests(Fixture, CliCase):
                                    "Fig (site s1)", "Fig (till T1)", "Fig (T2)",     # the colliding pair is prefixed by side, the till one by item id
                                    "Plum (site p)", "plum (p2)", "Plum (till T3)"])  # a till SKU equal to a site id collides too
 
+    def snap(self):
+        return cache.read(self.state, cache.identity_of(from_settings(BLOCK)))[0]
+
+    def refused(self, content, links_):
+        """suggest(), draft() and apply() all refuse with the one fixed text, which echoes no value. A good draft is waiting first, so apply()
+        reaches the check; it and the link table stay exactly as they were."""
+        snapshot, folder = self.snap(), self.state / "clover"
+        code = links.draft(self.state, snapshot, PRODUCTS, {})[0]
+        (folder / "reports" / "link-suggest.md").unlink()   # a refused draft() must not recreate the list either
+        before = {p.name: p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+        for call in (lambda: links.suggest(snapshot, content, links_), lambda: links.draft(self.state, snapshot, content, links_),
+                     lambda: links.apply(self.state, code, snapshot, content, links_)):
+            with self.assertRaises(ValueError) as caught:
+                call()
+            self.assertEqual(str(caught.exception), "link inputs")
+        self.assertEqual({p.name: p.read_bytes() for p in folder.rglob("*") if p.is_file()}, before)   # no new draft, list or link table; the old draft stays
+        self.assertIsNone(self.links())
+
+    def test_malformed_catalog_refused_before_any_write(self):
+        # Contract: a catalog of the wrong shape is one plain refusal before any file is written. Bug: KeyError / TypeError / AttributeError
+        # tracebacks, and a product whose name is None listed as the word "None".
+        cases = {"no id": [{"name": "Blue mug", "status": "active"}], "id not text": [P(5, "Blue mug")], "name missing": [{"id": "mug", "status": "active"}],
+                 "name None": [P("mug", None)], "name not text": [P("mug", 7)], "product is text": ["x"], "product is None": [None],
+                 "bad one among good": [P("tea", "Tea"), {"name": "Mug"}]}
+        for label, products in cases.items():
+            with self.subTest(label):
+                self.refused({"products": products}, {})
+        for label, content in {"products None": {"products": None}, "products a dict": {"products": {}}, "products text": {"products": "x"},
+                               "no products": {}, "content a list": [], "content None": None}.items():
+            with self.subTest(label):
+                self.refused(content, {})
+
+    def test_links_not_a_dict_refused(self):
+        # Contract: the link table is a dict of product id to link. Bug: a list was accepted and used as if it were the table.
+        for label, table in {"list": [], "list of ids": ["avocado"], "None": None, "text": "avocado"}.items():
+            with self.subTest(label):
+                self.refused(PRODUCTS, table)
+
+    def test_healthy_catalog_unchanged(self):
+        # Control: the shape check changes nothing for a good catalog - the pairing, the clash and one-sided lists and their labels as before.
+        snapshot = self.snap()
+        found = links.suggest(snapshot, PRODUCTS, {})
+        self.assertEqual(found, ({"avocado": {"cloverId": "FAKEITEM00002"}, "oil": {"cloverId": "FAKEITEM00001", "sku": "AS-PAN-SUNSHINE-OLIVE-OIL-01"}},
+                                 ["Eggs, dozen (eggs-1)", "eggs, dozen (eggs-2)", "Eggs, dozen (EGG12)"], ["Heirloom tomato", "Lemons"],
+                                 ["Heirloom tomatoes", "Market special (ring up price)", "Old honey jar"]))
+        self.assertEqual(links.draft(self.state, snapshot, PRODUCTS, {})[1:], found)
+        self.assertEqual(links.suggest(snapshot, {"products": []}, {})[:3], ({}, [], []))   # an empty catalog is healthy, not malformed
+        self.assertEqual(links.suggest(snapshot, {"products": [P("mug", "Blue mug", "hidden"), {"id": "x", "name": "X"}]}, {})[0], {})   # status stays optional
+
     def test_cli_saves_one_private_draft_and_a_private_list_and_prints_counts_only(self):
         out, stdout = self.suggest()
         self.assertEqual({k: v for k, v in out.items() if k != "code"}, {"result": "ok", "matches": 2, "sameName": 3, "siteOnly": 2, "tillOnly": 3,

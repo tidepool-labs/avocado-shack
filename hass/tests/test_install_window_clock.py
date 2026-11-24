@@ -42,13 +42,13 @@ class InstallWindowClockTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, stdout.getvalue() + stderr.getvalue())
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def check(self, rows, *, summaries=(), failures=(), now=stamp("01:00:00")):
+    def check(self, rows, *, summaries=(), failures=(), now=stamp("01:00:00"), extra=()):
         raw = None
         if rows is not None:
             raw = b"".join((item if isinstance(item, bytes) else json.dumps(item).encode())
                            + b"\n" for item in rows)
             self.log.write_bytes(raw)
-        code, output, errors = self.invoke(["--log", str(self.log), "--now", now])
+        code, output, errors = self.invoke(["--log", str(self.log), "--now", now, *extra])
         expected = [*summaries, *(f"FAIL {reason}" for reason in failures),
                     ("FAIL" if failures else "PASS") + " install_window_clock"]
         self.assertEqual((code, output, errors), (int(bool(failures)), "\n".join(expected) + "\n", ""))
@@ -158,6 +158,56 @@ class InstallWindowClockTests(unittest.TestCase):
                 switch = "switch 15:00 ok" if closed else "switch 15:00 open"
                 self.check(rows, now=stamp("00:30:00"), summaries=(switch, "listing-1 01:00 ok"),
                            failures=("overlap listing-1",))
+
+    def test_require_complete_fails_untimed_steps(self):
+        # Contract: with --require-complete a log that never timed the switch or a listing
+        # cannot print PASS. A clock that only judges the rows present passes an empty or
+        # switch-only log, which can be read as proof of three verified listings.
+        require = ("--require-complete",)
+        switch = [row("switch", "start", "00:00:00"), row("switch", "end", "00:20:00")]
+        missing = tuple(f"missing {step}" for step in ("listing-1", "listing-2", "listing-3"))
+        with self.subTest(case="empty"):
+            self.check([], failures=tuple(f"missing {step}" for step in CLOCK.STEPS), extra=require)
+        with self.subTest(case="switch-only"):
+            self.check(switch, summaries=("switch 20:00 ok",), failures=missing, extra=require)
+        with self.subTest(case="unclosed-listing"):
+            rows = switch + [row("listing-1", "start", "00:20:00"), row("listing-1", "end", "00:25:00"),
+                             row("listing-2", "start", "00:30:00"), row("listing-2", "end", "00:35:00"),
+                             row("listing-3", "start", "00:40:00")]
+            self.check(rows, summaries=("switch 20:00 ok", "listing-1 05:00 ok",
+                                        "listing-2 05:00 ok", "listing-3 20:00 over"),
+                       failures=("over listing-3", "unclosed listing-3"), extra=require)
+            # An open listing within budget is still not a timed listing.
+            self.check(rows, now=stamp("00:45:00"),
+                       summaries=("switch 20:00 ok", "listing-1 05:00 ok",
+                                  "listing-2 05:00 ok", "listing-3 05:00 open"),
+                       failures=("unclosed listing-3",), extra=require)
+            # Mid-window use without the flag is unchanged.
+            self.check(rows, now=stamp("00:45:00"),
+                       summaries=("switch 20:00 ok", "listing-1 05:00 ok",
+                                  "listing-2 05:00 ok", "listing-3 05:00 open"))
+
+    def test_require_complete_passes_fully_closed_log(self):
+        # Healthy control: the flag must not reject four closed in-budget steps.
+        rows = [row("switch", "start", "00:00:00"), row("switch", "end", "00:30:00"),
+                row("listing-1", "start", "00:30:00"), row("listing-1", "end", "00:39:34"),
+                row("listing-2", "start", "00:40:00"), row("listing-2", "end", "00:50:00"),
+                row("listing-3", "start", "00:50:00"), row("listing-3", "end", "00:51:02")]
+        self.check(rows, summaries=("switch 30:00 ok", "listing-1 09:34 ok",
+                                    "listing-2 10:00 ok", "listing-3 01:02 ok"),
+                   extra=("--require-complete",))
+
+    def test_without_flag_incomplete_logs_keep_passing(self):
+        # Opt-in only: making completeness the default would break mid-attended-window runs.
+        self.check([])
+        self.check([row("switch", "start", "00:00:00"), row("switch", "end", "00:20:00")],
+                   summaries=("switch 20:00 ok",))
+
+    def test_help_mentions_require_complete(self):
+        # The flag must be discoverable from usage text.
+        code, output, errors = self.invoke(["--help"])
+        self.assertEqual((code, errors), (0, ""))
+        self.assertIn("--require-complete", output)
 
     def test_argparse_usage_error(self):
         # Real usage errors must be separate from verdicts and must not echo argv data.

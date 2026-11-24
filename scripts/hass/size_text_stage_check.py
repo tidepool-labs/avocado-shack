@@ -118,6 +118,9 @@ def main(argv=None):
     except Exception:
         return fail("assets-invalid")
 
+    if not sizes:
+        return fail("no-sizes")
+
     counts: dict[str, int] = dict.fromkeys(("both", "s2-only", "s5-only", "neither"), 0)
     buckets = {(True, True): "both", (True, False): "s2-only",
                (False, True): "s5-only", (False, False): "neither"}

@@ -77,12 +77,10 @@ def main(argv=None):
                 reasons["arg-problem"] = None
             else:
                 missing_required += bool(missing)
-                # check_args validates only image syntax without a site root.
-                # This checker must not certify an image it cannot inspect.
-                if problems or any(
-                    name in call["args"] and arg.kind == "image"
-                    for name, arg in op.args.items()
-                ):
+                # Offline replay: without a site root check_args validates image
+                # path syntax only (hass.ops _image_file_problem), so a well-formed
+                # image path passes and a malformed one is still a problem.
+                if problems:
                     reasons["arg-problem"] = None
         findings.extend(reason + suffix for reason in reasons)
 

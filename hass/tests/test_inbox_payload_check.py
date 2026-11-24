@@ -151,10 +151,22 @@ class InboxPayloadCheckTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
 
     def test_c2_multiple_findings(self):
-        # Do not stop at the first mismatch or change the order of findings.
-        self.fixture(("history", "synthetic-caption"), ("pending", None), ("done", "synthetic-caption"))
-        self.check("inbound 3", "state pending 1", "state done 1", "state history 1",
-                   "FAIL payload-kept done 1", "FAIL payload-kept history 1", "FAIL pending-empty 1", exit_code=1)
+        # Saved evidence may lack the writer's constraints. Count every non-roster
+        # row without echoing its state; silently skipping it (or forgetting NULL)
+        # would understate findings. Keep the existing payload findings in order.
+        with closing(sqlite3.connect(self.store)) as db, db:
+            db.execute("CREATE TABLE inbound (state TEXT COLLATE NOCASE, payload TEXT)")
+            db.executemany("INSERT INTO inbound VALUES (?, ?)", [
+                ("history", "synthetic-caption"), ("pending", None), ("done", "synthetic-caption"),
+                ("pending", "synthetic-caption"), ("Pending", "synthetic-caption"),
+                ("synthetic-private-state", "synthetic-caption"), (None, None),
+            ])
+            db.execute("INSERT INTO inbound VALUES (CAST(x'ff' AS TEXT), NULL)")
+        before = fingerprint(self.state)
+        self.check("inbound 8", "state pending 2", "state done 1", "state history 1",
+                   "FAIL payload-kept done 1", "FAIL payload-kept history 1", "FAIL pending-empty 1",
+                   "FAIL unknown-state 4", exit_code=1)
+        self.assertEqual(fingerprint(self.state), before)
 
     def test_c3_usage_exit_2(self):
         # These errors belong to argparse, not the report's FAIL path.

@@ -209,7 +209,8 @@ class PublishFootprintTests(unittest.TestCase):
     def test_c3_usage_exit_2(self):
         # Argparse errors must not become findings or produce report output.
         args = self.args()
-        for argv in (args[:-1], [*args, "--unknown"], [*args[:1], "--from", "--invalid", *args[2:]]):
+        for argv in (args[:-1], [*args, "--unknown"], [*args[:1], "--from", "--invalid", *args[2:]],
+                     [*args, "--require-path", "/products.json"], [*args, "--require-path", "./products.json"]):
             with self.subTest(argv=argv):
                 result = self.invoke(*argv)
                 self.assertEqual(result.returncode, 2)
@@ -258,6 +259,38 @@ class PublishFootprintTests(unittest.TestCase):
         self.assert_pass(result)
         self.assertEqual(result.stdout.splitlines(), ["changed 2", "status A 1", "status M 1", "allowed 2", PASS])
         self.assertFalse((clone / "products.json").exists())
+
+    def test_required_paths_in_the_single_commit(self):
+        # An allowlist-only check (or a glob match) could pass without the named path changing.
+        picture = "assets/products/photo-fixture.webp"
+        require_both = ("--require-path", picture, "--require-path", "products.json")
+        self.assert_pass(self.invoke(*self.args(), *require_both))
+        wildcard = self.invoke(*self.args(), "--require-path", "assets/products/photo-*.webp")
+        self.assert_failure(wildcard, "missing-required 1")
+
+        self.git("switch", "-q", "-c", "picture-only", self.before)
+        self.write(picture, "fixture image bytes")
+        picture_only = self.commit("picture only")
+        args = self.args(to=picture_only)
+        self.assert_pass(self.invoke(*args))
+        result = self.invoke(*args, *require_both)
+        self.assertEqual(self.assert_failure(result, "missing-required 1"), [
+            "changed 1", "status A 1", "allowed 1", "FAIL missing-required 1", FAIL,
+        ])
+
+        self.write("products.json", LISTING)
+        self.write(OTHER, "unrelated edit\n")
+        with_notes = self.commit("catalog and unrelated edit")
+        required = ("--require-path", "products.json")
+        unrelated = self.args(**{"from": picture_only, "to": with_notes})
+        self.assert_failure(self.invoke(*unrelated, *required), "unexpected 1")
+        missing_and_unrelated = self.invoke(*unrelated, *require_both)
+        self.assertEqual(self.assert_failure(missing_and_unrelated, "missing-required 1"), [
+            "changed 2", "status M 2", "allowed 1", "FAIL missing-required 1", FAIL,
+        ])
+        wrong_parent = self.invoke(*self.args(to=with_notes), *required)
+        self.assertEqual(self.assert_failure(wrong_parent, "not-single-publish"),
+                         ["FAIL not-single-publish", FAIL])
 
     def test_c7_unexpected_listed(self):
         # A newline path must remain one JSON-escaped output line, with the modified status.

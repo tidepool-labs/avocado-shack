@@ -18,6 +18,7 @@ from hass.clover.mapper import format_quantity, norm_name, suggest
 PACIFIC = ZoneInfo("America/Los_Angeles")
 FRESH = timedelta(minutes=20)
 TOO_OLD = timedelta(hours=24)
+SKEW = timedelta(minutes=5)    # a stamp this far ahead of `now` is ordinary clock skew; further ahead is not quoted
 LIST_LIMIT = 15
 
 
@@ -37,6 +38,9 @@ def freshness(snapshot, now, reachable=True):
     """(state, label): state is fresh | stale | unreachable | too-old; label is the sentence to put before or after an answer."""
     # Elapsed time between instants: same-zone aware datetimes would subtract wall clocks and ignore a DST change between them.
     age = now.astimezone(timezone.utc) - snapshot.fetched_at.astimezone(timezone.utc)
+    if age < -SKEW:
+        # Stamped in the future (clock jump, restored backup, edited cache): nobody can say how old it is, so it is never quoted.
+        return "too-old", "I can't tell how old the till count is, so I will not quote it. Check the till, or ask me again in a few minutes."
     if age > TOO_OLD:
         return "too-old", (f"I have not been able to read the till since {when(snapshot.fetched_at, now)}, "
                            "so I will not quote a count that old. Check the till, or ask me again in a few minutes.")

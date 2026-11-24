@@ -159,6 +159,23 @@ class ContentMakerDiffTests(unittest.TestCase):
                 self.assert_report(self.invoke(bad, following), failures=("bad-json from",))
                 good = following
 
+    def test_c2_7_non_object_maker(self):
+        # Checking only the makers wrapper lets a new non-object masquerade as
+        # a valid addition. Either endpoint must refuse it before any diff.
+        existing = {"kept": {"name": "Existing maker"}}
+        new_maker = {"name": "New maker", "url": None}
+        start = self.revision(existing)
+        good = self.revision({**existing, "new": new_maker})
+        self.assert_report(self.invoke(start, good),
+                           "makers-from 1", "makers-to 2", "added 1", "added new")
+
+        for value in (None, "synthetic canary", [new_maker]):
+            bad = self.revision({**existing, "new": value})
+            following = self.revision({**existing, "new": new_maker})
+            for side, before, after in (("to", start, bad), ("from", bad, following)):
+                with self.subTest(value_type=type(value).__name__, side=side):
+                    self.assert_report(self.invoke(before, after), failures=(f"bad-json {side}",))
+
     def test_c2_8_maker_removed(self):
         # Removals are counted by key, not net change in the total.
         start = self.revision({"z-old": {}, "a-old": {}, "kept": {}})

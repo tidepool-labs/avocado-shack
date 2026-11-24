@@ -44,13 +44,17 @@ def site_files(content_dir, site_dir):
 
 
 def report(content, files, not_regular):
+    # An unclassifiable row makes the picture report incomplete.
+    if any(
+        not isinstance(product, dict) or product.get("status") not in content_model.PRODUCT_STATUSES
+        for product in content.products
+    ):
+        return finish("content-invalid")
+
     product_refs = Counter()
     missing = []
-    bad_path = held_missing = malformed = 0
+    bad_path = held_missing = 0
     for product in content.products:
-        if not isinstance(product, dict):
-            malformed += 1
-            continue
         status = product.get("status")
         image = product.get("image")
         name = None
@@ -87,7 +91,6 @@ def report(content, files, not_regular):
         print(f"orphan {name}")
     print(f"note shared-image {sum(count >= 2 for count in product_refs.values())}")
     print(f"note held-image-missing {held_missing}")
-    print(f"note malformed {malformed}")
 
     findings = []
     if bad_path:

@@ -20,10 +20,10 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _nonnegative_int(value):
-    number = int(value)
-    if number < 0:
+    # int() also reads other Unicode digits (Arabic-Indic, full-width); accept ASCII digits only.
+    if not (value.isascii() and value.isdigit()):
         raise argparse.ArgumentTypeError("expected a non-negative integer")
-    return number
+    return int(value)
 
 
 def _fail(reason):

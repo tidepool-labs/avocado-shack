@@ -47,7 +47,10 @@ def audit_names(state):
     try:
         audit_fd = os.open("audit", flags, dir_fd=state_fd)
         try:
-            return os.listdir(audit_fd)
+            # Type from the directory entry itself (no symlink follow, no open),
+            # so a directory, symlink or FIFO named like a log is never a log.
+            with os.scandir(audit_fd) as entries:
+                return [(e.name, e.is_file(follow_symlinks=False)) for e in entries]
         finally:
             os.close(audit_fd)
     finally:
@@ -79,9 +82,9 @@ def main(argv=None):
     cutoff_day = (now - UTC_ORIGIN).days + 1 - args.days
     files = older = invalid = other = 0
     oldest = None
-    for name in names:
+    for name, regular in names:
         match = DAY_FILE.fullmatch(name)
-        if match is None:
+        if match is None or not regular:
             other += 1
             continue
         try:

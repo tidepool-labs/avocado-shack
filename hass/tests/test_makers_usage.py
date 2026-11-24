@@ -129,6 +129,21 @@ class MakersUsageTests(unittest.TestCase):
         lines = self.assert_findings(self.run_report(), "FAIL unknown-maker 3")
         self.assertIn("linked 2", lines)
 
+    def test_null_maker_target_is_unknown(self):
+        # A link must resolve against the filtered maker map the report counts; an
+        # unfiltered lookup passes links to null/non-object rows as merely malformed.
+        for target in (None, "text", []):
+            with self.subTest(target=target):
+                self.write(makers={"broken": target, "ok": {"name": "Fixture Brand"}},
+                           products=[product("first", "broken"), product("second", "ok")])
+                lines = self.assert_findings(self.run_report(), "FAIL unknown-maker 1")
+                self.assertIn("makers 1", lines)
+                self.assertIn("note malformed 1", lines)
+        self.write(makers={"ok": {"name": "Fixture Brand"}}, products=[product("first", "gone")])
+        self.assert_findings(self.run_report(), "FAIL unknown-maker 1")  # absent key
+        self.write(makers={"ok": {"name": "Fixture Brand"}}, products=[product("first", "ok")])
+        self.assertIn("linked 1", self.assert_pass(self.run_report()))  # healthy control
+
     def test_c2_4_active_on_hidden_maker(self):
         # Held/hidden links are not visibility findings; active links are, per row.
         makers = {"retired": {"hidden": True}}

@@ -51,6 +51,22 @@ class AuditLogDaysTests(unittest.TestCase):
             "note invalid-dates 2", "note other-names 2", "deletes 0", "PASS audit_log_days",
         ])
 
+    def test_directory_named_like_a_log_is_not_counted(self):
+        # Protects the "retained logs / oldest log" report: a name-only listing counts a
+        # directory, symlink or FIFO named like a day log as a file and as the oldest one.
+        self.audit.mkdir()
+        (self.audit / "2024-03-01.jsonl").touch()
+        (self.audit / "2024-02-29.jsonl").mkdir()
+        (self.audit / "2024-02-28.jsonl").symlink_to(self.audit / "2024-03-01.jsonl")
+        os.mkfifo(self.audit / "2024-02-27.jsonl")
+        result = self.cli(*self.argv)
+        self.assert_status(result, 0, "PASS audit_log_days")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.splitlines(), [
+            "days 1", "files 1", "older 0", "oldest 2024-03-01",
+            "note invalid-dates 0", "note other-names 3", "deletes 0", "PASS audit_log_days",
+        ])
+
     def test_c2_1_no_audit_dir(self):
         # Missing input must not look like a successful empty report.
         for state in (self.state, self.root / "absent"):

@@ -3,9 +3,15 @@ declared int totalBytes as `size-mismatch` (a cut-off photo is never returned), 
 C0/C1 control character with ValueError before any call. Fake transports only: nothing listens, connects or downloads.
 Run: python3 -m unittest hass.tests.test_bridge_photos_size -v"""
 
+import http.client
+import io
 import unittest
+from unittest import mock
+from urllib.parse import urlsplit
 
+from hass import bridge_photos
 from hass.bridge import BridgeError
+from hass.bridge_photos import BlueBubblesPhotos
 from hass.tests import test_bridge_photos as _bp
 from hass.tests.test_bridge_photos import JPG, PASSWORD, FakeTransport, _meta
 
@@ -62,6 +68,52 @@ class SizeMismatchTests(unittest.TestCase):
     def test_http_error_keeps_its_code_and_status(self):
         fake = FakeTransport(meta=_meta({"guid": "att-1", "totalBytes": len(JPG)}), files={"att-1": (500, b"")})
         self.assertEqual(self.fails(fake, "http-error").status, 500)
+
+
+def _http(body, announced=None, chunked=False):
+    """A real http.client response parsed from raw bytes (no socket): `announced` is the Content-Length header, if any."""
+    head = b"HTTP/1.1 200 OK\r\n" + (b"Transfer-Encoding: chunked\r\n" if chunked else b"")
+    head += b"Content-Length: %d\r\n" % announced if announced is not None else b""
+    raw = head + b"\r\n" + (b"%x\r\n%s\r\n0\r\n\r\n" % (len(body), body) if chunked else body)
+    sock = mock.Mock(makefile=lambda *a, **k: io.BytesIO(raw))
+    response = http.client.HTTPResponse(sock)
+    response.begin()
+    return response
+
+
+class ShortBodyTests(unittest.TestCase):
+    """Contract: the default transport never returns a body that ended before its announced HTTP Content-Length, even
+    when the metadata omits totalBytes. Bug it catches: a bounded read() returns the cut-off bytes as the whole photo,
+    so a short read is treated as complete, validation sees a truncated original and the caller's retry never runs."""
+    setUp, photos = _bp.PhotosTests.setUp, _bp.PhotosTests.photos
+
+    def fetch(self, body, announced=None, chunked=False, meta=None):
+        meta = meta or {"guid": "att-1"}  # no totalBytes unless the test asks
+        document = _meta(meta)[1]
+        answers = {"message": _http(document, len(document)), "attachment": _http(body, announced, chunked)}
+        opener = lambda request, timeout=None: answers[urlsplit(request.full_url).path.split("/")[3]]  # noqa: E731
+        with mock.patch.object(bridge_photos._OPENER, "open", side_effect=opener):
+            return BlueBubblesPhotos(_bp.BASE, self.pw).fetch("msg-1", 1)
+
+    def test_short_body_without_total_bytes_is_refused(self):
+        with self.assertRaises(BridgeError) as ctx: self.fetch(b"1234", announced=8)  # announced 8, received 4
+        self.assertEqual((ctx.exception.code, ctx.exception.status), ("size-mismatch", None))
+        self.assertEqual((ctx.exception.__cause__, ctx.exception.__context__), (None, None))
+        self.assertEqual(self.fetch(b"12345678", announced=8), [b"12345678"])  # healthy control: 8 of 8
+
+    def test_body_without_content_length_is_unchanged(self):
+        self.assertEqual(self.fetch(b"1234"), [b"1234"])  # close-delimited, nothing announced
+        self.assertEqual(self.fetch(b"1234", chunked=True), [b"1234"])
+        self.assertEqual(self.fetch(b"1234", announced=99, chunked=True), [b"1234"])  # chunked wins over a stray header
+
+    def test_size_cap_is_still_too_large_not_size_mismatch(self):
+        with mock.patch.object(bridge_photos.media, "MAX_BYTES", 16):
+            with self.assertRaises(BridgeError) as ctx: self.fetch(b"x" * 17, announced=100)  # read stops at limit + 1
+        self.assertEqual(ctx.exception.code, "too-large")
+
+    def test_short_body_with_matching_total_bytes_is_still_size_mismatch(self):
+        with self.assertRaises(BridgeError) as ctx: self.fetch(b"1234", announced=8, meta={"guid": "att-1", "totalBytes": 8})
+        self.assertEqual(ctx.exception.code, "size-mismatch")
 
 
 class MessageGuidControlTests(unittest.TestCase):

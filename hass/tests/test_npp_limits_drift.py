@@ -99,6 +99,20 @@ class NppLimitsDriftTests(unittest.TestCase):
         self.assert_outcome(self.run_catalog(), 1, FAIL,
                             ("FAIL unreadable products", "FAIL unreadable makers"))
 
+        # A last-value-wins decoder lets short copy hide over-limit copy in either file.
+        hard = json.loads(LIMITS.read_text(encoding="utf-8"))["limits"]
+        long_description = json.dumps("x" * (hard["description"]["hard_max_chars"] + 1))
+        long_story = json.dumps({"story": "x" * (hard["maker_story"]["hard_max_chars"] + 1)})
+        for key, member, hidden in (("products", '"description":', long_description),
+                                    ("makers", '"maker-a":', long_story)):
+            with self.subTest(file=key, case="duplicate-key"):
+                self.catalog([{"status": "active", "producerKey": "maker-a", "description": "Fig"}],
+                             {"maker-a": {"story": "A tale"}})
+                path = self.root / f"{key}.json"
+                clean = path.read_text(encoding="utf-8")
+                path.write_text(clean.replace(member, f"{member} {hidden}, {member}", 1), encoding="utf-8")
+                self.assert_outcome(self.run_catalog(), 1, FAIL, (f"FAIL unreadable {key}",))
+
     def test_c2_2_over_hard_max(self):
         # Check each finding alone and together. Deduplicate keys, not identical stories.
         hard = json.loads(LIMITS.read_text(encoding="utf-8"))["limits"]

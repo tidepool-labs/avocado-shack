@@ -292,7 +292,7 @@ def _upright(data):
     alpha = None
     if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:
         alpha = im.convert("RGBA").getchannel("A")
-        if alpha.getextrema()[0] > 250: alpha = None  # fully opaque: no cutout supplied
+        if alpha.getextrema()[0] == 255: alpha = None  # fully opaque: no cutout supplied
     return im.convert("RGB"), alpha, turned
 
 

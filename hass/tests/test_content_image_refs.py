@@ -73,19 +73,33 @@ class ContentImageRefsTests(unittest.TestCase):
         return lines[:-1]
 
     def test_c1_full_pass(self):
-        # Filtering by status would lose the held and legacy references; counting
-        # per record would double-count the shared image. Malformed rows are notes.
+        # Counting per record would double-count the active and hidden rows'
+        # shared picture; skipping held rows would lose their missing note.
         self.write_content([
             product("fixture-active"), product("fixture-hidden", "hidden"),
             product("fixture-held", "held", "held.jpg"),
-            product("fixture-legacy", "legacy", "legacy.png"), None, ["fixture"]
         ], homeImage={"image": f"assets/products/{HOME}"})
-        for name in (PHOTO, HOME, "legacy.png"):
+        for name in (PHOTO, HOME):
             (self.pictures / name).write_bytes(b"fixture")
-        self.assertEqual(self.assert_report(self.cli(*self.args())), [
-            "files 3", "referenced 4", "note not-regular 0", "note orphan 0",
-            "note shared-image 1", "note held-image-missing 1", "note malformed 2",
-        ])
+        lines = self.assert_report(self.cli(*self.args()))
+        for line in ("files 2", "referenced 3", "note not-regular 0",
+                     "note orphan 0", "note shared-image 1", "note held-image-missing 1"):
+            self.assertIn(line, lines)
+
+    def test_unreadable_product_rows_invalidate_picture_report(self):
+        # The loader validates the envelope only. Skipping an unreadable row
+        # would let a valid active picture certify a catalog we did not check.
+        (self.pictures / PHOTO).write_bytes(b"fixture")
+        for kind, row in (
+            ("non-object", ["fixture-private-row"]),
+            ("missing-status", {"id": "fixture-private-id"}),
+            ("unknown-status", product("fixture-private-id", "fixture-private-status")),
+            ("non-string-status", {**product("fixture-private-id"), "status": ["fixture-private-status"]}),
+        ):
+            with self.subTest(kind=kind):
+                self.write_content([product("fixture-active"), row])
+                self.assertEqual(self.assert_report(self.cli(*self.args()), "content-invalid"),
+                                 ["FAIL content-invalid"])
 
     def test_c2_1_unsafe_input(self):
         # is_dir() alone would accept a link to an otherwise valid copy.

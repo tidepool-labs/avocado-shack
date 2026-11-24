@@ -286,6 +286,8 @@ class SitePack:
                     fields = [("Name", rec["name"]), ("Maker", (maker or {}).get("name") or rec.get("brand") or nope),
                               ("Shelf", SHELF_LABELS.get(rec.get("category"), rec.get("category")) or nope), ("Description", desc),
                               ("Availability", avail), ("Status", STATUS_PLAIN.get(rec["status"], "not sure"))]
+                    if rec["status"] == "active" and "sellingPrice" in rec:
+                        fields.append(("Selling price", f"${rec['sellingPrice']}"))
                 elif kind == "maker":
                     fields = [("Name", rec["name"]), ("Place", rec.get("place") or nope),
                               ("Products showing", sum(1 for p in content.products if p["status"] == "active" and p.get("producerKey") == ident)),

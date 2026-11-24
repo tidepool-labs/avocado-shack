@@ -38,7 +38,7 @@ def safe_label(value):
     return value if isinstance(value, str) and LABEL.fullmatch(value) else "other"
 
 
-def report(path, since, until):
+def report(path, since, until, *, require_complete=False):
     groups = {name: Counter() for name in ("direction", "kind", "disposition", "chat")}
     events = draft_codes = unparsed = 0
     # The offline input must not be changing: unix-none takes no file locks.
@@ -62,12 +62,17 @@ def report(path, since, until):
                 groups["disposition"][safe_label(disposition)] += 1
                 groups["chat"][sha256(chat.encode("utf-8")).hexdigest()[:12]] += 1
 
+    if require_complete and unparsed:
+        # An unassignable row could belong to this window; suppress partial totals.
+        return unparsed
+
     print(f"events {events}")
     for name, counts in groups.items():
         for value, count in sorted(counts.items()):
             print(f"{name} {value} {count}")
     print(f"draft-codes {draft_codes}")
     print(f"unparsed {unparsed}")
+    return 0
 
 
 def inspect_store(path):
@@ -88,6 +93,8 @@ def main(argv=None):
     parser.add_argument("--state", required=True, type=Path, help="snapshot directory")
     parser.add_argument("--since", required=True, help="inclusive ISO time with offset")
     parser.add_argument("--until", required=True, help="exclusive ISO time with offset")
+    parser.add_argument("--require-complete", action="store_true",
+                        help="fail without a breakdown if any snapshot timestamp is unassignable")
     args = parser.parse_args(argv)
     since, until = aware_time(args.since), aware_time(args.until)
     findings = []
@@ -99,7 +106,9 @@ def main(argv=None):
         findings.append(store_finding)
     elif not findings:
         try:
-            report(path, since, until)
+            incomplete = report(path, since, until, require_complete=args.require_complete)
+            if incomplete:
+                findings.append(f"incomplete-window unparsed {incomplete}")
         except (sqlite3.Error, OSError, ValueError):
             findings.append(f"not-sqlite {NAME}")
     for finding in findings:

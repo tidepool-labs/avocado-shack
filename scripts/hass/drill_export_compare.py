@@ -17,6 +17,15 @@ def reject_constant(_token):
     raise ValueError("not a JSON constant")
 
 
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
 def read_export(path, label):
     lines = []
     bad_line = None
@@ -28,7 +37,8 @@ def read_export(path, label):
                 if not raw.strip():
                     continue
                 try:
-                    obj = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+                    obj = json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
+                                     object_pairs_hook=unique_object)
                     if not isinstance(obj, dict):
                         raise ValueError("not a JSON object")
                     lines.append(json.dumps(obj, sort_keys=True, separators=(",", ":"),

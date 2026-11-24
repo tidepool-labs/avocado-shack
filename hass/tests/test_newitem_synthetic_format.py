@@ -1,4 +1,4 @@
-"""make_photo admits only fmt "JPEG" or "PNG", and refuses the rest before any image work."""
+"""make_photo format admission and decoded image controls."""
 import builtins
 import io
 import unittest
@@ -49,7 +49,21 @@ class FormatAdmission(unittest.TestCase):
             self.assertEqual((im.format, im.size), (fmt, size))
             self.assertEqual(data, ns.make_photo(size=size, fmt=fmt))
         self.assertEqual(ns.make_photo(size=size), ns.make_photo(size=size, fmt="JPEG"))
-        self.assertEqual(Image.open(io.BytesIO(ns.make_photo(size=size, alpha=True, fmt="PNG"))).mode, "RGBA")
+
+    def test_alpha_png_keeps_transparent_background_and_opaque_subject(self):
+        from PIL import Image
+
+        # An RGBA file with a flattened mask would still open in RGBA mode.
+        data = ns.make_photo(size=(160, 120), fmt="PNG", alpha=True)
+        with Image.open(io.BytesIO(data)) as im:
+            self.assertEqual((im.format, im.mode), ("PNG", "RGBA"))
+            self.assertEqual(im.getchannel("A").getextrema(), (0, 255))
+
+    def test_alpha_jpeg_refuses_instead_of_returning_an_opaque_image(self):
+        # Saving as JPEG after converting to RGB used to silently discard the mask.
+        with self.assertRaises(ValueError) as ctx:
+            ns.make_photo(size=(160, 120), fmt="JPEG", alpha=True)
+        self.assertEqual(str(ctx.exception), "alpha requires PNG")
 
     def test_all_eight_cases_still_render(self):
         from PIL import Image

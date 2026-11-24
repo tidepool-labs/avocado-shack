@@ -150,6 +150,23 @@ class InstallLaunchAgentTests(unittest.TestCase):
         self.write_pair(self.document, self.document)
         self.assert_failed("forwarder-ambiguous")
 
+    def test_forwarder_must_be_script_not_option_value(self):
+        # A membership check accepts a stale script with the forwarder as --config;
+        # skipping arbitrary flags also accepts an interpreter option's operand.
+        python = self.document["ProgramArguments"][0]
+        other_script = f"/fixture/{BEFORE_MARKER}.py"
+        for case, arguments, extra in (
+            ("config", [python, "-B", other_script, "serve", "--config", FORWARDER], {}),
+            ("warning option", [python, "-W", FORWARDER, other_script], {}),
+            ("module mode", [python, "-m", FORWARDER], {}),
+            ("argv zero", [FORWARDER], {}),
+            ("program override", [python, "-B", FORWARDER], {"Program": other_script}),
+        ):
+            with self.subTest(case=case):
+                doc = {**self.document, "ProgramArguments": arguments, **extra}
+                self.write_pair(doc, doc)
+                self.assert_failed("forwarder-not-script")
+
     def test_not_absolute(self):
         # A verbatim match on a relative argument still fails with exit 1, not 2.
         relative = "fixture/mac/hass_forwarder.py"

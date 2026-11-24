@@ -63,7 +63,8 @@ class Web:
         try:
             status, kind, body = maker_site._read(url, "text/html", get, self.get is None, self.sleep, self.clock,
                                                  {}, robots=True, budget=budget)
-            if status != 200 or not body or "text/html" not in kind.lower() or len(body) >= maker_site.MAX_BYTES:
+            if (status != 200 or not body or kind.partition(";")[0].strip().lower() != "text/html"
+                    or len(body) >= maker_site.MAX_BYTES):
                 raise maker_site.PageError("unreadable")
             return final, body.decode("utf-8", "replace")
         finally:

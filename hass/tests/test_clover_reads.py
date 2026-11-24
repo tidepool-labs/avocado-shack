@@ -94,6 +94,22 @@ class HowManyTests(unittest.TestCase):
                 self.assertTrue(reads.how_many("saffron", s, NOW).startswith("Saffron: "))
                 self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+1000")))
 
+    # Contract: a count past the plain-digit boundary is still the till's count: answered in bounded exponent form, never "the till keeps no
+    # count"; zero of any exponent is sold out. Bug caught: admission by plain length reported 1E+1000 and 0E-1000 as untracked.
+    def test_counts_past_the_plain_digit_boundary_and_zero_exponents_answer_truthfully(self):
+        edge = mapper.MAX_PLAIN_DIGITS
+        for raw, got in (("1E+%d" % edge, "Yes, Saffron: 1E+%d in the till." % edge), ("1E+1000", "Yes, Saffron: 1E+1000 in the till."),
+                         ("4E-1000", "Yes, Saffron: 4E-1000 in the till."), ("1.5E+2000000", "Yes, Saffron: 1.5E+2000000 in the till."),
+                         ("4E-999999999999999999", "Yes, Saffron: 4E-999999999999999999 in the till."),
+                         ("1E+999999999999999999", "Yes, Saffron: 1E+999999999999999999 in the till."),
+                         ("0E-1000", "No, Saffron is sold out in the till."), ("0E+1000", "No, Saffron is sold out in the till."),
+                         ("-0E+999999999999999999", "No, Saffron is sold out in the till.")):
+            with self.subTest(raw=raw):
+                s = snap(extra=[mapper.parse_item({"id": "X9", "name": "Saffron", "itemStock": {"quantity": raw}})])
+                self.assertEqual(reads.in_stock("saffron", s, NOW), got)
+                self.assertNotIn("keeps no count", reads.how_many("saffron", s, NOW))
+                self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+999999999999999999")))
+
 
 def mugs(n, minutes_old=5):
     """n synthetic till items sharing one name, SKUs S0.., counts 0.. (made up)."""

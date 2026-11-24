@@ -1,6 +1,7 @@
 """RF1810-11: absurdly large typed counts are a named refusal, never a decimal traceback.
 Run: python3 -B -m unittest hass.tests.test_clover_drafts_extreme_count
 """
+import dataclasses
 import decimal
 import unittest
 
@@ -26,6 +27,23 @@ class ExtremeCountTests(unittest.TestCase):
                 with self.assertRaisesRegex(d.DraftRefused, "too high") as cm:
                     d.build_received(oil, bad, CFG)
                 self.assertLess(len(str(cm.exception)), 120)
+
+    # Bug caught: item.stock + got overflowed (decimal.Overflow) when the till's own count was past the decimal range (1E+2000000).
+    def test_received_on_a_huge_till_count_is_a_named_refusal_not_an_overflow(self):
+        oil = till()["FAKEITEM00001"]
+        for raw in ("1E+1000", "1E+2000000", "1E+999999999999999999"):
+            huge = dataclasses.replace(oil, stock=decimal.Decimal(raw))
+            with self.subTest(raw=raw), self.assertRaisesRegex(d.DraftRefused, "too high") as cm:
+                d.build_received(huge, "1", CFG)
+            self.assertLess(len(str(cm.exception)), 120)
+
+    # A typed fraction with a very long tail is named, not echoed back (the reply stays short).
+    def test_long_typed_fraction_for_a_whole_item_is_refused_without_echo(self):
+        oil = till()["FAKEITEM00001"]
+        for bad in ("0." + "0" * 3000 + "1", "1." + "7" * 3000, "4e-2000"):
+            with self.subTest(bad=bad[:20]), self.assertRaisesRegex(d.DraftRefused, "whole items") as cm:
+                d.build_set_stock(oil, bad, CFG)
+            self.assertLess(len(str(cm.exception)), 120)
 
     def test_refusal_preserves_caller_decimal_flags(self):
         oil = till()["FAKEITEM00001"]

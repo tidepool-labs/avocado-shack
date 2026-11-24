@@ -17,13 +17,14 @@ from decimal import Decimal, InvalidOperation, localcontext
 from types import SimpleNamespace
 
 from hass.clover import sku as skumod
-from hass.clover.mapper import (CATEGORIES, MapError, clean_name, create_payload, format_money, format_quantity, norm_name, pct_change,
+from hass.clover.mapper import (ARITH, CATEGORIES, MapError, clean_name, create_payload, format_money, format_quantity, norm_name, pct_change,
                                 site_category)
 from hass.clover.mapper import parse_selling_price
 
 DATA_CLASS = "finance-local"   # prices and counts: local code only; no cloud model ever sees a draft or a Clover answer
 KINDS = ("create_item", "set_price", "set_stock", "set_sku", "set_hidden")
 SITE_WORDS = {"yes": "Available today", "limited": "Limited", "no": "Sold out"}
+MAX_SHOWN_DIGITS = 64           # a typed fraction longer than this (digits, or distance from 1) is refused without being echoed back
 MAX_SHOWN_ADJUSTED = 24         # a refused count with more integer digits than this (1e25 and up) is not echoed back
 
 
@@ -110,7 +111,9 @@ def _qty(value, item, config):
             shown = f"{format_quantity(q)} " if q.adjusted() <= MAX_SHOWN_ADJUSTED else "That count "
         raise DraftRefused(f"{shown}looks too high for one item. Check the number and send it again.")
     if item.price_type != "PER_UNIT" and q != q.to_integral():
-        raise DraftRefused(f"{item.name} is counted in whole items, so {format_quantity(q)} is not a count I can set.")
+        # a typed count with a very long tail is named, not echoed (format_quantity may print up to MAX_PLAIN_DIGITS characters of it)
+        echo = format_quantity(q) if len(q.as_tuple().digits) <= MAX_SHOWN_DIGITS and abs(q.adjusted()) <= MAX_SHOWN_DIGITS else "that count"
+        raise DraftRefused(f"{item.name} is counted in whole items, so {echo} is not a count I can set.")
     if q != q.quantize(Decimal("0.001")):
         raise DraftRefused("I keep counts to three decimal places at most.")
     return q
@@ -281,7 +284,9 @@ def build_received(item, received, config, *, site_product=None, writes_today=0)
     if item.stock is None:
         raise DraftRefused(f"The till is not counting {item.name} yet, so I cannot add to a count. "
                            f"Say how many there are now: set {item.name} to <number>.")
-    after = _qty(item.stock + got, item, config)
+    with localcontext(ARITH):    # a huge till count (1E+2000000) must not overflow into a traceback; _qty then refuses it by name
+        total = item.stock + got
+    after = _qty(total, item, config)
     return _stock_draft(item, after, config, headline=f"Add stock to {_label(item)}?", extra=[f"  Received: {format_quantity(got)}"],
                         site_product=site_product)
 

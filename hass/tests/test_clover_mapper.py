@@ -101,13 +101,23 @@ class MoneyTests(unittest.TestCase):
                 self.assertEqual(m.format_quantity(Decimal(q)), text)
         self.assertEqual(m.format_quantity(Decimal(long_frac)), format(Decimal(long_frac), "f"))
 
-    # Contract: past MAX_PLAIN_DIGITS format_quantity refuses before building a string (so a draft refusal never echoes a huge count and a
-    # reply never carries one). Bug caught: an uncapped format() building a million-digit string for 1E+1000000.
-    def test_count_past_the_boundary_is_refused_not_built(self):
+    # Contract: past MAX_PLAIN_DIGITS a finite count is never expanded (no million-digit string) and never raises: it prints exactly in exponent
+    # form, and only more than MAX_PLAIN_DIGITS significant digits are cut (toward zero). Zero is '0' whatever its exponent. Bug caught:
+    # the boundary raised InvalidOperation, and then admission turned 1E+1000 / 0E-1000 into "the till keeps no count".
+    def test_count_past_the_boundary_prints_bounded_exponent_form(self):
         edge = m.MAX_PLAIN_DIGITS
-        for q in ("1E+%d" % edge, "4E-%d" % edge, "-4E-%d" % edge, "1E+1000000", "4E-1000000", "1E+999999999999999999", "9" * (edge + 1)):
-            with self.subTest(q=q[:24]), self.assertRaises(decimal.InvalidOperation):
-                m.format_quantity(Decimal(q))
+        for q, text in (("1E+%d" % edge, "1E+%d" % edge), ("1E+1000", "1E+1000"), ("-1E+1000", "-1E+1000"), ("1.5E+1000", "1.5E+1000"),
+                        ("4E-%d" % edge, "4E-%d" % edge), ("-4E-1000", "-4E-1000"), ("1.234E-3001", "1.234E-3001"), ("1E+2000000", "1E+2000000"),
+                        ("4E-2000000", "4E-2000000"), ("1E+999999999999999999", "1E+999999999999999999"),
+                        ("4E-999999999999999999", "4E-999999999999999999"), ("0." + "0" * 3000 + "1234", "1.234E-3001")):
+            with self.subTest(q=q[:24]):
+                self.assertEqual(m.format_quantity(Decimal(q)), text)
+        for q in ("0E-1000", "0E+1000", "-0E+5000", "0E-999999999999999999", "0E+999999999999999999"):
+            with self.subTest(q=q):
+                self.assertEqual(m.format_quantity(Decimal(q)), "0")
+        long = m.format_quantity(Decimal("7" * 5000))                 # more than MAX_PLAIN_DIGITS significant digits: cut to that many, still short
+        self.assertEqual(long, "7." + "7" * (edge - 1) + "E+4999")
+        self.assertLess(len(m.format_quantity(Decimal("1." + "7" * 5000 + "E+3000"))), edge + 20)
 
     # Healthy control: values the function already formatted correctly stay byte-identical.
     def test_ordinary_counts_unchanged(self):
@@ -151,16 +161,19 @@ class ItemMappingTests(unittest.TestCase):
         self.assertEqual((free.price_type, free.price_cents, free.stock, free.stock_modified), ("VARIABLE", None, None, None))
         self.assertEqual(got["FAKEITEM00002"].sku, "")
 
-    # Contract: the till's count is admitted only if it can be printed exactly (plain form up to MAX_PLAIN_DIGITS); a longer one is treated
-    # like a count the till did not give (None), so no read ever has to print or sum it. Bug caught: 1E+1000000 admitted, then a reply
-    # either raised or built a million-digit string; the boundary itself (1E+999) must still be kept.
-    def test_parse_item_admits_counts_up_to_the_print_boundary_only(self):
+    # Contract: every finite till count is kept as the count (a huge or tiny one is still stock; zero of any exponent is sold out), however long
+    # its plain form; only a value that is not a number, or not a Decimal at all, is "no count". Bug caught: a length admission turned 1E+1000
+    # and 0E-1000 into None, i.e. a false "the till keeps no count".
+    def test_parse_item_keeps_every_finite_count(self):
         edge = m.MAX_PLAIN_DIGITS
-        for q, kept in (("1E+64", True), ("4E-300", True), ("1E+%d" % (edge - 1), True), ("4E-%d" % (edge - 1), True),
-                        ("1E+%d" % edge, False), ("4E-%d" % edge, False), ("1E+1000000", False), ("4E-999999999999999999", False)):
+        for q in ("1E+64", "4E-300", "1E+%d" % (edge - 1), "4E-%d" % (edge - 1), "1E+%d" % edge, "4E-%d" % edge, "1E+1000", "0E-1000", "0E+1000",
+                  "1E+2000000", "4E-999999999999999999", "1E+999999999999999999"):
             with self.subTest(q=q):
                 got = m.parse_item({"id": "A1", "name": "N", "itemStock": {"quantity": q}}).stock
-                self.assertEqual(got, Decimal(q) if kept else None)
+                self.assertEqual(got, Decimal(q))
+        for q in ("NaN", "Infinity", "1E+9999999999999999999", "x"):         # not a number, or an exponent Decimal itself cannot hold
+            with self.subTest(q=q):
+                self.assertIsNone(m.parse_item({"id": "A1", "name": "N", "itemStock": {"quantity": q}}).stock)
 
     def test_odd_values_do_not_become_prices_or_counts(self):
         raw = {"id": "A1", "name": "N", "price": True, "itemStock": {"quantity": "x"}, "modifiedTime": -4, "hidden": "yes", "priceType": "WEIRD"}

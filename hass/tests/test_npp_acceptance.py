@@ -334,6 +334,41 @@ class JudgeTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertFalse(ev.calibrate(runs, self.good, self.bad, self.rubric)[0])
 
+    def malformed_scores(self):
+        return {
+            "not finite": {**self.scores(4.5), self.dims[0]: float("nan")},
+            "infinite": {**self.scores(4.5), self.dims[0]: float("inf")},
+            "wrong type": {**self.scores(4.5), self.dims[0]: "5"},
+            "boolean": self.scores(True),
+            "extra dimension": {**self.scores(4.5), "extra": 5},
+            "missing dimension": {self.dims[0]: 5},
+            "not an object": self.dims,
+            "outside scale": self.scores(100),
+        }
+
+    def test_recorded_calibration_rejects_invalid_or_incomplete_scores(self):
+        # Calibration must validate recorded data before averaging: NaN evades threshold comparisons,
+        # extra dimensions were ignored, and empty expected sets previously passed without measurements.
+        for label, score in self.malformed_scores().items():
+            with self.subTest(label=label):
+                runs = self.runs()
+                item = self.bad[0] if label == "boolean" else self.good[0]
+                runs[item] = [score] * 3
+                recorded = json.loads(json.dumps({"runs": runs}))
+                self.assertFalse(ev.calibrate(recorded["runs"], self.good, self.bad, self.rubric)[0])
+
+        for label, runs, good, bad in (
+            ("empty expected", {}, [], []),
+            ("missing bad class", {name: self.runs()[name] for name in self.good}, self.good, []),
+            ("no measurements", {}, self.good, self.bad),
+            ("missing item", {k: v for k, v in self.runs().items() if k != self.bad[0]}, self.good, self.bad),
+            ("unexpected item", {**self.runs(), "unexpected": []}, self.good, self.bad),
+            ("wrong run container", {**self.runs(), self.good[0]: "123"}, self.good, self.bad),
+        ):
+            with self.subTest(label=label):
+                recorded = json.loads(json.dumps({"runs": runs}))
+                self.assertFalse(ev.calibrate(recorded["runs"], good, bad, self.rubric)[0])
+
     def test_an_item_passes_on_mean_and_no_weak_dimension(self):
         # Contract (design 3.3): mean >= 4.0 with no dimension below 3.
         self.assertTrue(ev.judge_pass(self.scores(4), self.rubric))
@@ -348,25 +383,35 @@ class JudgeTests(unittest.TestCase):
         self.assertTrue(ev.asset_change_gate({"a": 4.5, "b": 4.2}, {"a": 4.2, "b": 4.3}, self.rubric)[0])
         self.assertFalse(ev.asset_change_gate({"a": 4.8}, {"a": 4.2}, self.rubric)[0])
 
+    def test_asset_comparison_requires_complete_valid_measurements(self):
+        # Comparing empty or partial records cannot establish the mean or detect all regressions.
+        for before, after in (
+            ({}, {}), ({}, {"a": 5}), ({"a": 5}, {}),
+            ({"a": 5}, {"a": 5, "unmatched": 5}),
+            ({"a": 5, "missing": 5}, {"a": 5}),
+            ({"a": float("nan")}, {"a": 5}), ({"a": 4}, {"a": float("nan")}),
+            ({"a": True}, {"a": 5}), ({"a": 4}, {"a": 100}),
+        ):
+            with self.subTest(before=before, after=after):
+                before, after = json.loads(json.dumps([before, after]))
+                self.assertFalse(ev.asset_change_gate(before, after, self.rubric)[0])
+
     def test_calibration_failures_do_not_mix_with_weekly_metrics_in_either_order(self):
         # A shared output path puts three-field calibration rows in metrics.tsv (or gives it the wrong header).
         version = ev.judge_version(self.pinned[1]["hass-style-judge/rubric.json"], self.pinned[0])
         for calibration_first in (True, False):
             with self.subTest(calibration_first=calibration_first), tempfile.TemporaryDirectory() as tmp:
-                scores, out = Path(tmp) / "scores.json", Path(tmp) / "metrics.tsv"
+                out = Path(tmp) / "metrics.tsv"
                 calibration = out.with_name("calibration.tsv")
-                judge_args = ["--judge", "--calibrate", "--scores", str(scores), "--metrics", str(out)]
                 metrics_args = ["--receipts", tmp, "--week", "2026-W47", "--out", str(out)]
+                ok, reasons = ev.calibrate(self.runs(good=3.0), self.good, self.bad, self.rubric)
+                self.assertFalse(ok)
                 with patch("builtins.print"):
-                    scores.write_text(json.dumps({"judge_version": version, "runs": self.runs()}))
-                    self.assertEqual(ev.main(judge_args), 0)
-                    self.assertFalse(calibration.exists())
-                    scores.write_text(json.dumps({"judge_version": version, "runs": self.runs(good=3.0)}))
                     if calibration_first:
-                        self.assertEqual(ev.main(judge_args), 1)
+                        ev.record_calibration_failure(out, version, reasons)
                     self.assertEqual(metrics.main(metrics_args), 0)
                     if not calibration_first:
-                        self.assertEqual(ev.main(judge_args), 1)
+                        ev.record_calibration_failure(out, version, reasons)
 
                 header, row = [line.split("\t") for line in out.read_text().splitlines()]
                 self.assertEqual(header, metrics.COLUMNS)
@@ -377,27 +422,35 @@ class JudgeTests(unittest.TestCase):
                 self.assertEqual(len(cal_row), 3)
                 self.assertIn("good item scored", cal_row[2])
 
-    def test_scores_for_another_judge_version_are_not_accepted(self):
-        # Contract: recorded scores replay only for the judge version (rubric + pinned model) they were made with.
+    def test_judge_cli_is_unavailable_without_touching_a_scorer_or_writing_results(self):
+        # Neither a valid calibration replay nor the former private-host opt-in can certify a release.
+        version = ev.judge_version(self.pinned[1]["hass-style-judge/rubric.json"], self.pinned[0])
         with tempfile.TemporaryDirectory() as tmp:
-            scores = Path(tmp) / "scores.json"
-            scores.write_text(json.dumps({"judge_version": "other", "runs": {}}))
-            with patch("builtins.print"):
-                self.assertEqual(ev.main(["--judge", "--calibrate", "--scores", str(scores)]), 1)
+            scores, record, metrics_path = (Path(tmp) / name for name in ("scores.json", "out.json", "metrics.tsv"))
+            scores.write_text(json.dumps({"judge_version": version, "runs": self.runs()}))
+            replay = ["--scores", str(scores)]
+            live = ["--live", "--record-to", str(record)]
+            for args, env in (([], {}), (replay, {}), (live, {}), (live, {"HASS_NPP_PRIVATE_HOST": "1"}),
+                              (replay + live, {"HASS_NPP_PRIVATE_HOST": "1"})):
+                with self.subTest(args=args, env=env), patch.object(ev, "CodexScorer", side_effect=AssertionError) as scorer, patch("builtins.print") as shown:
+                    self.assertEqual(ev.main(["--judge", "--calibrate", "--metrics", str(metrics_path), *args], environ=env), 2)
+                    scorer.assert_not_called()
+                    shown.assert_called_once()
+                    self.assertIn("unavailable", shown.call_args.args[0])
+                    self.assertNotIn("passed", shown.call_args.args[0].lower())
+                    self.assertEqual(list(Path(tmp).iterdir()), [scores])
 
-    def test_live_judging_is_private_host_only(self):
-        # Contract (design 3.3): the judge runs on the private host; nothing is sent from CI.
-        with patch("builtins.print"):
-            self.assertEqual(ev.main(["--judge", "--calibrate", "--live"], environ={}), 2)
-
-    def test_the_codex_scorer_demands_exactly_the_rubric_dimensions(self):
-        # Contract: the judge's reply is checked by code before use (design 4a).
+    def test_the_codex_scorer_rejects_malformed_replies(self):
+        # The transport adapter checks the complete reply before returning any score, even without calibration.
         good = {"ok": True, "text": json.dumps(self.scores(4))}
         scorer = ev.CodexScorer(self.rubric, self.pinned[0], runner=lambda request: good)
         self.assertEqual(scorer({"card": 1}), self.scores(4))
-        wrong = ev.CodexScorer(self.rubric, self.pinned[0], runner=lambda request: {"ok": True, "text": json.dumps({"voice": 5})})
-        with self.assertRaises(ValueError):
-            wrong({"card": 1})
+        for label, score in self.malformed_scores().items():
+            with self.subTest(label=label):
+                reply = {"ok": True, "text": json.dumps(score)}
+                scorer = ev.CodexScorer(self.rubric, self.pinned[0], runner=lambda request: reply)
+                with self.assertRaises(ValueError):
+                    scorer({"card": 1})
         down = ev.CodexScorer(self.rubric, self.pinned[0], runner=lambda request: {"ok": False})
         with self.assertRaises(RuntimeError):
             down({"card": 1})

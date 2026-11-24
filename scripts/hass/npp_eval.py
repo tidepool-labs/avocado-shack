@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""NPP-H: the style judge runner, its 3-run calibration, and the sourcing audit (design 3.3, 4d; G decision 2026-11-18 14:00).
+"""NPP-H: sourcing audit and offline style score checks (design 3.3, 4d; G decision 2026-11-18 14:00).
 
-    python3 -B scripts/hass/npp_eval.py --judge --calibrate --scores hass/tests/npp/tapes/judge/<version>.json
-    python3 -B scripts/hass/npp_eval.py --judge --calibrate --live          # private host only: asks the pinned judge model
-
-The judge never decides a case's pass or fail (design 3.3): it runs for asset and pin changes and weekly, on the private
-host. Without --live nothing here calls a model: the runner replays recorded scores, so a later run can be compared item
-by item. A calibration that fails means this judge version is not used, and the reason goes to calibration.tsv.
+The judging CLI is unavailable until the full pairwise and asset-change gates are implemented. Calibration is not
+release certification and does not satisfy asset or pin review. The judge never decides a replay case's pass or fail.
 
 `audit_research` is deterministic code, not a model grade. It enforces the G decision on a research receipt: search is
 only used to locate the maker's own site, the site's identity matches the owner's words (or a confident label), exactly
@@ -16,7 +12,6 @@ less certain leaves the story out.
 import argparse
 import hashlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -26,7 +21,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 JUDGE_DIR = REPO / "hass" / "tests" / "npp" / "tapes" / "judge"
-METRICS = Path("~/agent-work/reports/hass-npp/metrics.tsv").expanduser()
+
 # A research run that ends here leaves no story and no fact: the audit requires it.
 WITHHELD = {"label-mismatch", "no-safe-identity-seed", "no-confirmed-site", "two-passing-domains", "search-unavailable",
             "extraction-unavailable", "deadline", "research-disabled", "known-maker"}
@@ -124,11 +119,20 @@ def item_mean(scores, dims):
     return sum(scores[d] for d in dims) / len(dims)
 
 
+def _valid_score(value, scale):
+    # Exact numeric types reject booleans; the finite scale bounds also reject NaN and infinities.
+    return type(value) in (int, float) and scale["min"] <= value <= scale["max"]
+
+
+def _valid_dimensions(scores, dims, scale):
+    return (bool(dims) and isinstance(scores, dict) and scores.keys() == set(dims)
+            and all(_valid_score(value, scale) for value in scores.values()))
+
+
 def judge_pass(scores, rubric):
     """One item: mean at least 4.0 and no dimension below 3."""
     dims = [d["id"] for d in rubric["dimensions"]]
-    lo, hi = rubric["scale"]["min"], rubric["scale"]["max"]
-    if set(scores) != set(dims) or not all(isinstance(scores[d], (int, float)) and lo <= scores[d] <= hi for d in dims):
+    if not _valid_dimensions(scores, dims, rubric["scale"]):
         return False
     return item_mean(scores, dims) >= rubric["pass"]["mean_at_least"] and min(scores.values()) >= rubric["pass"]["dimension_at_least"]
 
@@ -136,15 +140,24 @@ def judge_pass(scores, rubric):
 def calibrate(runs, good, bad, rubric):
     """`runs` maps item -> list of per-run score dicts. Returns (passed, reasons).
 
-    Passes only if, for every run, every good item scores at least 4.0 and every bad item at most 2.5, and each item's
-    spread across the runs is at most 0.5."""
+    Checks calibration only, not release eligibility. Passes only for the complete supplied good and bad sets, with
+    each run's good items scoring at least 4.0 and bad items at most 2.5, and each item's spread at most 0.5."""
     cal = rubric["calibration"]
     dims = [d["id"] for d in rubric["dimensions"]]
+    items = [*good, *bad]
+    expected = set(items)
+    if not good or not bad or len(expected) != len(items):
+        return False, ["calibration requires nonempty, distinct good and bad items"]
+    if not isinstance(runs, dict) or runs.keys() != expected:
+        return False, ["calibration scores must cover exactly the expected items"]
     reasons = []
-    for item in [*good, *bad]:
-        got = runs.get(item)
-        if not got or len(got) != cal["runs"]:
-            reasons.append(f"{item}: {len(got or [])} runs, need {cal['runs']}")
+    for item in items:
+        got = runs[item]
+        if not isinstance(got, (list, tuple)) or len(got) != cal["runs"]:
+            reasons.append(f"{item}: need exactly {cal['runs']} runs")
+            continue
+        if not all(_valid_dimensions(run, dims, rubric["scale"]) for run in got):
+            reasons.append(f"{item}: invalid score dimensions or values")
             continue
         means = [item_mean(run, dims) for run in got]
         if max(means) - min(means) > cal["spread_at_most"]:
@@ -162,15 +175,20 @@ def pairwise_consistent(correct, total, rubric):
 
 
 def asset_change_gate(before, after, rubric):
-    """Design 4d: mean at least 4.0 and no case regressing by more than 0.5. `before`/`after` map case -> mean score."""
+    """Compare numeric scores for the supplied baseline cases, not the full design 4d release gate.
+
+    The caller must independently establish baseline provenance, expected coverage, and validator results.
+    """
+    if not isinstance(before, dict) or not before or not isinstance(after, dict) or before.keys() != after.keys():
+        return False, ["asset comparison requires a nonempty baseline and exactly matching new scores"]
+    if not all(_valid_score(value, rubric["scale"]) for scores in (before, after) for value in scores.values()):
+        return False, ["asset comparison has invalid score values"]
     gate = rubric["asset_change_pass"]
     reasons = []
-    if after and sum(after.values()) / len(after) < gate["mean_at_least"]:
+    if sum(after.values()) / len(after) < gate["mean_at_least"]:
         reasons.append("mean below target")
     for case, old in before.items():
-        if case not in after:
-            reasons.append(f"{case}: no new score")
-        elif old - after[case] > gate["case_regression_at_most"]:
+        if old - after[case] > gate["case_regression_at_most"]:
             reasons.append(f"{case}: regressed {old - after[case]:.2f}")
     return not reasons, reasons
 
@@ -206,6 +224,11 @@ def append_tsv(path, row):
         out.write("\t".join(str(row[c]).replace("\t", " ").replace("\n", " ") for c in cols) + "\n")
 
 
+def record_calibration_failure(metrics_path, version, reasons):
+    """Keep calibration failures separate from the weekly metrics schema."""
+    append_tsv(Path(metrics_path).with_name("calibration.tsv"), metrics_row_for_failure(version, reasons))
+
+
 class CodexScorer:
     """Private-host scorer: the pinned judge model, inside the rubric schema, one card per call. Never used in CI."""
 
@@ -223,9 +246,11 @@ class CodexScorer:
                            "text": "<<<DATA>>>\n" + json.dumps(card) + "\n<<<END DATA>>>"})
         if not (isinstance(got, dict) and got.get("ok") is True):
             raise RuntimeError("judge call failed")
+        if not isinstance(got.get("text"), str):
+            raise ValueError("judge did not return JSON text")
         scores = json.loads(got["text"])
-        if set(scores) != set(dims):
-            raise ValueError("judge returned the wrong dimensions")
+        if not _valid_dimensions(scores, dims, self.rubric["scale"]):
+            raise ValueError("judge returned invalid score dimensions or values")
         return scores
 
 
@@ -238,42 +263,18 @@ def run_calibration(scorer, good, bad, cards, rubric):
 
 
 def main(argv=None, environ=None):
-    p = argparse.ArgumentParser(description="NPP style judge runner and calibration")
+    # Keep accepting the old flags, but do not read inputs, construct a scorer, or emit receipts.
+    # The former private-host opt-in (including an injected environ) cannot enable judging.
+    p = argparse.ArgumentParser(description="NPP style judging is unavailable")
     p.add_argument("--judge", action="store_true")
     p.add_argument("--calibrate", action="store_true")
-    p.add_argument("--scores", help="recorded scores to replay (no model is called)")
-    p.add_argument("--live", action="store_true", help="private host only: ask the pinned judge")
-    p.add_argument("--record-to", help="write the scores of a live run here")
-    p.add_argument("--metrics", default=str(METRICS), help="weekly metrics path; write calibration.tsv alongside it")
-    args = p.parse_args(sys.argv[1:] if argv is None else argv)
-    environ = os.environ if environ is None else environ
-    if not args.judge:
-        p.error("--judge is required")
-    rubric, pinned = load_rubric()
-    good, bad, cards = calibration_set(pinned)
-    version = judge_version(pinned[1]["hass-style-judge/rubric.json"], pinned[0])
-    if args.live:
-        if environ.get("HASS_NPP_PRIVATE_HOST") != "1":
-            print("--live runs on the private host only (HASS_NPP_PRIVATE_HOST=1); nothing was sent")
-            return 2
-        runs = run_calibration(CodexScorer(rubric, pinned[0]), good, bad, cards, rubric)
-        if args.record_to:
-            Path(args.record_to).write_text(json.dumps({"judge_version": version, "runs": runs}, indent=1, sort_keys=True) + "\n")
-    elif args.scores:
-        recorded = json.loads(Path(args.scores).read_text())
-        if recorded.get("judge_version") != version:
-            print(json.dumps({"calibration": "failed", "reason": "recorded scores are for another judge version",
-                              "recorded": recorded.get("judge_version"), "current": version}))
-            return 1
-        runs = recorded["runs"]
-    else:
-        print("no recorded scores and not --live: nothing to judge offline")
-        return 2
-    ok, reasons = calibrate(runs, good, bad, rubric)
-    print(json.dumps({"judge_version": version, "calibration": "passed" if ok else "failed", "reasons": reasons}, sort_keys=True))
-    if not ok:
-        append_tsv(Path(args.metrics).with_name("calibration.tsv"), metrics_row_for_failure(version, reasons))
-    return 0 if ok else 1
+    p.add_argument("--scores", help="legacy option; not read")
+    p.add_argument("--live", action="store_true", help="legacy option; no calls are made")
+    p.add_argument("--record-to", help="legacy option; no scores are written")
+    p.add_argument("--metrics", help="legacy option; no metrics are written")
+    p.parse_args(argv)
+    print("NPP style judging unavailable: full pairwise and asset-change gates are not implemented.", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

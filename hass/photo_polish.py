@@ -215,13 +215,22 @@ def _folder(root, sha) -> Path:
     return folder
 
 
+def _decision_members(pairs):
+    record = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError("duplicate decision member")
+        record[key] = value
+    return record
+
+
 def decision(root, sha):
     """The settled decision dict for a stored photo, or None when nothing is settled yet."""
     raw = media._existing(_folder(root, sha) / f"{sha}.json")
     if raw is None:
         return None
     try:
-        got = json.loads(raw) if len(raw) <= media.SIDECAR_MAX else None
+        got = json.loads(raw, object_pairs_hook=_decision_members) if len(raw) <= media.SIDECAR_MAX else None
     except ValueError:
         got = None
     return got if isinstance(got, dict) and got.get("use") in ("polished", "house") else {"use": "house", "code": "bad-record"}

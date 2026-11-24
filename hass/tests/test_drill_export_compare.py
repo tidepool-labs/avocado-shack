@@ -65,6 +65,17 @@ class DrillExportCompareTests(unittest.TestCase):
         self.write_exports(b'{"id":1}\n{\n', b'{"id":1}\n{"id":NaN}\n')
         self.assert_result(1, 1, 1, "FAIL bad-line backup 2", "FAIL bad-line restored 2", FAIL)
 
+        # Last-key-wins decoding would discard the first value and falsely pass.
+        clean = b'{"meta":[{"nested-canary":"same"}]}\n'
+        duplicate = b'{"meta":[{"nested-canary":"different","nested-canary":"same"}]}\n'
+        for role, backup, restored, counts in (
+            ("backup", duplicate, clean, (0, 1)),
+            ("restored", clean, duplicate, (1, 0)),
+        ):
+            with self.subTest(role=role):
+                self.write_exports(backup, restored)
+                self.assert_result(1, *counts, f"FAIL bad-line {role} 1", FAIL)
+
     def test_c2_3_empty(self):
         # Two blank exports must not pass just because their canonical lists agree.
         self.write_exports(b"", b" \t\r\n\n")

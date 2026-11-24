@@ -39,7 +39,7 @@ def _announced(response):
     http.client decodes and which overrides Content-Length) is in use. Any other Transfer-Encoding (identity, gzip, a
     list...) is not decoded by http.client, so the body cannot be shown complete: _ShortBody."""
     coding = response.headers.get("Transfer-Encoding")
-    if coding is not None:
+    if isinstance(coding, str):  # http.client headers give str or None; a non-str stub value is treated as absent
         if coding.strip().lower() == "chunked": return None
         raise _ShortBody()
     value = response.headers.get("Content-Length")

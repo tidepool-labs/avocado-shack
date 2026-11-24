@@ -104,7 +104,8 @@ class AnswerReader(LocalInterpreter):
             body = self._answer_request(key, words, today)
             self.calls += 1
             result = self._call(body)
-            return {"value": result["value"]} if "value" in result else {}
+            if "value" not in result: raise _Failed("shape")  # {} is not an answer; an explicit {"value": null} is an abstention
+            return {"value": result["value"]}
         except _Failed as failure:
             self.last_error = failure.args[0]
             return {}

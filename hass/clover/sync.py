@@ -32,7 +32,8 @@ def _stock_text(value):
         q = Decimal(str(value))
         if not q.is_finite() or abs(q) >= Decimal(10) ** MAX_STOCK_DIGITS:
             return None
-        return mapper.format_quantity(q)
+        text = format(q, "f")   # exact digits, never an exponent. NOT mapper.format_quantity: it rounds to 3 places (0.0004 -> '0')
+        return text.rstrip("0").rstrip(".") if "." in text else text
     except (InvalidOperation, ArithmeticError):
         return None
 

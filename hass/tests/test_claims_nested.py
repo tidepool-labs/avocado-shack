@@ -75,7 +75,9 @@ class NestedScanTests(unittest.TestCase):
         self.assertEqual(self.hits({}, notice("ORGÁNIC honey"), "organic"), [])
         self.assertEqual(self.hits({}, notice("Pesticide free plums"), "x"), [("store store notice.text", "pesticide-free")])
         self.assertEqual(self.hits({}, notice("Pesticide\u2011free plums"), "pesticide free"), [])
-        self.assertEqual(self.hits({}, notice("Organically grown"), "x"), [])  # whole words only
+        self.assertEqual(self.hits({}, notice("Organics grown"), "x"), [])  # whole words only
+        self.assertEqual(self.hits({}, notice("Organically grown"), "x"), [("store store notice.text", "organically")])  # AV1124A-08 variant term, nested too
+        self.assertEqual(self.hits({}, notice("Organically grown"), "we are organic"), [])  # owner's "organic" backs it
         twice = notice("Organic here, organic there")
         self.assertEqual(self.hits(notice("Organic here"), twice, "x"), [("store store notice.text", "organic")])
         self.assertEqual(self.hits(notice("Organic here"), twice, "we are organic"), [])

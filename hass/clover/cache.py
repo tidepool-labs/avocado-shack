@@ -151,6 +151,14 @@ def _meta(db):
         return {}
 
 
+def _count(value):
+    """A stored counter as an int; an unreadable one (text, a fraction) is 0 and never echoed."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _set_meta(db, values):
     db.executemany("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                    [(k, str(v)) for k, v in values.items()])
@@ -207,7 +215,7 @@ def record_failure(state, word, now, retry_after_seconds=None, identity=None):
                 _set_meta(db, {"asOf": "", "itemCount": 0, **_identity_meta(identity)})
                 failures = 1
             else:
-                failures = int(meta.get("failures", "0") or 0) + 1
+                failures = _count(meta.get("failures")) + 1
             nxt = now + timedelta(minutes=backoff_minutes(failures, retry_after_seconds))
             _set_meta(db, {"lastAttempt": _iso(now), "lastResult": word, "failures": failures, "nextAttempt": _iso(nxt)})
             db.execute("COMMIT")
@@ -230,8 +238,8 @@ def facts(state, identity):
     if _refusal(meta, identity):
         return {"refused": REFUSED, "environment": meta.get("environment") or None, "merchantId": meta.get("merchantId") or None}
     return {"asOf": meta.get("asOf") or None, "lastAttempt": meta.get("lastAttempt") or None, "lastResult": meta.get("lastResult") or None,
-            "failures": int(meta.get("failures") or 0), "nextAttempt": meta.get("nextAttempt") or None,
-            "itemCount": int(meta.get("itemCount") or 0), "environment": meta["environment"], "merchantId": meta["merchantId"]}
+            "failures": _count(meta.get("failures")), "nextAttempt": meta.get("nextAttempt") or None,
+            "itemCount": _count(meta.get("itemCount")), "environment": meta["environment"], "merchantId": meta["merchantId"]}
 
 
 def _item(row):

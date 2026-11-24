@@ -19,6 +19,8 @@ RF0220-11: a store record's notice.text and homeImage.imageAlt strings are check
 AV1937-05: a hike.repeat copies title, trailId and the event text (never the recap) from a real hike; a copied value that
 equals the same field of that source hike (read from the content by the conversation) is not checked again.
 AV2152-10: health and award terms (HEALTH_AWARD_TERMS) a draft adds also need the owner's words; treat and best are not terms.
+AV1124A-08: VARIANT_TERMS (organically, gmo free, preservative free, sulfite free, no pesticides) are asked like any term, an owner's "organic"
+also backs "organically"; a number joined to a unit by a hyphen ("2-mile", "3-hr") is the same quantity as "2 miles", "3 hours".
 """
 import re
 import unicodedata
@@ -85,7 +87,9 @@ FARM_TERMS = ("fair trade", "fairtrade", "free-range", "cage-free", "hormone-fre
 HEALTH_AWARD_TERMS = ("cures", "heals", "prevents", "immune", "immunity", "detox", "anti-inflammatory", "antioxidant",
                       "probiotic", "superfood", "medicinal", "lowers cholesterol", "weight loss", "award-winning",
                       "prize-winning", "gold medal")  # AV2152-10; kept apart from TERMS (its pin)
-_TERM_RES = tuple((term, _pattern(term)) for term in TERMS + FARM_TERMS + HEALTH_AWARD_TERMS)
+VARIANT_TERMS = ("organically", "gmo-free", "preservative-free", "sulfite-free", "sulphite-free", "no pesticides")  # AV1124A-08; apart from TERMS (its pin)
+_BACKED_BY = {"organically": _pattern("organic")}  # an owner's affirmed "organic" also backs "organically"
+_TERM_RES = tuple((term, _pattern(term)) for term in TERMS + FARM_TERMS + HEALTH_AWARD_TERMS + VARIANT_TERMS)
 ACCESS_TERMS = ("dogs allowed", "dogs welcome", "dog friendly", "dog-friendly", "pet friendly", "leashed dogs",
                 "wheelchair accessible", "wheelchair friendly", "ada accessible", "stroller friendly", "no permit",
                 "no permit needed", "permit not required", "free parking", "parking available", "open to the public",
@@ -105,7 +109,7 @@ UNITS = {"mi": "mi", "mile": "mi", "miles": "mi", "km": "km", "kilometer": "km",
          "kilometres": "km", "ft": "ft", "foot": "ft", "feet": "ft", "hr": "hour", "hrs": "hour", "hour": "hour",
          "hours": "hour", "min": "min", "mins": "min", "minute": "min", "minutes": "min"}  # "h" alone is not a unit
 _NUM = r"\d+(?:[.,]\d+)?"
-QTY_RE = re.compile(rf"(?<![\w.,:])({_NUM})(?:\s*(?:[-–]|to)\s*({_NUM}))?\s*({'|'.join(sorted(UNITS, key=len, reverse=True))})(?!\w)")
+QTY_RE = re.compile(rf"(?<![\w.,:])({_NUM})(?:\s*(?:[-–]|to)\s*({_NUM}))?(?:-|\s*)({'|'.join(sorted(UNITS, key=len, reverse=True))})(?!\w)")
 
 
 def _quantities(text: str) -> list:
@@ -290,7 +294,8 @@ def unstated(draft: dict, owner_text, makers, routes=None, sources=None) -> list
                 hits.append((where, "link" if field == "url" else field))  # AV2022-04; the term scan still runs
             text, was = fold(new), fold(old if isinstance(old, str) else "")
             hits += [(where, term) for term, rx in _TERM_RES
-                     if len(rx.findall(text)) > len(rx.findall(was)) and not _affirmed(rx, lines)]
+                     if len(rx.findall(text)) > len(rx.findall(was)) and not _affirmed(rx, lines)
+                     and not (term in _BACKED_BY and _affirmed(_BACKED_BY[term], lines))]
             if r.get("collection") in ("events", "routeIdeas"):  # AV0022-11
                 now_n, was_n = _access_counts(text), _access_counts(was)
                 hits += [(where, term) for term, rx in _ACCESS_RES

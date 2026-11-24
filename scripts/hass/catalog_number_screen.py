@@ -74,6 +74,10 @@ def main(argv=None):
             else:
                 invalid_ids += 1
 
+    if not active:
+        # Nothing was examined, so a zero-count PASS would read as "no numbers found".
+        return fail("no-active-products")
+
     print(f"active {active}")
     print(f"screened {screened}")
     for field in FIELDS:

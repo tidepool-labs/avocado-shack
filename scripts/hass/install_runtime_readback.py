@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Check the consistency of one saved, post-release Hass capture (JSON on stdin).
 
-Usage: install_runtime_readback.py --target FULL_SHA --runtime ABSOLUTE_ROOT < capture.json
+Usage: install_runtime_readback.py --target FULL_SHA --runtime ABSOLUTE_ROOT
+       [--expected-old FULL_SHA] < capture.json
 
 Save one JSON object from the same attended run. Required fields:
   release: {exit_code, output}  Command exit status and complete combined transcript.
-  receipt: {phase, target, runtime}  From that run's final release receipt.
+  receipt: {phase, target, runtime, old (when bound)}  From the final release receipt.
   checkout: {root, head, status: {exit_code, stdout}}  Observed top-level and HEAD,
     plus unmodified porcelain status including untracked files.
   running_pin: full SHA from a separate post-release observation; do not copy
@@ -17,8 +18,10 @@ Save one JSON object from the same attended run. Required fields:
     synthetic-only run); summary is its final HASS-SELFTEST line.
 
 Supply the expected SHA and canonical runtime path from the install selection,
-not from the capture. Keep the capture private. This checks saved observations,
-not their authenticity, freshness, or what a process actually loaded.
+not from the capture. To bind both ends of a move, supply --expected-old from
+the independently recorded pre-move pin. Without it, receipt.old is not checked.
+Keep the capture private. This checks saved observations, not their authenticity,
+freshness, or what a process actually loaded.
 """
 
 import argparse
@@ -56,7 +59,7 @@ def is_zero(value):
     return type(value) is int and value == 0
 
 
-def refusal(capture, target, runtime):
+def refusal(capture, target, runtime, expected_old=None):
     """Return a fixed refusal reason, or None; never echo capture values."""
     release = object_at(capture, "release")
     if not is_zero(release.get("exit_code")):
@@ -78,6 +81,11 @@ def refusal(capture, target, runtime):
         return "receipt phase is not released"
     if receipt.get("target") != target or receipt.get("runtime") != runtime:
         return "receipt target or runtime does not match selection"
+    if expected_old is not None:
+        if expected_old == target:
+            return "old and target pins are identical; not a move"
+        if receipt.get("old") != expected_old:
+            return "receipt old pin missing or does not match pre-move selection"
 
     checkout = object_at(capture, "checkout")
     if checkout.get("root") != runtime:
@@ -112,23 +120,28 @@ def main(argv=None):
                             allow_abbrev=False)
     parser.add_argument("--target", required=True, help="selected full lowercase 40-hex commit")
     parser.add_argument("--runtime", required=True, help="expected canonical absolute checkout root")
+    parser.add_argument("--expected-old", help="independent pre-move full lowercase 40-hex commit")
     args = parser.parse_args(argv)
     root = PurePosixPath(args.runtime)
     if not re.fullmatch(r"[0-9a-f]{40}", args.target) or not (
         root.root == "/" and str(root) == args.runtime and ".." not in root.parts
     ):
         parser.error("invalid selection")
+    if args.expected_old is not None and not re.fullmatch(r"[0-9a-f]{40}", args.expected_old):
+        parser.exit(2, "REFUSED: --expected-old must be a full lowercase 40-hex commit\n")
 
     try:
         text = sys.stdin.read(MAX_CAPTURE + 1)
         capture = json.loads(text, object_pairs_hook=unique_object) if len(text) <= MAX_CAPTURE else None
     except (ValueError, OSError, RecursionError):
         capture = None
-    reason = refusal(capture, args.target, args.runtime) if isinstance(capture, dict) else "invalid capture JSON"
+    reason = (refusal(capture, args.target, args.runtime, args.expected_old)
+              if isinstance(capture, dict) else "invalid capture JSON")
     if reason is not None:
         print("REFUSED: " + reason, file=sys.stderr)
         return 1
-    print("PASS: saved release, checkout, pin and service observations agree (not process attestation)")
+    binding = "; receipt old pin matches pre-move selection" if args.expected_old is not None else ""
+    print(f"PASS: saved release, checkout, pin and service observations agree{binding} (not process attestation)")
     return 0
 
 

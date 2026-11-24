@@ -100,6 +100,21 @@ class InstallPrivateFilesTests(unittest.TestCase):
         self.check("--file", link, reasons=("symlink",))
         self.check("--dir", alias, reasons=("symlink",))
 
+        # A healthy destination must not pass under another spelling: filtering
+        # separators or normalizing dot segments can hide an ambiguous input.
+        self.check("--file", self.receipt, "--dir", self.backup,
+                   "--dir", f"{self.backup}/", lines=("file[0] ok", "dir[0] ok", "dir[1] ok"))
+        for kind, spelling in (
+            ("--file", f"{self.backup}/../{self.receipt.name}"),
+            ("--file", f"{self.root}/./{self.receipt.name}"),
+            ("--file", f"{self.root}//{self.receipt.name}"),
+            ("--file", f"/{self.receipt}"),
+            ("--dir", f"{self.backup}/."),
+            ("--dir", f"{self.backup}//"),
+        ):
+            with self.subTest(kind=kind, spelling=spelling):
+                self.check(kind, spelling, reasons=("non-canonical",))
+
     def test_hardlinks_and_all_independent_findings(self):
         # Reporting only the first finding would hide the bad mode or owner.
         os.link(self.receipt, self.root / "other-link")

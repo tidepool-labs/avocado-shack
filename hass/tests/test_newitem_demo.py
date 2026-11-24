@@ -29,20 +29,29 @@ class Content:
 
 @unittest.skipUnless(HAVE_PIL, "Pillow is not installed")
 class MontageTest(unittest.TestCase):
-    def run_demo(self, products, cases=(CASE,), show=("jar-dark-wood", "bag-red-cloth")):
+    def run_demo(self, products, cases=(CASE,), show=("jar-dark-wood", "bag-red-cloth"), *, missing=None, damaged=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         (root / "site").mkdir()
         recs = []
         for i, (cat, color) in enumerate(products):
-            Image.new("RGB", (100, 100), color).save(root / "site" / f"p{i}.png")
-            recs.append({"category": cat, "name": f"Prod {i}", "image": f"p{i}.png"})
+            photo = root / "site" / f"p{i}.png"
+            if i != missing:
+                image = Image.new("RGB", (100, 100), color)
+                if i == damaged:
+                    buf = io.BytesIO()
+                    image.save(buf, "JPEG")
+                    photo.write_bytes(buf.getvalue()[:-2])  # valid header, truncated pixel data
+                else:
+                    image.save(photo)
+            recs.append({"category": cat, "name": f"Prod {i}", "image": photo.name})
         with mock.patch.object(demo, "load_content", lambda: Content(recs)), mock.patch.object(demo.hs, "SITE", root / "site"), \
                 mock.patch.object(demo, "OUT", root / "out"), mock.patch.object(demo.syn, "cases", lambda: list(cases)), \
                 mock.patch.object(demo, "SHOW", show), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(demo.main(), 0)
-        return Image.open(root / "out" / "before-after.png").convert("RGB")
+        with Image.open(root / "out" / "before-after.png") as sheet:
+            return sheet.convert("RGB")
 
     def cell(self, sheet, row, col): return sheet.crop((col * T, row * ROW, (col + 1) * T, (row + 1) * ROW))
 
@@ -97,12 +106,25 @@ class MontageTest(unittest.TestCase):
 
     def test_multiple_show_rows_keep_comparison_columns(self):
         extra = ("jar-unshown", dict(product="jar", background="white-sheet", size=(300, 240), seed=1))
-        sheet = self.run_demo([("pantry", COLORS[0])], cases=(CASE, extra, CASE2))
-        self.assertEqual(sheet.size, (4 * T, 2 * ROW))  # unshown case is filtered
+        products = [("pantry", COLORS[0])] + [("pantry", (9, 9, 9))] * 11 + [("pantry", COLORS[1])]
+        cases = (CASE, extra, CASE2)
+        healthy = self.run_demo(products, cases=cases)
+        self.assertEqual(healthy.size, (4 * T, 2 * ROW))  # unshown case is filtered
         for row in (0, 1):
-            self.assert_ref(sheet, row, 0, COLORS[0])
-            self.assert_placeholder(sheet, row, 1)
-            self.assert_cmp(sheet, row)
+            self.assert_ref(healthy, row, 0, COLORS[0])
+            self.assert_ref(healthy, row, 1, COLORS[1])
+            self.assert_cmp(healthy, row)
+
+        # An eager open or lazy decode failure must not abort the sheet or shift its slots.
+        for fault, index, slot in (("missing", 0, 0), ("damaged", 12, 1)):
+            with self.subTest(reference=fault):
+                sheet = self.run_demo(products, cases=cases, **{fault: index})
+                self.assertEqual(sheet.size, healthy.size)
+                for row in (0, 1):
+                    self.assert_placeholder(sheet, row, slot)
+                    for col in (1 - slot, 2, 3):
+                        self.assertIsNone(ImageChops.difference(
+                            self.cell(sheet, row, col), self.cell(healthy, row, col)).getbbox())
 
     def test_placeholder_is_honest_and_not_a_duplicate(self):
         sheet = self.run_demo([("pantry", COLORS[0])])

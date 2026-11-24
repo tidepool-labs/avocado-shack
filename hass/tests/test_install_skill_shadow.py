@@ -120,6 +120,24 @@ class InstallSkillShadowTests(unittest.TestCase):
 
     def test_symlinked_roots_skill_directories_and_files_are_rejected(self):
         # Following aliases accepts the wrong source; exists() alone also misses dangling links.
+        # A leaf-only lstat (or resolve before checking) accepts a real skills
+        # directory reached through an aliased profile as the roster winner.
+        profile = self.root("profile")
+        skills = profile / "skills"
+        self.copy(skills / "maintain")
+        lower = self.root("lower")
+        self.assertEqual(self.run_check({"pilot": [str(skills), str(lower)]}),
+                         (0, [self.winner(), "PASS install_skill_shadow"]))
+        profile_alias = self.base / "profile-alias"
+        profile_alias.symlink_to(profile, target_is_directory=True)
+        # A refused higher-priority root must not promote the lower copy.
+        self.copy(lower / "maintain")
+        for raw, reason in ((str(profile_alias / "skills"), "symlink"),
+                            (f"{profile}/./skills", "bad-roots"),
+                            (f"{skills}/../skills", "bad-roots")):
+            with self.subTest(reason=reason, component=raw.split("/")[-2]):
+                self.assert_failed(self.run_check({"pilot": [raw, str(lower)]}), f"FAIL {reason}")
+
         target = self.copy(self.base / "target")
         root_alias = self.base / "alias"
         root_alias.symlink_to(target.parent, target_is_directory=True)

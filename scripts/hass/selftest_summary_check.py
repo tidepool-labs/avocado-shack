@@ -58,6 +58,8 @@ def check_capture(path):
     for status, value in zip(STATUSES, reported):
         if value != str(counts[status]):
             findings.append(f"count-mismatch {status.lower()}")
+    if not findings and not counts["PASS"]:
+        findings.append("no-passing-check")
     findings.extend(f"failed-check {check}" for check in failures)
     if reported and reported[2] != "0":
         findings.append(f"summary-fail {reported[2]}")

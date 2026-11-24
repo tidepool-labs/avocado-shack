@@ -88,10 +88,40 @@ class PilotCaptionPrecheckTests(unittest.TestCase):
         self.assertIn("caption 4 price no", lines)
         self.assertIn("caption 4 path ask", lines)
 
+        # The pilot needs three initial captions, with a deliberately unpriced middle row.
+        # Checking only the middle row or treating any ask (even a failed parse)
+        # as an omitted price would pass a rehearsal that doesn't match the plan.
+        complete = "sell $728.46 each"
+        unpriced = "paid $713.64"
+        for name, rows, findings, middle_facts in (
+            ("planned", [complete, unpriced, complete], [], ("price no", "path ask")),
+            ("all-card", [complete] * 3, ["FAIL pilot-sequence 2"], ("price yes", "path card")),
+            ("short", [complete, unpriced], ["FAIL pilot-caption-count"], ()),
+            ("long", [complete, unpriced, complete, complete], ["FAIL pilot-caption-count"], ()),
+            ("wrong outer rows", [unpriced] * 3, ["FAIL pilot-sequence 1", "FAIL pilot-sequence 3"],
+             ("price no", "path ask")),
+            ("priced ask", [complete, complete + "; cost unknown", complete],
+             ["FAIL pilot-sequence 2"], ("price yes", "path ask")),
+            ("parse failure", [complete, complete + "; " + "73462" * 1000 + " lb in stock", complete],
+             ["FAIL pilot-sequence 2"], ("price no", "path ask")),
+        ):
+            with self.subTest(name=name):
+                self.write_caption_file("\n\n".join(rows))
+                result = self.check("--expect-pilot-sequence")
+                lines = self.assert_result(result, int(bool(findings)), FAIL if findings else PASS)
+                self.assertEqual(lines[0], "scope caption finance only")
+                self.assertEqual([line for line in lines if line.startswith("FAIL ")], findings)
+                for fact in middle_facts:
+                    self.assertIn(f"caption 2 {fact}", lines)
+                for canary in ("728.46", "713.64", "73462", "cost unknown", str(self.source)):
+                    self.assertNotIn(canary, result.stdout)
+
     def test_c3_usage_exit_2(self):
-        # Missing/invalid CLI syntax is argparse usage, not an unreadable-file finding.
+        # Invalid syntax, including combining incompatible modes, must exit in argparse.
         self.write_caption_file("sell $712.83 each\n")
-        for args in ((), ("--captions",), ("--captions", str(self.source), "--unknown")):
+        captions = ("--captions", str(self.source))
+        for args in ((), ("--captions",), (*captions, "--unknown"),
+                     (*captions, "--expect-card", "--expect-pilot-sequence")):
             with self.subTest(args=args):
                 result = self.invoke(*args)
                 self.assertEqual(result.returncode, 2)

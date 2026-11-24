@@ -38,6 +38,7 @@ def read_captions(path):
 
 
 def report(index, caption):
+    parsed = True
     try:
         public, answers = item_intake.caption_answers(
             caption.replace("\ufffc", ""), {"photo_fields": None}
@@ -45,6 +46,7 @@ def report(index, caption):
     except ValueError:
         # A numeric conversion can refuse malformed finance (e.g. a huge count).
         public, answers = caption, {}
+        parsed = False
     price = "price" in answers
     unit = {"item": "each", "pound": "per-lb"}.get(answers.get("sold_by", ""), "none")
     ask = not price or item_intake.unresolved_finance(public)
@@ -54,7 +56,8 @@ def report(index, caption):
     print(f"{prefix} cost {'yes' if 'cost' in answers else 'no'}")
     print(f"{prefix} quantity {'yes' if 'qty' in answers else 'no'}")
     print(f"{prefix} path {'ask' if ask else 'card'}")
-    return ask
+    # A failed parse doesn't establish that the selling price was omitted.
+    return ask, price if parsed else None
 
 
 def main(argv=None):
@@ -62,24 +65,37 @@ def main(argv=None):
         prog="pilot_caption_precheck", description="Check photo-caption finance offline.", allow_abbrev=False
     )
     parser.add_argument("--captions", required=True, metavar="FILE", help="UTF-8 file, one caption per line")
-    parser.add_argument("--expect-card", action="store_true", help="fail for any caption that would ask")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--expect-card", action="store_true", help="fail for any caption that would ask")
+    mode.add_argument("--expect-pilot-sequence", action="store_true",
+                      help="require three initial captions: card, ask with no selling price, card")
     args = parser.parse_args(argv)
     try:
         captions = read_captions(args.captions)
     except (OSError, ValueError):
         captions = []
 
+    if args.expect_pilot_sequence:
+        print("scope caption finance only")
     failed = True
     if not captions:
         print("FAIL unreadable")
     elif len(captions) > 20:
         print("FAIL too-many")
+    elif args.expect_pilot_sequence and len(captions) != 3:
+        print("FAIL pilot-caption-count")
     else:
         failed = False
         for index, caption in enumerate(captions, 1):
-            if report(index, caption) and args.expect_card:
+            ask, price = report(index, caption)
+            if args.expect_card and ask:
                 print(f"FAIL would-ask {index}")
                 failed = True
+            if args.expect_pilot_sequence:
+                matches = ask and price is False if index == 2 else not ask
+                if not matches:
+                    print(f"FAIL pilot-sequence {index}")
+                    failed = True
     print("FAIL pilot_caption_precheck" if failed else "PASS pilot_caption_precheck")
     return int(failed)
 

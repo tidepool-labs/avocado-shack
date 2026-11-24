@@ -96,6 +96,13 @@ def eligible(row, ctx):
             and ('variants' not in row or ctx.variant in row['variants']))
 
 
+def _meets_fact_requirements(row, bound):
+    evidenced = {slot for slot in row['slots'].keys() & bound.keys() if bound[slot][1]}
+    any_required = row.get('requires_facts_any', ())
+    return ((not any_required or bool(evidenced.intersection(any_required)))
+            and set(row.get('requires_facts_all', ())) <= evidenced)
+
+
 class Writer:
     def __init__(self, pinned):
         pins, assets, _ = pinned  # same bytes that passed npp.assets(), never reread by path
@@ -165,13 +172,10 @@ class Writer:
         bound = self.bindings(ctx, field_name)
         if name:
             bound['name'] = (name, None)
-        if not row['slots'].keys() <= bound.keys():
+        if not row['slots'].keys() <= bound.keys() or not _meets_fact_requirements(row, bound):
             return None
-        required = row.get('requires_facts_any', ())
-        evidenced = {slot for slot in row['slots'] if bound[slot][1]}
-        expected = {bound[slot][1] for slot in evidenced}
-        if (required and not evidenced.intersection(required) or not set(row.get('requires_facts_all', ())) <= evidenced
-                or set(fact_ids) != expected or len(fact_ids) != len(expected)):
+        expected = {bound[slot][1] for slot in row['slots'] if bound[slot][1]}
+        if set(fact_ids) != expected or len(fact_ids) != len(expected):
             return None
         banks = [m[1][7:] for m in TOKEN.finditer(row['text']) if m[1].startswith('phrase:')]
         if len(banks) != len(ids):
@@ -219,7 +223,7 @@ class Writer:
         for key in FIELDS:
             bound = self.bindings(ctx, key)
             result[key] = [r['id'] for r in self.templates.values() if r['field'] == key and eligible(r, ctx)
-                           and (r['slots'].keys() - {'name'}) <= bound.keys()]
+                           and (r['slots'].keys() - {'name'}) <= bound.keys() and _meets_fact_requirements(r, bound)]
         return {'kind': ctx.kind, 'category': ctx.category, 'templates': result,
                 'phrase_ids': [p['id'] for p in self.phrases.values() if eligible(p, ctx)],
                 'fact_ids': {key: ref for key, (_value, ref) in self.bindings(ctx, 'story').items() if ref}}

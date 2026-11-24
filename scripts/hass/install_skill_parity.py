@@ -2,7 +2,7 @@
 """Compare operator-resolved skill files with a selected local Git commit.
 
 --roster is a UTF-8 JSON file mapping each profile label to both fleet skill
-names, each with an absolute path to the directory containing its SKILL.md:
+names, each with a resolved absolute path to the directory containing its SKILL.md:
 {"builder-a": {"hass-npp-maintain": "/example/maintain",
                "hass-npp-review": "/example/review"}}
 
@@ -54,13 +54,19 @@ def git(repo, *args):
 
 
 def compare_install(root, expected):
-    if not isinstance(root, str) or not os.path.isabs(root):
+    if not isinstance(root, str) or not root.startswith("/"):
         return "invalid root"
+    parts = [] if root == "/" else root[1:].split("/")
+    if any(part in ("", ".", "..") for part in parts) or "\0" in root:
+        return "invalid root"
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        # The operator supplies a resolved root. Pin that directory for the
-        # leaf lookup and never follow a symlink at either supplied endpoint.
-        directory = os.open(Path(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        # Open one component at a time: O_NOFOLLOW only checks the last one.
+        directory = os.open("/", directory_flags)
         try:
+            for part in parts:
+                directory, parent = os.open(part, directory_flags, dir_fd=directory), directory
+                os.close(parent)
             leaf = "SKILL.md"
             if not stat.S_ISREG(os.stat(leaf, dir_fd=directory, follow_symlinks=False).st_mode):
                 return "not a regular file"

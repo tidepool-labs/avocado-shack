@@ -67,6 +67,10 @@ class SyncDuplicateCase(unittest.TestCase):
             "missing time is lowest, listed first": ([("Old name", None), ("New name", 1)], "New name"),
             "missing time is lowest, listed second": ([("New name", 1), ("Old name", None)], "New name"),
             "tie keeps first listed": ([("First name", 700), ("Second name", 700)], "First name"),
+            # a real 0 is a time; only an absent (or invalid) modifiedTime is lowest. Bug caught: both normalise to 0 and tie, so the first copy wins.
+            "missing listed first, zero second": ([("Missing time", None), ("Zero time", 0)], "Zero time"),
+            "zero listed first, missing second": ([("Zero time", 0), ("Missing time", None)], "Zero time"),
+            "both zero keeps first listed": ([("First zero", 0), ("Second zero", 0)], "First zero"),
             "both missing keeps first listed": ([("First name", None), ("Second name", None)], "First name"),
         }
         for label, (copies, expected) in cases.items():

@@ -76,13 +76,18 @@ def rows(item_elements, stock_elements):
                "price_type": item.price_type, "unit_name": item.unit_name, "category_ids": json.dumps(_ids(raw, "categories")),
                "categories": json.dumps(list(item.categories)), "hidden": int(item.hidden), "available": int(item.available),
                "stock": stock, "stock_modified": stock_modified, "modified_time": item.modified_time}
+        # the validated raw time, None when absent or invalid: the row's modified_time normalises None to 0, which would tie a missing time with a real 0
+        mod = raw.get("modifiedTime")
+        mod = mod if type(mod) is int and mod >= 0 else None
         if item.id not in seen:
-            seen[item.id] = len(out)
+            seen[item.id] = (len(out), mod)
             out.append(row)
             continue
         skipped += 1   # the dropped copy is counted, never kept
-        if item.modified_time > out[seen[item.id]]["modified_time"]:
-            out[seen[item.id]] = row
+        at, kept = seen[item.id]
+        if mod is not None and (kept is None or mod > kept):   # None lowest; a tie keeps the first listed
+            out[at] = row
+            seen[item.id] = (at, mod)
     return out, skipped
 
 

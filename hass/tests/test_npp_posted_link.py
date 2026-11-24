@@ -22,11 +22,12 @@ SHOP_RUNNER = r"""
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const [built, sources, href] = process.argv.slice(2);
+const [built, sources, href, trigger, initialFocus] = process.argv.slice(2);
 const location = new URL(href);
 const elements = new Map();
 const element = () => ({value: '', textContent: '', options: [], hidden: false,
-  append(option) { this.options.push(option); }, addEventListener() {}});
+  append(option) { this.options.push(option); }, addEventListener() {},
+  focus() { document.activeElement = this; }});
 for (const selector of ['#catalog-grid', '#brand-filter', '#product-search', '#market',
                         '#catalog-count', '#catalog-sentinel', '#more-products',
                         '#clear-filters', '#dialog', '.close', '[data-policy]']) {
@@ -37,7 +38,8 @@ const all = {...element(), dataset: {filter: 'all'}, classList: {toggle() {}},
 elements.set('[data-filter="all"]', all);
 elements.set('[data-filter].selected', all);
 const grid = elements.get('#catalog-grid');
-let focused = null, scrolled = null;
+const search = elements.get('#product-search');
+let scrolled = null;
 const articles = [];
 Object.defineProperty(grid, 'innerHTML', {set() { articles.length = 0; }});
 grid.insertAdjacentHTML = (position, html) => {
@@ -48,12 +50,13 @@ grid.insertAdjacentHTML = (position, html) => {
   } else if (position === 'beforeend') {
     for (const [, id] of html.matchAll(/<article\s[^>]*\bdata-product-id="([^"]+)"/g)) {
       articles.push({dataset: {productId: id}, setAttribute() {},
-        scrollIntoView() { scrolled = id; }, focus() { focused = id; }});
+        scrollIntoView() { scrolled = id; }, focus() { document.activeElement = this; }});
     }
   }
 };
 const document = {
-  readyState: 'complete', createElement: element, addEventListener() {},
+  readyState: trigger === 'complete' ? 'complete' : 'loading',
+  body: element(), documentElement: element(), createElement: element, addEventListener() {},
   getElementById(id) { return elements.get('#' + id) ?? null; },
   querySelector(selector) { return elements.get(selector) ?? null; },
   querySelectorAll(selector) {
@@ -62,13 +65,36 @@ const document = {
     return [];
   },
 };
+document.activeElement = document.body;
+const timers = new Map(), frames = [];
+let nextTimer = 0, onLoad;
 const context = vm.createContext({document, location, URLSearchParams,
   history: {replaceState(_state, _unused, url) { location.href = new URL(url, location).href; }},
+  addEventListener(type, fn) { if (type === 'load') onLoad = fn; },
+  setTimeout(fn) { timers.set(++nextTimer, fn); return nextTimer; },
+  clearTimeout(id) { timers.delete(id); },
+  requestAnimationFrame(fn) { return frames.push(fn); },
   window: {addEventListener() {}}});
 for (const [dir, file] of [[built, 'catalog-products.js'], [built, 'producers.js'],
                            [sources, 'script.js'], [sources, 'shop.js']]) {
   vm.runInContext(fs.readFileSync(path.join(dir, file), 'utf8'), context, {filename: file});
 }
+if (trigger === 'load') onLoad(); // The focus change can happen even after load queued its frame.
+if (initialFocus === 'search') search.focus();
+if (initialFocus === 'root') document.documentElement.focus();
+if (trigger === 'load') frames.shift()();
+if (trigger.startsWith('fallback')) {
+  const [[id, fn]] = timers;
+  timers.delete(id);
+  fn();
+  if (trigger === 'fallback-then-load') {
+    scrolled = null; // Simulate the browser's subsequent anchor jump.
+    onLoad();
+    frames.shift()();
+  }
+}
+const active = document.activeElement;
+const focused = active === search ? 'search' : active.dataset?.productId ?? null;
 const status = document.getElementById('catalog-item-status');
 console.log(JSON.stringify({cards: articles.map(a => a.dataset.productId), focused, scrolled,
   status: status && !status.hidden ? status.textContent : null}));
@@ -170,11 +196,12 @@ class PostedLinkTests(unittest.TestCase):
             self.skipTest('NOT-RUN: Node 22 is required')
         return node
 
-    def _open(self, node, repo, url):
+    def _open(self, node, repo, url, trigger='complete', initial_focus='body'):
         self._check_wiring(repo)
         script = repo.state / 'posted-link.cjs'
         script.write_text(SHOP_RUNNER, encoding='utf-8')
-        result = subprocess.run([node, str(script), str(repo.wt / SITE), str(SITE_DIR), url],
+        result = subprocess.run([node, str(script), str(repo.wt / SITE), str(SITE_DIR), url,
+                                 trigger, initial_focus],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -204,6 +231,20 @@ class PostedLinkTests(unittest.TestCase):
         page = self._open(node, repo, url)
         self.assertIn(key, page['cards'])
         self.assertEqual((page['focused'], page['scrolled'], page['status']), (key, key, None))
+
+        # The first queued callback must not treat "not shown yet" as permission
+        # to take focus or scroll after the visitor tabs to the search input.
+        for trigger in ('load', 'fallback'):
+            for initial_focus, expected in [('search', ('search', None)),
+                                            ('body', (key, key)), ('root', (key, key))]:
+                with self.subTest(trigger=trigger, initial_focus=initial_focus):
+                    page = self._open(node, repo, url, trigger, initial_focus)
+                    self.assertIn(key, page['cards'])
+                    self.assertEqual((page['focused'], page['scrolled']), expected)
+
+        # If fallback focused the card and it still owns focus, load may re-center it.
+        page = self._open(node, repo, url, 'fallback-then-load')
+        self.assertEqual((page['focused'], page['scrolled']), (key, key))
 
     def test_c3_hidden_not_shown(self):
         # A reverted row still exists privately; leaking it to the shelf or

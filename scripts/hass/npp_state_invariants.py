@@ -13,6 +13,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from hass.npp.job import ACTIVE  # noqa: E402
+from hass.npp.receipt import instant  # noqa: E402
 
 
 STORE = "conversation.sqlite3"
@@ -90,6 +91,9 @@ def _snapshot_report(state):
 
 
 def _report(db):
+    # Validate delivery on the read-only snapshot using the receipt clock parser.
+    db.create_function("has_delivery_time", 1, lambda value: instant(value) is not None,
+                       deterministic=True)
     tables = {name for (name,) in db.execute("""
         SELECT name FROM sqlite_master WHERE type = 'table'
         AND name IN ('npp_jobs', 'npp_versions', 'npp_approvals', 'npp_questions', 'drafts')
@@ -115,7 +119,7 @@ def _report(db):
         "approval-undelivered": count("""
             SELECT COUNT(*) FROM npp_approvals a WHERE NOT EXISTS (
                 SELECT 1 FROM npp_versions v WHERE v.job_id = a.job_id AND v.n = a.n
-                AND v.delivered_at IS NOT NULL)
+                AND has_delivery_time(v.delivered_at))
         """),
         "approval-outbox-mismatch": count("""
             SELECT COUNT(*) FROM npp_approvals a WHERE EXISTS (
@@ -129,8 +133,13 @@ def _report(db):
             SELECT COUNT(*) FROM npp_jobs j WHERE j.current_version IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM npp_versions v WHERE v.job_id = j.job_id AND v.n = j.current_version)
         """),
+        # Any recorded delivery claim counts, even a malformed one. A malformed time on an
+        # approved version is already reported by approval-undelivered, so skip it here.
         "delivered-without-card": count("""
-            SELECT COUNT(*) FROM npp_versions WHERE delivered_at IS NOT NULL AND card_png_sha IS NULL
+            SELECT COUNT(*) FROM npp_versions v WHERE v.card_png_sha IS NULL
+            AND v.delivered_at IS NOT NULL
+            AND (has_delivery_time(v.delivered_at) OR NOT EXISTS (
+                SELECT 1 FROM npp_approvals a WHERE a.job_id = v.job_id AND a.n = v.n))
         """),
         "approved-without-draft": count("""
             SELECT COUNT(*) FROM npp_versions WHERE state = 'approved' AND draft_hash IS NULL

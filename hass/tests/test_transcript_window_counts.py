@@ -61,8 +61,8 @@ class TranscriptWindowCountsTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], cwd=self.root,
                               capture_output=True, text=True, timeout=10)
 
-    def invoke(self, *, since=SINCE, until=UNTIL, state=None):
-        return self.cli("--state", str(state or self.state), "--since", since, "--until", until)
+    def invoke(self, *flags, since=SINCE, until=UNTIL, state=None):
+        return self.cli("--state", str(state or self.state), "--since", since, "--until", until, *flags)
 
     def assert_pass(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -94,6 +94,8 @@ class TranscriptWindowCountsTests(unittest.TestCase):
             "disposition other 1", "disposition received 1", "disposition sent 1",
             *(f"chat {digest} {count}" for digest, count in chats), "draft-codes 1", "unparsed 3",
         ])
+        # Strict mode must count all unassignable rows without printing partial aggregates.
+        self.assert_findings(self.invoke("--require-complete"), "incomplete-window unparsed 3")
 
     def test_c2_1_missing_db(self):
         # A writable connection could silently create a missing DB.
@@ -211,6 +213,14 @@ class TranscriptWindowCountsTests(unittest.TestCase):
                 self.assertNotIn(canary, result.stdout + result.stderr)
 
     def test_c6_empty_window_passes(self):
-        # A nonempty store with no matching rows must not become a finding.
-        self.seed(event(UNTIL))
-        self.assertEqual(self.assert_pass(self.invoke()), ["events 0", "draft-codes 0", "unparsed 0"])
+        # Ignoring unparsed rows in the strict verdict would mistake incomplete
+        # evidence for a quiet window. A parsable row at the upper bound is excluded.
+        self.seed(event("2040-06-14T13:00:00+02:00"))
+        empty = ["events 0", "draft-codes 0", "unparsed 0"]
+        self.assertEqual(self.assert_pass(self.invoke()), empty)
+        self.assertEqual(self.assert_pass(self.invoke("--require-complete")), empty)
+
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute(INSERT, event("fixture malformed timestamp"))
+        self.assert_findings(self.invoke("--require-complete"), "incomplete-window unparsed 1")
+        self.assertEqual(self.assert_pass(self.invoke()), ["events 0", "draft-codes 0", "unparsed 1"])

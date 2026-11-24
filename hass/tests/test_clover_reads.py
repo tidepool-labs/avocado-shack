@@ -77,6 +77,20 @@ class HowManyTests(unittest.TestCase):
         self.assertIn("SKU none", got)
         self.assertIn("SKU S-9", got)
 
+    # Contract: reads answer for any finite till count (spec: exact digits for huge and tiny counts; never a traceback). Bug caught: a
+    # length cap in format_quantity raised InvalidOperation out of in_stock / how_many / low_stock for 1E+64 and 4E-64.
+    def test_in_stock_answers_for_huge_and_tiny_counts(self):
+        for raw, shown in (("1E+64", "1" + "0" * 64), ("4E-64", "0." + "0" * 63 + "4"), ("-4E-64", None), ("1E+1000000", "1E+1000000")):
+            with self.subTest(raw=raw):
+                s = snap(extra=[item(id="X9", name="Saffron", stock=Decimal(raw))])
+                got = reads.in_stock("saffron", s, NOW)
+                if shown is None:
+                    self.assertEqual(got, "No, Saffron is sold out in the till.")    # negative: sold out, no number printed
+                else:
+                    self.assertEqual(got, f"Yes, Saffron: {shown} in the till.")
+                self.assertTrue(reads.how_many("saffron", s, NOW).startswith("Saffron: "))
+                self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+2000000")))
+
 
 class LowStockTests(unittest.TestCase):
     def test_sold_out_first_then_low_and_counts_untracked(self):

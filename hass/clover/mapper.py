@@ -12,7 +12,7 @@ curly apostrophes ignored; nothing else), and only when exactly one item answers
 import re
 import unicodedata
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import MAX_EMAX, MIN_EMIN, ROUND_HALF_UP, Context, Decimal, InvalidOperation
 
 from hass.content_model import SELLING_PRICE_RE
 
@@ -21,7 +21,7 @@ AVAILABILITY = ("yes", "limited", "no")                                         
 PRICE_TYPES = ("FIXED", "VARIABLE", "PER_UNIT")
 MAX_PRICE_CENTS = 100_000          # $1,000.00: a typo guard (a misread number), changed in config, not a business rule
 MAX_NAME = 100
-MAX_PLAIN_DIGITS = 64              # format_quantity prints exact digits up to this many; longer is refused, never echoed whole
+MAX_PLAIN_DIGITS = 256             # format_quantity prints exact digits up to this many; longer prints a short exponent form
 
 
 class MapError(ValueError):
@@ -68,7 +68,9 @@ def pct_change(old_cents, new_cents):
 
 def format_quantity(q):
     """12, 12.5 (never 12.0, never an exponent). Rounds to three places, but a nonzero count that would round to 0 (or -0) and a count too
-    long to round print their exact plain digits instead (0.0004 -> '0.0004'; no InvalidOperation). Zero of either sign is '0'."""
+    long to round print their exact plain digits instead (0.0004 -> '0.0004'; 1E+64 -> 1 and 64 zeros). Zero of either sign is '0'.
+    Never raises for a finite count. Past MAX_PLAIN_DIGITS the count prints in a short exponent form (so a reply stays short); a caller
+    that must not echo a huge number (drafts._qty) checks its size itself."""
     d = Decimal(q)
     if not d.is_finite():
         return format(d.quantize(Decimal("0.001")).normalize(), "f")    # NaN / Infinity: refused as before
@@ -82,7 +84,8 @@ def format_quantity(q):
         return format(rounded.normalize(), "f")
     _, digits, exp = d.as_tuple()
     if (len(digits) + exp if exp >= 0 else max(len(digits), -exp) + 1) > MAX_PLAIN_DIGITS:
-        raise InvalidOperation("count too long to print")   # drafts._qty refuses such a count without echoing it (RF1810-11)
+        # Never raises, never builds a huge string: 17 significant digits in exponent form (1E+1000000, 4E-1000000), a few characters at most.
+        return format(d.normalize(Context(prec=17, Emax=MAX_EMAX, Emin=MIN_EMIN)), "E")
     text = format(d, "f")               # exact digits, no rounding, no exponent
     return text.rstrip("0").rstrip(".") if "." in text else text
 

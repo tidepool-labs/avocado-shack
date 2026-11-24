@@ -24,6 +24,7 @@ from hass.clover.mapper import parse_selling_price
 DATA_CLASS = "finance-local"   # prices and counts: local code only; no cloud model ever sees a draft or a Clover answer
 KINDS = ("create_item", "set_price", "set_stock", "set_sku", "set_hidden")
 SITE_WORDS = {"yes": "Available today", "limited": "Limited", "no": "Sold out"}
+MAX_SHOWN_ADJUSTED = 24         # a refused count with more integer digits than this (1e25 and up) is not echoed back
 
 
 class DraftRefused(MapError):
@@ -104,11 +105,9 @@ def _qty(value, item, config):
     if not q.is_finite() or q < 0:
         raise DraftRefused("A count cannot be less than 0.")
     if q > config.max_stock:
-        try:
-            with localcontext():  # display must not change the caller's decimal flags
-                shown = f"{format_quantity(q)} "
-        except InvalidOperation:  # too large to display: refuse without echoing it
-            shown = "That count "
+        with localcontext():  # display must not change the caller's decimal flags
+            # A count too long to show is refused without echoing it (RF1810-11); format_quantity itself no longer raises.
+            shown = f"{format_quantity(q)} " if q.adjusted() <= MAX_SHOWN_ADJUSTED else "That count "
         raise DraftRefused(f"{shown}looks too high for one item. Check the number and send it again.")
     if item.price_type != "PER_UNIT" and q != q.to_integral():
         raise DraftRefused(f"{item.name} is counted in whole items, so {format_quantity(q)} is not a count I can set.")

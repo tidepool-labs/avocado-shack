@@ -2,7 +2,7 @@
 Run: python3 -B -m unittest hass.tests.test_clover_mapper
 """
 import unittest
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from hass.clover import mapper as m
 from hass.tests.test_clover_client import fixture
@@ -83,12 +83,18 @@ class MoneyTests(unittest.TestCase):
             with self.subTest(q=q):
                 self.assertEqual(m.format_quantity(Decimal(q)), text)
 
-    # Contract (existing, hass.tests.test_clover_drafts_extreme_count): an absurd count is still refused with InvalidOperation, which
-    # drafts._qty turns into a short named refusal. Bug caught: echoing a million-digit plain string into a reply.
-    def test_absurdly_long_count_is_still_refused_not_echoed(self):
-        for q in ("1E+100", "9" * 100, "1E+1000000", "4E-100"):
-            with self.subTest(q=q), self.assertRaises(InvalidOperation):
-                m.format_quantity(Decimal(q))
+    # Contract: format_quantity never raises for a finite count (reads.in_stock, low_stock, reports and previews all print through it), and
+    # a count of any size prints either its exact plain digits (up to MAX_PLAIN_DIGITS) or a short exponent form. Bug caught: a
+    # length cap that raised InvalidOperation for 1E+64 / 4E-64 and crashed the reply; or an uncapped format() building a million-digit string.
+    def test_any_finite_count_prints_without_raising_and_stays_short(self):
+        for q, text in (("1E+64", "1" + "0" * 64), ("-1E+64", "-1" + "0" * 64), ("4E-64", "0." + "0" * 63 + "4"), ("-4E-64", "-0." + "0" * 63 + "4"),
+                        ("1E+255", "1" + "0" * 255), ("9" * 100, "9" * 100),
+                        ("1E+257", "1E+257"), ("4E-300", "4E-300"), ("1E+1000000", "1E+1000000"), ("-1E-1000000", "-1E-1000000"),
+                        ("1E+999999999999999999", "1E+999999999999999999"), ("4E-999999999999999999", "4E-999999999999999999"),
+                        ("1." + "2" * 400 + "E+300", "1.2222222222222222E+300"), ("1" + "2" * 4999, "1.2222222222222222E+4999")):
+            with self.subTest(q=q[:20]):
+                self.assertEqual(m.format_quantity(Decimal(q)), text)
+        self.assertLessEqual(len(m.format_quantity(Decimal("9" * 2000000))), 30)
 
     # Healthy control: values the function already formatted correctly stay byte-identical.
     def test_ordinary_counts_unchanged(self):

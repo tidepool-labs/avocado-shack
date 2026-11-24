@@ -62,8 +62,16 @@ def register_check(raw_item: dict, snapshot: reads.Snapshot, expected: RegisterE
     return Verdict(not findings, tuple(findings))
 
 
-def site_check(site_record: dict, link: dict | None, item: mapper.CloverItem, low_threshold: int) -> Verdict:
-    """Compare a website record and its saved link entry to the read-back item."""
+def site_check(
+    site_record: dict, link: dict | None, item: mapper.CloverItem, low_threshold: int, *, words: str = "limited"
+) -> Verdict:
+    """Compare a website record and its saved link entry to the read-back item.
+
+    `words` is the stock sync's siteStockWords mode: 'limited' expects the three-word hint; 'words' expects 'yes'
+    where that hint says 'limited', as the sync publishes it.
+    """
+    if words not in ("words", "limited"):
+        raise ValueError("words")
     findings = []
     if not link or link.get("cloverId") != item.id:
         findings.append("unlinked")
@@ -86,6 +94,10 @@ def site_check(site_record: dict, link: dict | None, item: mapper.CloverItem, lo
     word = site_record.get("available")
     if word is None:
         findings.append("no-word")
-    elif word != mapper.availability_hint(item, low_threshold):
-        findings.append("stock-word")
+    else:
+        expected = mapper.availability_hint(item, low_threshold)
+        if words == "words" and expected == "limited":
+            expected = "yes"
+        if word != expected:
+            findings.append("stock-word")
     return Verdict(not findings or findings == ["no-word"], tuple(findings))

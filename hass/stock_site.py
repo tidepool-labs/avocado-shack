@@ -21,6 +21,10 @@ from hass.clover import cache, reports
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
+def finite(text):
+    try: return isinstance(text, str) and Decimal(text).is_finite()
+    except ArithmeticError: return False
+
 def private(path):
     for parent in (path.parent, *path.parent.parents):
         if parent.is_symlink(): raise ValueError('unsafe stock path')
@@ -70,15 +74,15 @@ class StockSite:
         if not isinstance(data, dict) or not all(isinstance(data.get(k), dict) for k in ('counts', 'pending', 'sets')):
             raise ValueError('stock state')
         for p in data['pending'].values():
-            if not isinstance(p, dict) or not {'target', 'base', 'till', 'crossing', 'first', 'attempts', 'reason', 'held', 'parked', 'new'} <= p.keys() or p['target'] not in ('yes', 'no', 'limited') or p['base'] not in (None, 'yes', 'no', 'limited') or type(p['attempts']) is not int or not isinstance(p['first'], (int, float)):
+            if not isinstance(p, dict) or not {'target', 'base', 'till', 'crossing', 'first', 'attempts', 'reason', 'held', 'parked', 'new'} <= p.keys() or p['target'] not in ('yes', 'no', 'limited') or p['base'] not in (None, 'yes', 'no', 'limited') or type(p['attempts']) is not int or not isinstance(p['first'], (int, float)) or isinstance(p['first'], bool):
                 raise ValueError('stock pending')
         if not {'inflight', 'asOf', 'itemCount'} <= data.keys(): raise ValueError('stock state')
         if not isinstance(data['asOf'], str) or type(data['itemCount']) is not int or data['itemCount'] < 0: raise ValueError('stock state')
         for c in data['counts'].values():
-            if not isinstance(c, dict) or not isinstance(c.get('till'), str) or not Decimal(c['count']).is_finite(): raise ValueError('stock count')
+            if not isinstance(c, dict) or not isinstance(c.get('till'), str) or not finite(c.get('count')): raise ValueError('stock count')
         for code, st in data['sets'].items():
-            if not isinstance(st, dict) or not {'state', 'words', 'approved_by', 'approved_at'} <= st.keys() or st['hash'] != digest(st['words']): raise ValueError('stock set')
-        if data['inflight'] is not None and not {'change_id', 'products'} <= data['inflight'].keys(): raise ValueError('stock inflight')
+            if not isinstance(st, dict) or not {'state', 'words', 'approved_by', 'approved_at'} <= st.keys() or not isinstance(st.get('hash'), str) or st['hash'] != digest(st['words']): raise ValueError('stock set')
+        if data['inflight'] is not None and (not isinstance(data['inflight'], dict) or not {'change_id', 'products'} <= data['inflight'].keys()): raise ValueError('stock inflight')
         if any(p['held'] and (p['held'] not in data['sets'] or pid not in data['sets'][p['held']]['words']) for pid, p in data['pending'].items()): raise ValueError('stock binding')
         return data
 

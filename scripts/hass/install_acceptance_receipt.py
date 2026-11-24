@@ -7,7 +7,8 @@ Usage: python3 -B scripts/hass/install_acceptance_receipt.py --stdout FILE
 Metadata is a UTF-8 JSON object with stdout_sha256 (64 hex characters over
 unmodified stdout bytes), runtime_sha (full 40-hex Git commit), and exit_status
 (integer). Supply the expected commit independently of that file. By default,
-selected runs can pass the consistency check. With --require-full-roster, the
+selected runs can pass the consistency check if every ID is one the producer
+can emit. With --require-full-roster, the
 rows must match the producer's complete ID roster, including not-covered rows.
 Neither mode authenticates the capture or proves how it was produced or what is
 deployed. Keep the original capture private.
@@ -108,12 +109,14 @@ def validate(stdout: bytes, metadata: bytes, expected_runtime_sha: str, *,
     if not seen or counts != summary:
         raise ReceiptError("summary counts do not match a nonempty set of stdout rows")
     result = {"summary": counts, "not_covered_ids": not_covered}
-    if require_full_roster:
-        from hass.acceptance import ALL_IDS
+    from hass.acceptance import ALL_IDS
 
+    if require_full_roster:
         if seen != set(ALL_IDS):
             raise ReceiptError("saved rows do not match the full producer H ID roster")
         result["full_roster"] = True
+    elif not seen <= set(ALL_IDS):
+        raise ReceiptError("saved rows cite an H ID outside the producer roster")
     return result
 
 

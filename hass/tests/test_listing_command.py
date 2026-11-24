@@ -82,6 +82,29 @@ class ListingTests(StoreMixin, ConversationTestCase):
         self.assertEqual(self.fields(pid)[1]["Maker"], self.maker_name(maker_key))  # resolved name beats brand
         self.assertEqual((self.drafts(), self.commits()), ([], 0))
 
+    def test_saved_selling_price_only_for_active_products(self):
+        # A fixed field list can silently omit the site's saved price, while an
+        # unconditional append can expose prices retained on hidden or held rows.
+        pid = self.pid()
+        path = self.cdir / "products.json"
+        self.checked()
+        for status, saved, expected in (
+            ("active", "9.50", ["Selling price: $9.50"]),
+            ("active", "<DEL>", []),
+            ("hidden", "9.50", []),
+            ("held", "9.50", []),
+        ):
+            with self.subTest(status=status, saved=saved):
+                hold = {"reason": "fixture", "source": "https://example.com/"} if status == "held" else "<DEL>"
+                self.product(pid, status=status, sellingPrice=saved, hold=hold, available="yes", available_on="2026-11-02")
+                before = path.read_bytes()
+                lines = self.listing(pid)
+                self.assertEqual(lines[0], HEAD)
+                self.assertIn("Availability: Available today" if status == "active" else "Availability: not showing", lines)
+                self.assertEqual([line for line in lines if line.startswith("Selling price:")], expected)
+                self.assertEqual(path.read_bytes(), before)
+        self.assertEqual((self.drafts(), self.commits()), ([], 0))
+
     def maker_key(self):
         return next(iter(json.loads((self.cdir / "makers.json").read_text("utf-8"))["makers"]))
 

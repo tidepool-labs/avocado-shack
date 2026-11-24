@@ -22,10 +22,13 @@ PRINTABLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,120}")
 class LinkParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.links: list[str] = []
+        self.links: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag, attrs):
-        self.links.extend((value or "") for name, value in attrs if name in ("href", "src"))
+        self.links.extend(
+            (value or "", tag == "img" and name == "src")
+            for name, value in attrs if name in ("href", "src")
+        )
 
 
 class Arguments(argparse.ArgumentParser):
@@ -61,7 +64,7 @@ def site_file(site: Path, path: str) -> bool:
 
 
 def check_links(rendered: dict[str, bytes], site: Path) -> int:
-    pages = links = skipped = 0
+    pages = links = skipped = missing_image_sources = 0
     broken: set[tuple[str, str]] = set()
     for key, html in rendered.items():
         if not key.startswith(sitegen.SITE_PREFIX) or not key.endswith(".html"):
@@ -71,11 +74,14 @@ def check_links(rendered: dict[str, bytes], site: Path) -> int:
         parser = LinkParser()
         parser.feed(html.decode("utf-8"))
         parser.close()
-        for value in parser.links:
+        for value, is_image_source in parser.links:
             if value.startswith(("//", "#")) or SCHEME.match(value):
                 skipped += 1
                 continue
             links += 1
+            if is_image_source and not value.strip():
+                missing_image_sources += 1
+                continue
             path = resolve_path(page, value)
             index = f"{path}/index.html" if path else "index.html"
             if path.split("/", 1)[0] == ".." or not (
@@ -96,7 +102,9 @@ def check_links(rendered: dict[str, bytes], site: Path) -> int:
             unprintable += 1
     if unprintable:
         print(f"note unprintable {unprintable}")
-    return len(broken)
+    if missing_image_sources:
+        print(f"note missing-image-source {missing_image_sources}")
+    return len(broken) + missing_image_sources
 
 
 def fail(reason: str) -> int:

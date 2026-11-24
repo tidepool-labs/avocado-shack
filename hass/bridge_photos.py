@@ -30,15 +30,20 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedire
 
 
 class _ShortBody(Exception):
-    """The body ended before its announced Content-Length (internal: _get turns it into `size-mismatch`)."""
+    """The body ended before its announced Content-Length, or came under an unsupported transfer coding (internal: _get
+    turns it into `size-mismatch`)."""
 
 
 def _announced(response):
-    """The announced Content-Length as an int, or None when absent, malformed or overridden by chunked encoding."""
+    """The announced Content-Length as an int, or None when absent or malformed, or when exact `chunked` encoding (which
+    http.client decodes and which overrides Content-Length) is in use. Any other Transfer-Encoding (identity, gzip, a
+    list...) is not decoded by http.client, so the body cannot be shown complete: _ShortBody."""
+    coding = response.headers.get("Transfer-Encoding")
+    if coding is not None:
+        if coding.strip().lower() == "chunked": return None
+        raise _ShortBody()
     value = response.headers.get("Content-Length")
-    if not (isinstance(value, str) and value.isascii() and value.isdigit()) or response.headers.get("Transfer-Encoding"):
-        return None
-    return int(value)
+    return int(value) if isinstance(value, str) and value.isascii() and value.isdigit() else None
 
 
 def _urllib_transport(url, headers, timeout, limit):

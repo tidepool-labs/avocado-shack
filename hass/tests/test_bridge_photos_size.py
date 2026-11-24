@@ -70,9 +70,10 @@ class SizeMismatchTests(unittest.TestCase):
         self.assertEqual(self.fails(fake, "http-error").status, 500)
 
 
-def _http(body, announced=None, chunked=False):
+def _http(body, announced=None, chunked=False, coding=None):
     """A real http.client response parsed from raw bytes (no socket): `announced` is the Content-Length header, if any."""
     head = b"HTTP/1.1 200 OK\r\n" + (b"Transfer-Encoding: chunked\r\n" if chunked else b"")
+    head += b"Transfer-Encoding: %s\r\n" % coding if coding else b""  # a coding http.client does not decode
     head += b"Content-Length: %d\r\n" % announced if announced is not None else b""
     raw = head + b"\r\n" + (b"%x\r\n%s\r\n0\r\n\r\n" % (len(body), body) if chunked else body)
     sock = mock.Mock(makefile=lambda *a, **k: io.BytesIO(raw))
@@ -87,10 +88,10 @@ class ShortBodyTests(unittest.TestCase):
     so a short read is treated as complete, validation sees a truncated original and the caller's retry never runs."""
     setUp, photos = _bp.PhotosTests.setUp, _bp.PhotosTests.photos
 
-    def fetch(self, body, announced=None, chunked=False, meta=None):
+    def fetch(self, body, announced=None, chunked=False, meta=None, coding=None):
         meta = meta or {"guid": "att-1"}  # no totalBytes unless the test asks
         document = _meta(meta)[1]
-        answers = {"message": _http(document, len(document)), "attachment": _http(body, announced, chunked)}
+        answers = {"message": _http(document, len(document)), "attachment": _http(body, announced, chunked, coding)}
         opener = lambda request, timeout=None: answers[urlsplit(request.full_url).path.split("/")[3]]  # noqa: E731
         with mock.patch.object(bridge_photos._OPENER, "open", side_effect=opener):
             return BlueBubblesPhotos(_bp.BASE, self.pw).fetch("msg-1", 1)
@@ -100,6 +101,16 @@ class ShortBodyTests(unittest.TestCase):
         self.assertEqual((ctx.exception.code, ctx.exception.status), ("size-mismatch", None))
         self.assertEqual((ctx.exception.__cause__, ctx.exception.__context__), (None, None))
         self.assertEqual(self.fetch(b"12345678", announced=8), [b"12345678"])  # healthy control: 8 of 8
+
+    def test_unsupported_transfer_coding_is_refused(self):
+        """Contract: only exact `chunked` bypasses the Content-Length check. Bug it catches: any Transfer-Encoding header
+        (e.g. `identity`, which http.client does not decode) skipped the check, so Content-Length 8 with body 1234 came back
+        as a successful four-byte photo."""
+        for coding in (b"identity", b"gzip", b"gzip, chunked", b"chunked, identity"):
+            for announced in (8, None):
+                with self.subTest(coding=coding, announced=announced):
+                    with self.assertRaises(BridgeError) as ctx: self.fetch(b"1234", announced=announced, coding=coding)
+                    self.assertEqual((ctx.exception.code, ctx.exception.status), ("size-mismatch", None))
 
     def test_body_without_content_length_is_unchanged(self):
         self.assertEqual(self.fetch(b"1234"), [b"1234"])  # close-delimited, nothing announced

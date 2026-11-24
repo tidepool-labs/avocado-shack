@@ -82,19 +82,20 @@ def _snapshot_jobs(state, media):
 
 
 def _scan_media(media):
-    """Count artifact names and regular-file bytes regardless of validity."""
+    """Count artifact names and regular-file bytes; return job IDs and redacted findings."""
     npp = media / "npp"
     try:
         for directory in (media, npp):
             if not stat.S_ISDIR(directory.lstat().st_mode):
-                return None, "unsafe-npp-dir"
+                return None, ["unsafe-npp-dir"]
     except FileNotFoundError:
-        return None, "no-npp-dir"
+        return None, ["no-npp-dir"]
     except OSError:
-        return None, "unsafe-npp-dir"
+        return None, ["unsafe-npp-dir"]
 
     jobs = set()
     receipts = cards = size = no_receipt = other = bad = 0
+    unsafe_jobs = 0
     try:
         with os.scandir(npp) as folders:
             for job in folders:
@@ -102,6 +103,7 @@ def _scan_media(media):
                     other += 1
                     continue
                 if not job.is_dir(follow_symlinks=False):
+                    unsafe_jobs += 1
                     continue
                 jobs.add(job.name)
                 has_receipt = False
@@ -123,7 +125,7 @@ def _scan_media(media):
                             bad += 1
                 no_receipt += not has_receipt
     except OSError:
-        return None, "unsafe-npp-dir"
+        return None, ["unsafe-npp-dir"]
 
     print(f"jobs {len(jobs)}")
     print(f"receipts {receipts}")
@@ -131,7 +133,12 @@ def _scan_media(media):
     print(f"bytes {size}")
     print(f"note no-receipt {no_receipt}")
     print(f"note other-names {other}")
-    return jobs, f"bad-artifact {bad}" if bad else None
+    findings = []
+    if unsafe_jobs:
+        findings.append(f"unsafe-job-dir {unsafe_jobs}")
+    if bad:
+        findings.append(f"bad-artifact {bad}")
+    return jobs, findings
 
 
 def main(argv=None):
@@ -140,9 +147,9 @@ def main(argv=None):
     parser.add_argument("--state", type=Path, metavar="DIR")
     args = parser.parse_args(argv)
 
-    folders, finding = _scan_media(args.media)
-    failed = finding is not None
-    if finding:
+    folders, findings = _scan_media(args.media)
+    failed = bool(findings)
+    for finding in findings:
         print(f"FAIL {finding}")
     if args.state is not None:
         jobs, finding = _snapshot_jobs(args.state, args.media)

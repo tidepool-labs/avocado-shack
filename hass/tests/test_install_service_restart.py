@@ -76,6 +76,14 @@ class InstallServiceRestartTests(unittest.TestCase):
             with self.subTest(reason=reason, first=first, second=second):
                 self.assert_findings(self.invoke(first, second), f"FAIL {reason} {SERVICE}")
 
+    def test_changed_main_start_time_is_refused(self):
+        # Protects: no intervening restart. Believable bug: comparing each capture only to the
+        # cutoff, so 101 then 102 (same PID and NRestarts, both after 100) passes.
+        self.assert_findings(self.invoke(service(start=101), service(start=102)),
+                             f"FAIL start-changed {SERVICE}")
+        self.assertEqual(self.invoke(service(start=101), service(start=101)),
+                         (0, [f"{SERVICE} ok", "PASS install_service_restart"], ""))
+
     def test_active_service_requires_positive_pid(self):
         # Same-PID and freshness checks alone let two zero PIDs pass.
         for first_pid, second_pid in ((0, 0), (0, 27), (27, 0)):

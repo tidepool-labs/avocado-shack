@@ -69,8 +69,12 @@ def unit_findings(first, second, state, installed):
             yield "missing-process"
         if a["MainPID"] != b["MainPID"]:
             yield "pid-changed"
-        if min(a["ExecMainStartTimestampMonotonic"], b["ExecMainStartTimestampMonotonic"]) <= installed:
+        starts = (a["ExecMainStartTimestampMonotonic"], b["ExecMainStartTimestampMonotonic"])
+        if min(starts) <= installed:
             yield "stale-start"
+        elif starts[0] != starts[1]:
+            # Both fresh but different: a second, unexplained restart (same PID and count).
+            yield "start-changed"
 
 
 def finish(failed):

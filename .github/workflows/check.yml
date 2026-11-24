@@ -109,6 +109,11 @@ jobs:
       - uses: ./.github/actions/test-env
         if: steps.plan.outputs.tier == 'affected'
 
+      # The NPP replay runs the real local OCR privacy gate, even with taped captures.
+      - name: Install Tesseract for Hass replay
+        if: steps.plan.outputs.tier == 'affected'
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
       - name: Affected hass tests
         if: steps.plan.outputs.tier == 'affected'
         env:
@@ -160,6 +165,9 @@ jobs:
           node-version: "22"
 
       - uses: ./.github/actions/test-env
+
+      - name: Install Tesseract for Hass replay
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
 
       - name: Install pinned Pillow (per job, no shared files)
         run: |

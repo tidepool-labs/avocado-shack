@@ -168,8 +168,17 @@
         },
         "stubs": {
           "identify": {
+            "is_product": true,
+            "kind": "food",
+            "item": "plum preserves",
             "brand_on_label": "Quarry Lane",
+            "size_text": "9 oz",
+            "label_words": ["Quarry Lane", "Plum Preserves"],
+            "visible_claims": [],
+            "category_guess": "pantry",
+            "has_person_or_screen": false,
             "confidence": {
+              "item": 0.97,
               "brand": 0.9
             }
           }

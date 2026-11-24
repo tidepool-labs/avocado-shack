@@ -1,0 +1,236 @@
+{
+ "asset": "hass-product-identify/SKILL.md",
+ "entries": {
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:3425394730a24ca9aa5b5d18ba064011ac27bbbd9853850ae4e2e047f9978f05:0": {
+   "latency_s": 3.0,
+   "note": "coffee bag",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": "pantry",
+    "confidence": {
+     "brand": 0,
+     "category": 1,
+     "item": 1
+    },
+    "has_person_or_screen": false,
+    "is_product": true,
+    "item": "Ridge Roast Dark Coffee",
+    "kind": "food",
+    "label_words": []
+   },
+   "photo": "coffee.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:3425394730a24ca9aa5b5d18ba064011ac27bbbd9853850ae4e2e047f9978f05:1": {
+   "latency_s": 3.0,
+   "note": "coffee bag",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": "pantry",
+    "confidence": {
+     "brand": 0,
+     "category": 1,
+     "item": 1
+    },
+    "has_person_or_screen": false,
+    "is_product": true,
+    "item": "Ridge Roast Dark Coffee",
+    "kind": "food",
+    "label_words": []
+   },
+   "photo": "coffee.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:3425394730a24ca9aa5b5d18ba064011ac27bbbd9853850ae4e2e047f9978f05:2": {
+   "latency_s": 3.0,
+   "note": "coffee bag",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": "pantry",
+    "confidence": {
+     "brand": 0,
+     "category": 1,
+     "item": 1
+    },
+    "has_person_or_screen": false,
+    "is_product": true,
+    "item": "Ridge Roast Dark Coffee",
+    "kind": "food",
+    "label_words": []
+   },
+   "photo": "coffee.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:7825fba1bd5bcbf132958c29af57c0a8b205a17dd9ccff3804eec2776774915f:0": {
+   "latency_s": 3.0,
+   "note": "honey jar",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": "pantry",
+    "confidence": {
+     "brand": 0,
+     "category": 1,
+     "item": 1
+    },
+    "has_person_or_screen": false,
+    "is_product": true,
+    "item": "Honey",
+    "kind": "food",
+    "label_words": []
+   },
+   "photo": "honey.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:7825fba1bd5bcbf132958c29af57c0a8b205a17dd9ccff3804eec2776774915f:1": {
+   "latency_s": 3.0,
+   "note": "honey jar",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": "pantry",
+    "confidence": {
+     "brand": 0,
+     "category": 1,
+     "item": 1
+    },
+    "has_person_or_screen": false,
+    "is_product": true,
+    "item": "Honey",
+    "kind": "food",
+    "label_words": []
+   },
+   "photo": "honey.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:7825fba1bd5bcbf132958c29af57c0a8b205a17dd9ccff3804eec2776774915f:2": {
+   "latency_s": 3.0,
+   "note": "honey jar",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": "pantry",
+    "confidence": {
+     "brand": 0,
+     "category": 1,
+     "item": 1
+    },
+    "has_person_or_screen": false,
+    "is_product": true,
+    "item": "Honey",
+    "kind": "food",
+    "label_words": []
+   },
+   "photo": "honey.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:d42a41b22c058055e05e604b001ff8aad5128cba385976ccc8db1b599b77c0cf:0": {
+   "latency_s": 3.0,
+   "note": "sunset: not a product",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": null,
+    "confidence": {
+     "brand": 0,
+     "category": 0,
+     "item": 0
+    },
+    "has_person_or_screen": false,
+    "is_product": false,
+    "item": null,
+    "kind": null,
+    "label_words": []
+   },
+   "photo": "sunset.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:d42a41b22c058055e05e604b001ff8aad5128cba385976ccc8db1b599b77c0cf:1": {
+   "latency_s": 3.0,
+   "note": "sunset: not a product",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": null,
+    "confidence": {
+     "brand": 0,
+     "category": 0,
+     "item": 0
+    },
+    "has_person_or_screen": false,
+    "is_product": false,
+    "item": null,
+    "kind": null,
+    "label_words": []
+   },
+   "photo": "sunset.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:d42a41b22c058055e05e604b001ff8aad5128cba385976ccc8db1b599b77c0cf:2": {
+   "latency_s": 3.0,
+   "note": "sunset: not a product",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": null,
+    "confidence": {
+     "brand": 0,
+     "category": 0,
+     "item": 0
+    },
+    "has_person_or_screen": false,
+    "is_product": false,
+    "item": null,
+    "kind": null,
+    "label_words": []
+   },
+   "photo": "sunset.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:ead92455df887cd389dca3eb232aaf63a22538baf4a134f91d1ac9f12dede4db:0": {
+   "latency_s": 3.0,
+   "note": "blurry: not identifiable",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": null,
+    "confidence": {
+     "brand": 0,
+     "category": 0,
+     "item": 0
+    },
+    "has_person_or_screen": false,
+    "is_product": false,
+    "item": null,
+    "kind": null,
+    "label_words": []
+   },
+   "photo": "blurry.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:ead92455df887cd389dca3eb232aaf63a22538baf4a134f91d1ac9f12dede4db:1": {
+   "latency_s": 3.0,
+   "note": "blurry: not identifiable",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": null,
+    "confidence": {
+     "brand": 0,
+     "category": 0,
+     "item": 0
+    },
+    "has_person_or_screen": false,
+    "is_product": false,
+    "item": null,
+    "kind": null,
+    "label_words": []
+   },
+   "photo": "blurry.jpg"
+  },
+  "d74c2c6046c151e6bdb49e56b5f718ff29a8c9f3116115378fe2108caf7f023b:ead92455df887cd389dca3eb232aaf63a22538baf4a134f91d1ac9f12dede4db:2": {
+   "latency_s": 3.0,
+   "note": "blurry: not identifiable",
+   "output": {
+    "brand_on_label": null,
+    "category_guess": null,
+    "confidence": {
+     "brand": 0,
+     "category": 0,
+     "item": 0
+    },
+    "has_person_or_screen": false,
+    "is_product": false,
+    "item": null,
+    "kind": null,
+    "label_words": []
+   },
+   "photo": "blurry.jpg"
+  }
+ },
+ "kind": "s2",
+ "schema": 1,
+ "source": "hand-authored"
+}

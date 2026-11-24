@@ -1,7 +1,6 @@
 """NPP-G: owner edit words (S10), the version-tagged reply lines (S9/S11/S13) and the legacy F4F5 price edits.
 
 Each test names the contract it protects and the believable bug that breaks it (CI-ARTICLE-1)."""
-import dataclasses
 from datetime import timedelta
 import json
 import types
@@ -213,13 +212,6 @@ class StagesTests(unittest.TestCase):
             self.assertIsNone(npp.stages_for(conv, PINNED))
 
 
-@dataclasses.dataclass(frozen=True)
-class _ReplyRef(conversation.Inbound):
-    """Test-only message type carrying a replied-to card guid: the select()-level contract S11 is tested through it.
-    The production Inbound has no such field; transport wiring is deferred (SCOPE-AMENDMENTS A2)."""
-    reply_to: str = ""
-
-
 class EditLoopJobTests(unittest.TestCase):
     """The real job runner (NPP-B) with this edit segment: a delivered card, a plain edit, a new tagged card, one yes."""
 
@@ -261,9 +253,8 @@ class EditLoopJobTests(unittest.TestCase):
     def say(self, text, photos=0, reply_to=None):
         self.serial += 1
         self.now += timedelta(seconds=1)
-        kind = _ReplyRef if reply_to is not None else conversation.Inbound
-        extra = {"reply_to": reply_to} if reply_to is not None else {}
-        msg = kind(f"g-{self.serial}", CHAT, OWNER, text, kind="new", received_at=self.now.isoformat(), attachments=photos, **extra)
+        msg = conversation.Inbound(f"g-{self.serial}", CHAT, OWNER, text, received_at=self.now.isoformat(),
+                                   attachments=photos, reply_to=reply_to)
         return self.conv.handle(msg, forwarded_at=self.now)
 
     def work(self):
@@ -341,11 +332,10 @@ class EditLoopJobTests(unittest.TestCase):
         self.assertEqual(self.say(f"yes {code}", reply_to="m-2"), "approved")
         self.assertIn('"sellingPrice": "4.00"', (self.repo.wt / "hass/content/products.json").read_text())
 
-    def test_production_inbound_has_no_reply_ref_and_coded_yes_after_two_cards_reasks(self):
-        # Today's real path: the production Inbound carries no reply reference (transport wiring deferred, SCOPE-AMENDMENTS A2),
-        # so a bare "yes <code>" after two delivered cards cannot name one and must fail closed: the which-card line,
+    def test_coded_yes_without_reply_ref_after_two_cards_reasks(self):
+        # A bare "yes <code>" after two delivered cards cannot name one and must fail closed: the which-card line,
         # no approval row, nothing published. Bug if it approved the newest (or oldest) card by guess.
-        self.assertNotIn("reply_to", {f.name for f in dataclasses.fields(conversation.Inbound)})
+
         self.say("sell $2", photos=1)
         self.work()
         self.confirm(1)

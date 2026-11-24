@@ -164,6 +164,13 @@ class JobTests(unittest.TestCase):
         row = self.version(1)["outbox_id"]
         self.assertIsNone(self.conv.db.execute("SELECT sent_at FROM outbox WHERE id=?", (row,)).fetchone()[0])
         self.start()
+        self.assertEqual(self.yes(1, pid="early-yes"), "no-target")
+        with self.assertRaises(OSError):
+            self.flush()  # card still fails, but cannot hold the guard behind it
+        self.assertEqual(self.transport.texts, [self.conv.npp.replies["guards"]["not_ready"]])
+        self.assertFalse(self.transport.cards)
+        self.assertIsNone(self.conv.db.execute("SELECT sent_at FROM outbox WHERE id=?", (row,)).fetchone()[0])
+        self.assert_unpublished()
         self.transport.fail = False
         self.flush()
         self.assertEqual(self.version(1)["outbox_id"], row)
@@ -177,6 +184,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.job()["state"], "working")
         self.confirm(1)
         self.start()
+        self.assertEqual(self.yes(1, pid="early-yes"), "duplicate")
         self.assertEqual(self.yes(1, accepted=arrival, pid="queued-yes"), "no-target")
         self.assertEqual(self.say(f"yes {self.job()['job_id']}-1", pid="queued-yes"), "duplicate")
         self.assert_unpublished()
@@ -270,8 +278,9 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.yes(2), "approved")
 
     def test_question_wait_excluded_and_expired_answer_has_no_draft(self):
-        # 19/20: a delay beyond the 100s cap but within OpenRequests TTL starts a fresh 100s segment.
-        for seconds, expected in ((1200, "card_out"), (2400, "expired")):
+        # §1.3: open-request inactivity TTL, not the one-hour approval TTL.
+        # say() adds one second; the precise deadline is inclusive in OpenRequests.
+        for seconds, expected in ((1799, "card_out"), (1800, "expired"), (2400, "expired")):
             with self.subTest(seconds=seconds):
                 self.say("new honey", photos=1)
                 self.work()
@@ -320,10 +329,12 @@ class JobTests(unittest.TestCase):
         self.settings.update(houseRender=True, photo_polish=True, itemIntake=True)
         self.start()
         with patch.object(photo_polish, "start", return_value=None) as launch:
-            self.say("new honey", photos=1)
-            self.work()
+            self.say("sell $2", photos=1, pid="original-photo")
             self.flush()
-            self.assertEqual(self.job()["state"], "asking")
+            self.scheduler.run()
+            self.flush()
+            self.flush()
+            self.assertFalse(self.transport.cards)
             self.assertIsNotNone(self.job()["polish_started_at"])
             launch.assert_called_once()
             self.start()
@@ -332,6 +343,13 @@ class JobTests(unittest.TestCase):
             decision = photo_polish.decision(self.root, self.job()["photo_sha"])
             assert decision is not None
             self.assertEqual((decision["use"], decision["code"]), ("house", "not-run"))
+            self.work()
+            [row] = self.transport.cards
+            version = self.version(1)
+            self.assertEqual((version["outbox_id"], version["image_variant"]), (row, "raw"))
+            # The card becomes visible after restart, but still answers the start turn.
+            self.assertEqual(self.conv.npp.one("SELECT provider_id FROM npp_turns WHERE reply_outbox_id=?", row)[0],
+                             "original-photo")
 
     def test_backup_admits_only_frozen_job_artifacts(self):
         # Without media/npp admission even a private exact card would be refused or restored without its frozen bytes.

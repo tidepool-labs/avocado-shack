@@ -71,6 +71,15 @@ def coffee(im):  # a coffee bag
     text_block(pen, 214, 268, ["RIDGE ROAST", "Dark roast", "whole beans", "12 oz"])
 
 
+def coffee_size(im):  # independent net-weight evidence for the equal-value case
+    coffee(im)
+    pen = ImageDraw.Draw(im)
+    pen.rectangle((207, 351, 431, 459), fill="#f2e8d5")
+    font = ImageFont.load_default(size=52)
+    pen.text((214, 359), "12", fill="#111111", font=font)
+    pen.text((299, 359), "OZ", fill="#111111", font=font)
+
+
 def figs(im):  # dried figs in a pouch for the maker-research cases
     pen = ImageDraw.Draw(im)
     pen.polygon([(180, 150), (460, 150), (480, 570), (160, 570)], fill="#7b8f4e", outline="#3b4a1f")
@@ -250,6 +259,14 @@ def build(out):
             path = edits / f"{name}-{label}.png"
             make(name).save(path, "PNG")
             written.append(path)
+    raw = plain_counter()
+    coffee_size(raw)
+    save_jpg(raw, "coffee-size.jpg")
+    house = canvas(IVORY)
+    coffee_size(house)
+    path = edits / "coffee-size-good.png"
+    house.save(path, "PNG")
+    written.append(path)
     return written
 
 

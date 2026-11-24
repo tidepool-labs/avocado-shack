@@ -107,6 +107,10 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(unseal(json.loads(json.dumps(self.env)), KEY, now=NOW + 300, seen=seen), self.msg)
         self.assertEqual(seen, {NONCE})
         self.assertEqual(self.refused(self.env, seen=seen), "replay")
+        # Adding an internal reply reference must not change the v1 Mac body or MAC.
+        with_ref = replace(self.msg, reply_to="fixture-card-guid")
+        self.assertEqual(seal(with_ref, KEY, nonce=NONCE, now=NOW), self.env)
+        self.assertEqual(self.refused({**self.env, "body": {**self.env["body"], "reply_to": "fixture-card-guid"}}), "shape")
 
     def test_tampered_stale_and_misshapen_envelopes(self):
         flipped = copy.deepcopy(self.env)

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from hass import preview, sandbox, sandbox_editor
 from hass.npp import assets, stages, stages_for
 from hass.npp.job import Work
-from hass.tests import test_npp_job as job_fixture, test_preview
+from hass.tests import test_npp_job as job_fixture, test_npp_research as research_fixture, test_preview
 from hass.tests.test_editor import git
 
 
@@ -34,7 +34,8 @@ class StageTests(unittest.TestCase):
         self.port.identifier.read = lambda _: SimpleNamespace(evidence=self.reading)
         self.port.selector = None
         self.port.mapper = self.deny
-        self.enterContext(patch.object(stages.research_hermes, 'run', side_effect=self.deny))
+        self.real_research = stages.research_hermes.run
+        self.run_research = self.enterContext(patch.object(stages.research_hermes, 'run', side_effect=self.deny))
         self.enterContext(patch.object(stages.picture, 'read_text', return_value=''))
         self.enterContext(patch.object(stages.photos, '_sharpness', return_value=1))
         self.saved = []
@@ -223,24 +224,60 @@ class StageTests(unittest.TestCase):
                 self.assertEqual(len(self.saved), int(refusal == 'stale'))
                 self.no_draft()
 
-    def test_only_owner_stated_or_allowlisted_new_maker_can_request_research(self):
-        # Prove both decision branches and the eligible URL passed across the boundary; no search or web I/O.
+    def test_caption_reaches_discovery_but_only_visible_official_facts_reach_the_listing(self):
+        # S4 previously stopped at the production composer even though isolated S4 passed.
+        world = research_fixture.World(research_fixture.fixture(31))
+
+        with (patch.object(stages.research_hermes, 'Web', return_value=world.web),
+              patch.object(stages.maker_site, '_LAST', {}),
+              patch.object(stages.research_hermes.cloud_codex, 'Runner', return_value=world.model)):
+            self.run_research.side_effect = lambda *args, **kwargs: self.real_research(*args, clock=lambda: world.now, **kwargs)
+            self.start_render('made by Miners, Paso Robles. dried figs $7 each; cost $3')
+        listing = json.loads(self.case.version(1)['listing_json'])
+        self.assertEqual((listing['maker'], listing['town'], listing['url']), ('Miners', 'Paso Robles', ''))
+        self.assertEqual([(f['value'], f['url']) for f in listing['facts']], [('dried figs', research_fixture.HOME)])
+        self.assertTrue(any(url.startswith(stages.research_hermes.SEARCH) for url in world.urls))
+        self.assertNotIn('Untrusted Search Snippet', json.dumps(world.requests))
+
+    def test_named_maker_requires_a_bound_town_and_keeps_owner_url_distinct(self):
+        # §1.8: distinct/unknown makers are not one identity, and a named URL is not a search result.
+        url = 'https://example.com/about'
+        self.assertEqual(stages._site_words('Elm Farm', [f'made by Elm Farm; Oakville {url} jam']), ('Oakville', url))
+        self.assertEqual(stages._site_words('Elm Farm', ['made by Other Farm; Oakville. jam']), ('', ''))
+        self.assertEqual(stages._site_words('Elm Farm', ['made by Elm Farm; Oakville. jam; town: Rivertown']), ('', ''))
         work = Work('fixture', {}, None, self.case.now + timedelta(seconds=100))
-        town, url = 'Oakville', 'https://example.com/'
-        for state, supplied_town, supplied_url, allow, expected in (
-            ('known', town, url, False, None), ('near', town, url, False, None),
-            ('new', '', url, False, None), ('new', town, '', False, None),
-            ('new', town, url, False, url), ('new', town, '', True, url),
-        ):
-            with self.subTest(state=state, town=supplied_town, url=supplied_url, allow=allow):
-                self.port.sources['allowlist'] = ([{'maker': 'elm farm', 'domain': 'example.com', 'added_by': 'G', 'reviewed_in': 'fixture'}] if allow else [])
-                with patch.object(stages.research_hermes, 'run', return_value=SimpleNamespace(story_facts=())) as run:
-                    self.port._research(work, stages.missing.Maker(state, 'Elm Farm'), supplied_town, supplied_url, {})
-                if expected is None:
-                    run.assert_not_called()
-                else:
-                    self.assertEqual(run.call_args.kwargs['owner_url'], expected)
-                    self.assertEqual(run.call_args.kwargs['web'].search('untrusted'), ())
+        for state, town in (('known', 'Oakville'), ('near', 'Oakville'), ('contradictory', 'Oakville'), ('new', '')):
+            self.port._research(work, stages.missing.Maker(state, 'Elm Farm'), town, url, {})
+        self.run_research.assert_not_called()
+        self.run_research.side_effect = None
+        self.run_research.return_value = SimpleNamespace(story_facts=())
+        self.port._research(work, stages.missing.Maker('new', 'Elm Farm'), 'Oakville', url, {})
+        self.assertEqual(self.run_research.call_args.kwargs['owner_url'], url)
+        self.assertEqual(self.run_research.call_args.kwargs['web'].search('ignored'), ())
+
+    def test_contradictory_label_only_omits_maker_when_essentials_are_complete(self):
+        # Case 31b: a label brand alone is not S2 product evidence. With the essentials,
+        # a contradiction is not a question and must not leak into the public brand.
+        self.reading.update(brand_on_label='Quarry Lane', confidence=dict(item=1, category=1, brand=1))
+        self.start_render('made by Miners, Paso Robles. plum preserves $8 each')
+        self.case.work()
+        [(text, _, _)] = self.case.transport.cards.values()
+        self.assertIn('maker left off: label says Quarry Lane', text)
+        self.assertEqual(len(self.saved[0]['ops']), 1)
+        self.assertEqual(self.saved[0]['ops'][0]['args']['brand'], stages.claims.PLACEHOLDER)
+        self.run_research.assert_not_called()
+        self.case.assert_unpublished()
+
+    def test_spoken_price_equal_to_cost_still_drafts(self):
+        # Case 32b: the exact sale clause is sufficient, not the matching cost or count.
+        self.start_render('wild plum jam, cost fourteen, selling fourteen each, got twelve jars')
+        self.case.work()
+        self.assertFalse(self.case.transport.texts)
+        [draft] = self.saved
+        args = draft['ops'][-1]['args']
+        self.assertEqual(args['sellingPrice'], '14.00 each')
+        self.assertNotRegex(args['description'], r'14|12|fourteen|twelve')
+        self.case.assert_unpublished()
 
     def test_picture_retake_never_becomes_a_candidate(self):
         self.reading['has_person_or_screen'] = True

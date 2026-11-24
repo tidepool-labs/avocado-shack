@@ -103,6 +103,7 @@ class Finance:
 
 _BASIS = re.compile(r'(?:(?:/\s*|\s+(?:per|a)\s+)([a-z]+)|\s+(each|apiece|items?|lbs?|pounds?|baskets?))$', re.I)
 _COST_CUE = re.compile(r'\b(?:bought|purchased|paid|costs?|wholesale)\b', re.I)
+_SPOKEN_MONEY = re.compile(r'(costs?|sell(?:ing)?)\s+([a-z -]+?)(?:\s+(each|per (?:lb|pound)))?', re.I)
 
 
 def finance(caption, *, answer_unit=None, local_answers=None):
@@ -119,6 +120,14 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     for start, end, clause in intake.caption_spans(caption):
         part = clause.strip().rstrip('.!').strip()
         remainder, atoms = intake.caption_answers(part)
+        if not atoms and (spoken := _SPOKEN_MONEY.fullmatch(part)):
+            # Whole spoken dollars only, and only after a typed finance cue.
+            # Add the currency locally for the same complete-value parser.
+            cue, words, explicit_unit = spoken.groups()
+            cost = cue.lower().startswith('cost')
+            if (cost or explicit_unit) and (amount := intake._parse_money(words + ' dollars')):
+                atoms['cost' if cost else 'price'] = amount
+                remainder = ''
         if quantity := re.fullmatch(r'(?:got|have|qty|quantity|stock)\s*:?\s+(.+)', part, re.I):
             count = intake._parse_qty(quantity[1])
             if count and type(count[0]) is int and 0 <= count[0] <= 100000:

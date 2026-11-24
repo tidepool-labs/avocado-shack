@@ -56,6 +56,10 @@ EXPIRED = "That question expired. Please send the photo again to start over."
 ITEM_IDENTITY = re.compile(r"\s*(?:it(?: is|[’']s)|(?:the )?(?:item|product)(?: is|:))\s+([^;\n]+)", re.I)
 
 
+class CardSendFailed(Exception):
+    """A tracked adapter send failed; don't mark the card sent or block later text."""
+
+
 def owner_item(text):
     match = ITEM_IDENTITY.fullmatch(text)
     return match[1] if match else None
@@ -454,7 +458,10 @@ class Jobs:
             read_artifact(path)
         except (OSError, ValueError):
             return False
-        send(row["id"], v["chat"], text, str(path), v["card_png_sha"])
+        try:
+            send(row["id"], v["chat"], text, str(path), v["card_png_sha"])
+        except Exception as error:
+            raise CardSendFailed() from error
         return True
 
     def refresh_receipts(self):
@@ -488,7 +495,7 @@ class Jobs:
         sent = instant(msg.received_at)
         if self.receipt_for is None or job["state"] != "card_out" or not self.request(job, now) or not before:
             return "not_ready", None
-        ref = getattr(msg, "reply_to", None)
+        ref = msg.reply_to
         if ref not in (None, ""):
             # A reply to a message names its card exactly: the delivered receipt whose transport id it is, never a guess.
             hit = next((v for v in before if isinstance(ref, str) and ref and v["transport_message_id"] == ref), None)

@@ -23,7 +23,9 @@ DIRECT_CHAT_RE = re.compile(r"[^;]+;-;[^;]+")  # one-to-one `iMessage;-;<address
 NONCE_RE, MAC_RE = re.compile(r"(?:[0-9a-f]{2}){16,}"), re.compile(r"[0-9a-f]{64}")
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")  # a JSON-escaped lone surrogate: str that cannot be UTF-8 encoded
 ENVELOPE_KEYS = {"v", "ts", "nonce", "body", "mac"}
-BODY_TYPES = {f.name: {"from_me": bool, "attachments": int}.get(f.name, str) for f in fields(Inbound)}
+# Reply references are local adapter metadata; the v1 Mac wire contract is unchanged.
+BODY_TYPES = {f.name: {"from_me": bool, "attachments": int}.get(f.name, str)
+              for f in fields(Inbound) if f.name != "reply_to"}
 MAX_SKEW, MIN_KEY = 300, 32
 SEND_PATH, SEND_TIMEOUT = "/api/v1/message/text", 10
 LOOPBACK = ("127.0.0.1", "localhost")
@@ -120,7 +122,9 @@ def seal(inbound: Inbound, key, *, nonce: str, now) -> dict:
     """Envelope {v, ts, nonce, body, mac}; nonce is lower-case hex of at least 16 bytes, now a datetime or epoch s."""
     key = _check_key(key)
     if not isinstance(nonce, str) or not NONCE_RE.fullmatch(nonce): raise ValueError("nonce must be hex >= 16 bytes")
-    envelope = {"v": 1, "ts": _seconds(now), "nonce": nonce, "body": asdict(inbound)}
+    body = asdict(inbound)
+    body.pop("reply_to")
+    envelope = {"v": 1, "ts": _seconds(now), "nonce": nonce, "body": body}
     envelope["mac"] = _mac(key, envelope)
     return envelope
 

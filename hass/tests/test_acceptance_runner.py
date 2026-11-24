@@ -482,7 +482,7 @@ class RunnerTest(unittest.TestCase):
         "H11": ("test_media_audio",),
         "H12": ("test_attachment_reply", "test_photo_draft", "test_photo_on_product",
                 "test_photo_new_product", "test_photo_home_image", "test_photo_batch",
-                "test_media_batch", "test_qa1_new_item_chat"),
+                "test_media_batch", "test_npp_acceptance", "test_qa1_new_item_chat"),
         "H14": ("test_hike_capacity_ceiling", "test_hike_capacity_rsvp_off", "test_hike_change_words",
                 "test_chat_dead_end_reasons"),
         "H16": ("test_outbox_delayed", "test_late_yes", "test_writer_lock_entry"),

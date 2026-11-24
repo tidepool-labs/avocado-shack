@@ -39,7 +39,7 @@ MAP = {  # frozen; AV2007-20, AV1052-17 and AV1352-12 added modules: H id -> cov
             "test_social_draft_shapes", "test_post_command"),
     "H11": ("test_media_audio",),
     "H12": ("test_attachment_reply", "test_photo_draft", "test_photo_on_product", "test_photo_new_product",
-            "test_photo_home_image", "test_photo_batch", "test_media_batch", "test_qa1_new_item_chat"),
+            "test_photo_home_image", "test_photo_batch", "test_media_batch", "test_npp_acceptance", "test_qa1_new_item_chat"),
     "H13": ("test_store_ops", "test_store_intro", "test_store_headline", "test_store_story",
             "test_store_home_image", "test_store_clear_home_image", "test_notice_start", "test_club_intro",
             "test_phone_wording", "test_publish_csp", "test_publish", "test_store_notice",

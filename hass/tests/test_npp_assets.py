@@ -310,7 +310,15 @@ class ReplyTemplatesTest(unittest.TestCase):
         """Contract: a case that expects a reply line expects one the pipeline can say. Bug: a case string that drifted from the template, so the real run could never pass."""
         r = asset("hass-npp-reply/reply-templates.json")
         texts = [t for group in ("questions", "prompts", "guards", "confirm", "edits") for t in r[group].values() if isinstance(t, str)]
-        texts += ["(" + part + ")" for part in r["brackets"]["parts"].values()]
+        bracket = r["brackets"]
+        rule = bracket["compose"]
+        ordered = [bracket["parts"][name] for name in reversed(rule["drop_order"])]
+        # A quoted suffix can span the separator and a part, as in case 36.
+        for count in range(1, len(ordered) + 1):
+            for parts in itertools.combinations(ordered, count):
+                note = rule["open"] + rule["separator"].join(parts) + rule["close"]
+                if len(note) <= r["caps"]["bracket_max_chars"]:
+                    texts.append(note)
         regexes = [re.compile(".+".join(re.escape(piece) for piece in re.split(r"\{\w+\}", t))) for t in texts]
         checked = 0
         for case in all_cases():
@@ -702,12 +710,12 @@ def all_cases():
 
 
 def units(case):
-    """A case is one run, or several variants merged shallowly over the case's inputs and expect."""
+    """Variants inherit turns unless replaced, and shallowly overlay inputs and expect."""
     if "variants" not in case:
         return [dict(case)]
     out = []
     for v in case["variants"]:
-        out.append({"turns": v["turns"], "inputs": {**case.get("inputs", {}), **v.get("inputs", {})},
+        out.append({"turns": v.get("turns", case.get("turns")), "inputs": {**case.get("inputs", {}), **v.get("inputs", {})},
                     "expect": {**case.get("expect", {}), **v.get("expect", {})}, "id": v["id"]})
     return out
 
@@ -724,7 +732,10 @@ class CaseInputsTest(unittest.TestCase):
         for case in self.cases:
             self.assertEqual(validate(self.schema, case), [], case["slug"])
             self.assertTrue(case["path"] and case["terminal"])
-            self.assertTrue(("turns" in case) != ("variants" in case), case["id"])
+            if "variants" in case:
+                inherits_turns = any("turns" not in v for v in case["variants"])
+                self.assertEqual("turns" in case, inherits_turns, case["id"])
+            self.assertTrue(all(unit.get("turns") for unit in units(case)), case["id"])
             self.assertEqual(CASES.joinpath(f"case-{case['id']:02d}-{case['slug']}.json").exists(), True)
             allowed = {"listing": {"published"}, "question": {"asking", "retake", "expired"}, "contract": {"published", "card_out"}}[case["path"]]
             self.assertIn(case["terminal"], allowed, case["id"])

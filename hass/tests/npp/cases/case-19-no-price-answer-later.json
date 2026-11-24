@@ -1,7 +1,7 @@
 {
   "id": 19,
   "slug": "no-price-answer-later",
-  "title": "No price: photo and 'new honey', the answer comes 40 minutes later",
+  "title": "No price: photo and 'new honey', the answer comes 20 minutes later",
   "contract": "S3 plus async: one question, the job waits with its clock paused, the answer opens a new segment and gets the card",
   "bug": "a second question, a card built without a price, or the segment cap counted from the first photo",
   "path": "listing",
@@ -24,25 +24,25 @@
       ]
     },
     {
-      "at_s": 2400,
+      "at_s": 1200,
       "from": "mike",
       "text": "$9 each",
       "photos": []
     },
     {
-      "at_s": 2460,
+      "at_s": 1260,
       "from": "mike",
       "text": "make it $10",
       "photos": []
     },
     {
-      "at_s": 2520,
+      "at_s": 1320,
       "from": "mike",
       "text": "yes {code}-2",
       "photos": []
     },
     {
-      "at_s": 2580,
+      "at_s": 1380,
       "from": "mike",
       "text": "undo",
       "photos": []
@@ -68,10 +68,7 @@
       {
         "turn": 1,
         "count": 1,
-        "kind": "card",
-        "lacks": [
-          "?"
-        ]
+        "kind": "card"
       },
       {
         "turn": 2,
@@ -96,7 +93,7 @@
     ],
     "state": "published",
     "polish_settled_before_answer": true,
-    "segment2_started_at_s": 2400,
+    "segment2_started_at_s": 1200,
     "segment_cap_measured_from": "answer",
     "commits": 1,
     "checks": [

@@ -43,6 +43,7 @@
     }
   ],
   "inputs": {
+    "stage_ready_at_s": {"fixture-0": {"render": 101}},
     "polish": {
       "source": "file",
       "file": "npp:edits/honey-good.png",
@@ -56,6 +57,7 @@
         "count": 1,
         "kind": "card",
         "sent_by_s": 100,
+        "sent_at_s": 100,
         "has_all": [
           "(picture: your own photo)"
         ]

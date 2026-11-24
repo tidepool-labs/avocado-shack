@@ -52,13 +52,24 @@ def reserved(items, links):
     return held
 
 
+def _checked(content, links):
+    """Refuse a malformed catalog or link table by one fixed name, before anything is read further or written (no value is echoed)."""
+    products = content.get("products") if isinstance(content, dict) else None
+    if not isinstance(links, dict) or not isinstance(products, list) or not all(
+            isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("name"), str) for p in products):
+        raise ValueError("link inputs")
+    return products
+
+
 def suggest(snapshot, content, links):
     """(pairs {product id: link}, clashes, site_only, till_only): the last three list EVERY item left over, never linked. A name on both
     sides with more than one item on either side is a clash and lists all its site products and till items. A name shared by several
-    items carries a label unique in its whole group (see _labels); a name with one item stays plain."""
+    items carries a label unique in its whole group (see _labels); a name with one item stays plain. A malformed catalog or link table
+    raises ValueError("link inputs"), so draft() and apply() write nothing."""
+    products = _checked(content, links)
     taken = reserved(snapshot.items, links)
     site, till = {}, {}
-    for p in content["products"]:
+    for p in products:
         if p.get("status") == "active" and p["id"] not in links:
             site.setdefault(norm_name(p["name"]), []).append(p)
     for i in snapshot.items:

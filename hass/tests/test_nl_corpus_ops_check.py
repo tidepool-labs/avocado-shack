@@ -140,13 +140,14 @@ class NlCorpusOpsCheckTests(unittest.TestCase):
         )
         self.assert_fixture_report(self.check(), 1, 3, 0, "FAIL arg-problem bad")
 
-        # No site directory is supplied: a well-formed image path passes on syntax alone (no file
-        # probe, no crash), while a malformed one is still a finding. Contract: offline replay keeps
-        # syntax refusals (ops/__init__.py _image_file_problem); a checker that flags every image
-        # call, or one that accepts any string, would fail one of these two.
+        # No site directory is supplied, so the checker cannot inspect an image file. Contract
+        # (scripts/hass/nl_corpus_ops_check.py): it must not certify an image it cannot inspect, so
+        # any supplied image argument, well-formed or malformed, is an arg-problem finding (fail
+        # closed) and never a crash. A checker that passes a well-formed image on syntax alone, or
+        # one that accepts any string, would fail one of these two.
         self.fixture_corpus(case("image", call("product.edit", id="photo-product-001",
                                               image="assets/products/photo-product-001.webp")))
-        self.assert_fixture_report(self.check(), 0, 1, 0)
+        self.assert_fixture_report(self.check(), 1, 1, 0, "FAIL arg-problem image")
         self.fixture_corpus(case("image", call("product.edit", id="photo-product-001",
                                               image="../outside.webp")))
         self.assert_fixture_report(self.check(), 1, 1, 0, "FAIL arg-problem image")

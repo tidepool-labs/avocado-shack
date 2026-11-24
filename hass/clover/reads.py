@@ -74,9 +74,14 @@ def names_something(query, snapshot):
     return bool(exact(query, snapshot) or suggest(query, snapshot.items))
 
 
+SEVERAL_LIMIT = 5
+
+
 def _several(items, show):
-    return "More than one item is called that: " + "; ".join(f"{show(i.name)} (SKU {show(i.sku) if i.sku else 'none'}): {_count(i)}"
-                                                             for i in items[:5]) + "."
+    text = "More than one item is called that: " + "; ".join(f"{show(i.name)} (SKU {show(i.sku) if i.sku else 'none'}): {_count(i)}"
+                                                             for i in items[:SEVERAL_LIMIT]) + "."
+    # Say so when the list stops short, so a short list is never read as the whole list.
+    return text + f" And {len(items) - SEVERAL_LIMIT} more." if len(items) > SEVERAL_LIMIT else text
 
 
 def _not_exact(query, snapshot, show):

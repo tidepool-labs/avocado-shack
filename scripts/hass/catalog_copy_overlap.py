@@ -5,6 +5,7 @@ import argparse
 from itertools import combinations
 import json
 from pathlib import Path
+import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -19,10 +20,10 @@ class CountsParser(argparse.ArgumentParser):
 
 
 def nonnegative_int(value):
-    number = int(value)
-    if number < 0:
-        raise argparse.ArgumentTypeError("must be nonnegative")
-    return number
+    # int() also accepts non-ASCII digits, signs, spaces and underscores.
+    if not re.fullmatch(r"[0-9]+", value):
+        raise argparse.ArgumentTypeError("must be ASCII digits")
+    return int(value)
 
 
 def fail(reason):
@@ -46,8 +47,11 @@ def main(argv=None):
 
     try:
         content = content_model.load_content(args.content)
-        descriptions = [p["description"] for p in sorted(content.active_products(), key=lambda p: p["id"])
-                        if p.get("description")]
+        active = sorted(content.active_products(), key=lambda p: p["id"])
+        if not active:
+            # Nothing was examined, so zero counts and a PASS would read as "no overlap".
+            return fail("no-active-products")
+        descriptions = [p["description"] for p in active if p.get("description")]
         if any(not isinstance(text, str) for text in descriptions):
             return fail("content-invalid")
     except Exception:

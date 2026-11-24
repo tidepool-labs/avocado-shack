@@ -10,6 +10,9 @@ from hass import capabilities, voice
 
 
 def positive_int(value: str) -> int:
+    # int() also reads Arabic-Indic and full-width digits; limits take ASCII digits only.
+    if not (value.isascii() and value.isdigit()):
+        raise argparse.ArgumentTypeError("must be a positive integer")
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")

@@ -103,6 +103,21 @@ class InstallWindowClockTests(unittest.TestCase):
         self.check([{"step": "switch", "event": "start", "at": PRIVATE + "Z"}],
                    failures=("bad-time",))
 
+        # Both endpoints must already have been observed at --now. Using --now
+        # only to measure open steps lets a short future-ending interval pass.
+        started = row("switch", "start", "00:55:00")
+        future_start = row("switch", "start", "01:01:00")
+        for case, rows in (
+            ("future-end-only", [started, row("switch", "end", "01:00:00.001")]),
+            ("future-closed", [future_start, row("switch", "end", "01:02:00")]),
+            ("future-open", [future_start]),
+        ):
+            with self.subTest(case=case):
+                self.check(rows, failures=("bad-time",))
+        self.check([started, row("switch", "end", "01:00:00")],
+                   summaries=("switch 05:00 ok",))
+        self.check([started], summaries=("switch 05:00 open",))
+
     def test_bad_now_is_a_finding_not_a_usage_error(self):
         # Validating --now in argparse would incorrectly exit 2.
         self.check([], now=PRIVATE, failures=("bad-time",))

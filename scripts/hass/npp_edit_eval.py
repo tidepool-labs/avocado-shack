@@ -5,6 +5,7 @@ A recording is a JSON array of {id, output, model} rows. Output is the
 mapper's parsed answer (null if unavailable); model is the returned ID or
 null if unavailable. Keep recordings outside Git. Replay prints no raw
 answers or model metadata. Accuracy is exact answers / recorded rows.
+Use --require-full in replay to check roster coverage before scoring.
 """
 import argparse
 from collections import Counter
@@ -62,6 +63,20 @@ def _report(rows, expected, schema, minimum):
     return int(failed)
 
 
+def _has_full_coverage(rows, expected):
+    seen = Counter(
+        row["id"] for row in rows
+        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] in expected
+    )
+    missing = len(expected.keys() - seen.keys())
+    duplicate = sum(n > 1 for n in seen.values())
+    unexpected = len(rows) - seen.total()
+    if missing or duplicate or unexpected:
+        print(f"coverage: missing={missing} duplicate={duplicate} unexpected={unexpected}")
+        return False
+    return True
+
+
 def _record(phrases, grammar, step, transport):
     model = None
 
@@ -92,6 +107,7 @@ def main(argv=None, *, transport_factory=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--replay", type=Path, metavar="FILE")
     mode.add_argument("--record", action="store_true", help="attended private-host run only")
+    parser.add_argument("--require-full", action="store_true", help="replay only: require exactly one row per current phrase ID")
     parser.add_argument("--max-calls", type=int, help="record at most N phrases, in fixture order (1–60)")
     parser.add_argument("--yes-record", action="store_true")
     parser.add_argument("--out", type=Path, help="new private recording file outside any Git worktree")
@@ -100,6 +116,8 @@ def main(argv=None, *, transport_factory=None):
     if not 0 <= args.min <= 1:
         parser.error("--min must be between 0 and 1")
     if args.record:
+        if args.require_full:
+            parser.error("--require-full requires --replay")
         if not args.yes_record or args.max_calls is None or not 1 <= args.max_calls <= 60:
             parser.error("--record requires --yes-record and --max-calls between 1 and 60")
         if args.out is None:
@@ -131,10 +149,13 @@ def main(argv=None, *, transport_factory=None):
                 stream.write("\n")
         else:
             rows = json.loads(args.replay.read_bytes())
-            if not isinstance(rows, list) or not rows:
+            if not isinstance(rows, list) or (not rows and not args.require_full):
                 raise ValueError("expected a nonempty recording array")
     except (OSError, ValueError):
         print("could not read or write eval data")
+        print("FAIL npp_edit_eval")
+        return 1
+    if args.require_full and not _has_full_coverage(rows, expected):
         print("FAIL npp_edit_eval")
         return 1
     return _report(rows, expected, grammar.schema, args.min)

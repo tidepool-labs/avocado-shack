@@ -13,6 +13,7 @@ import re
 import stat
 import sys
 import tempfile
+import unicodedata
 
 ROOT = str(Path(__file__).resolve().parents[2])
 if ROOT not in sys.path:
@@ -97,7 +98,7 @@ def read_events(path, chat):
     return sorted(events, key=lambda event: event["id"])
 
 
-def picture(sha, directory):
+def picture(sha, directory, *, png_only=False):
     for candidate in (directory / sha, directory / f"card-{sha}.png",
                       *sorted(directory.glob(f"{sha}.*"))):
         try:
@@ -109,7 +110,7 @@ def picture(sha, directory):
             continue
         if raw.startswith(b"\x89PNG\r\n\x1a\n"):
             mime = "image/png"
-        elif raw.startswith(b"\xff\xd8\xff"):
+        elif not png_only and raw.startswith(b"\xff\xd8\xff"):
             mime = "image/jpeg"
         else:
             continue
@@ -199,41 +200,96 @@ def card_index(jobs):
     return cards
 
 
-def receipt_boxes(jobs):
+def receipt_boxes(jobs, clean=None):
     boxes = ['<div class="receipts">']
     for job, receipt in jobs.items():
         items, bad = (["receipt unreadable"], True) if receipt is None else receipt[1:]
+        if clean is not None:
+            items = [clean(item) for item in items]
         boxes.append(f'<section class="receipt{" bad" if bad else ""}" data-job="{job}"><h2>Job {job}</h2>'
                      f'<ul>{"".join(f"<li>{escape(item)}</li>" for item in items)}</ul></section>')
     boxes.append("</div>")
     return boxes
 
 
-def render(events, directory, jobs=None):
+def review_redactor(events):
+    try:
+        from scripts.hass.npp_review_export import redact
+    except ImportError:
+        raise PageError("review redactor unavailable") from None
+
+    # The public text redactor handles contact and number forms, not arbitrary
+    # transcript identities. Use the whole export, including filtered-out rows.
+    known = {unicodedata.normalize("NFKC", event[key]) for event in events
+             for key in ("chat", "sender") if event[key]}
+    if not known:
+        return redact
+    longest_first = sorted(known, key=lambda value: (-len(value), value))
+    identities = re.compile("|".join(map(re.escape, longest_first)), re.I)
+    folded = sorted({value.casefold() for value in known}, key=lambda value: (-len(value), value))
+    folded_identities = re.compile("|".join(map(re.escape, folded)))
+
+    def clean(text):
+        text = unicodedata.normalize("NFKC", text)
+        # Match on fully folded text, but replace in the original normalized
+        # text. A character such as ß occupies two positions after folding.
+        folded_text = [char.casefold() for char in text]
+        offsets = [index for index, part in enumerate(folded_text) for _ in part]
+        spans = [(offsets[match.start()], offsets[match.end() - 1] + 1)
+                 for match in folded_identities.finditer("".join(folded_text))]
+        # Keep the previous re.I matches too (e.g. dotless i vs ASCII i).
+        spans.extend(match.span() for match in identities.finditer(text))
+        # A word marker can be consumed by the contact scrubber if the identity
+        # occurred inside a URL or email. Angle brackets would split that match.
+        marker = "nppidentityplaceholder"
+        while marker in text.lower():
+            marker += "x"
+        pieces, cursor = [], 0
+        # Overlapping spans from the two matchers need just one marker.
+        for start, end in sorted(spans):
+            if start >= cursor:
+                pieces.extend((text[cursor:start], marker))
+            cursor = max(cursor, end)
+        pieces.append(text[cursor:])
+        return redact("".join(pieces)).replace(marker, "<id>")
+
+    return clean
+
+
+def render(events, directory, jobs=None, *, clean=None):
     body, pictures, missing, ambiguous = [], {}, set(), {}
+    if clean is not None and jobs is not None:
+        jobs = {str(index): receipt for index, receipt in enumerate(jobs.values(), 1)}
     cards = None if jobs is None else card_index(jobs)
     messages_in = count = 0
     for event in events:
         inbound = event["direction"] == "in"
         messages_in += inbound
-        sender, utc = escape(event["sender"]), escape(event["utc"])
-        body.append(f'<article class="bubble {event["direction"]}">'
-                    f'<div class="meta">{sender} · {utc}</div>')
-        for line in event["text"].split("\n"):
+        meta = "" if clean is not None else (
+            f'<div class="meta">{escape(event["sender"])} · {escape(event["utc"])}</div>')
+        body.append(f'<article class="bubble {event["direction"]}">{meta}')
+        text = event["text"]
+        shown = clean(text) if clean is not None else text
+        original_lines = text.split("\n")
+        for index, line in enumerate(shown.split("\n")):
             marker = ""
-            if not inbound:
-                if line.startswith("Posted:"):
+            if not inbound and index < len(original_lines):
+                if original_lines[index].startswith("Posted:"):
                     marker = " marker posted"
-                elif YES.search(line):
+                elif YES.search(original_lines[index]):
                     marker = " marker approval"
             body.append(f'<div class="message{marker}">{escape(line) or "<br>"}</div>')
         for sha in event["attachments"]:
+            if clean is not None and inbound:
+                body.append('<div class="missing">Owner photo omitted</div>')
+                continue
             if sha not in pictures:
-                pictures[sha] = picture(sha, directory)
+                pictures[sha] = picture(sha, directory, png_only=clean is not None)
             uri = pictures[sha]
             if uri is None:
                 missing.add(sha)
-                body.append(f'<div class="missing">picture {sha[:8]} not in copy</div>')
+                label = "picture" if clean is not None else f"picture {sha[:8]}"
+                body.append(f'<div class="missing">{label} not in copy</div>')
             else:
                 count += 1
                 body.append(f'<img src="{uri}" alt="Chat picture">')
@@ -241,7 +297,10 @@ def render(events, directory, jobs=None):
                 # Exact full digest only; a shared card is labelled with every version and flagged.
                 matches = cards.get(sha, ())
                 for job, n, at, state in matches:
-                    body.append(f'<div class="version">{job}-{n} {state} · {escape(at or "not delivered")}</div>')
+                    delivery = at or "not delivered"
+                    if clean is not None and at is not None:
+                        delivery = "delivered"
+                    body.append(f'<div class="version">{job}-{n} {state} · {escape(delivery)}</div>')
                 if len(matches) > 1:
                     ambiguous.setdefault(sha, None)
                     body.append(f'<div class="missing">card matches {len(matches)} versions</div>')
@@ -250,7 +309,9 @@ def render(events, directory, jobs=None):
               f" · {count} pictures</p></header>\n<main>")
     head, boxes = HEAD, []
     if jobs is not None:
-        head, boxes = HEAD.replace("</style>", RECEIPT_CSS + "</style>", 1), receipt_boxes(jobs)
+        head, boxes = HEAD.replace("</style>", RECEIPT_CSS + "</style>", 1), receipt_boxes(jobs, clean)
+    if clean is not None:
+        head = head.replace("Private Hass conversation", "Redacted Hass conversation")
     return "\n".join([head, counts, *body, *boxes, "</main></html>\n"]), sorted(missing), list(ambiguous)
 
 
@@ -295,13 +356,18 @@ def main(argv=None):
     parser.add_argument("--attachments", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--chat", help="only show events from this chat ID")
+    parser.add_argument("--redact", action="store_true",
+                        help="remove chat identities, redact message text and omit owner photos")
     parser.add_argument("--force", action="store_true", help="replace an existing output file")
     parser.add_argument("--receipts", type=Path, metavar="DIR",
                         help="copy of NPP job folders (<job>/receipt.json): label card versions and"
                              " add a summary box per job")
     args = parser.parse_args(argv)
     try:
-        events = read_events(args.export, args.chat)
+        events = read_events(args.export, None if args.redact else args.chat)
+        clean = review_redactor(events) if args.redact else None
+        if args.redact and args.chat is not None:
+            events = [event for event in events if event["chat"] == args.chat]
         directory = args.attachments.resolve()
         if not directory.is_dir():
             raise PageError("attachment copy unavailable")
@@ -310,7 +376,7 @@ def main(argv=None):
             raise PageError("receipts unavailable")
         destination = output_path(args.out, args.export, directory, args.force, receipts)
         jobs = None if receipts is None else load_receipts(receipts)
-        page, missing, ambiguous = render(events, directory, jobs)
+        page, missing, ambiguous = render(events, directory, jobs, clean=clean)
         write_page(destination, page, args.force)
     except PageError as error:
         print(f"FAIL {error}")

@@ -93,6 +93,7 @@ def main(argv=None):
         required = read_json(args.required)
         capture = read_json(args.checks)
         if (not isinstance(required, list)
+                or not required
                 or not all(isinstance(name, str) and name.strip() and name.isprintable()
                            for name in required)
                 or not isinstance(capture, dict)):

@@ -9,6 +9,8 @@ import subprocess
 
 
 CATALOG = "hass/content/products.json"
+# Fields hass/ops/history.py removes when it undoes an added product.
+INVERSE_DROPPED = ("available", "available_on")
 
 
 class Parser(argparse.ArgumentParser):
@@ -96,13 +98,39 @@ def failures(*reasons):
     return 1
 
 
+def exact_product_errors(before, after, expectation):
+    mode, key = expectation
+    # Fields are compared in their canonical JSON form, as in the report.
+    old, new = before.get(key), after.get(key)
+    if mode == "forward":
+        if old is not None or (new or {}).get("status") != '"active"':
+            yield "expected-product-forward"
+    else:
+        # history.revert keeps a new product in the writer catalog as its current record with
+        # status hidden and its stock word and day (available, available_on) removed.
+        expected = None
+        if old is not None and old.get("status") == '"active"':
+            expected = {name: value for name, value in old.items() if name not in INVERSE_DROPPED}
+            expected["status"] = '"hidden"'
+        if new is None or new != expected:
+            yield "expected-product-inverse"
+    if any(before.get(pid) != after.get(pid) for pid in (before.keys() | after.keys()) - {key}):
+        yield "other-products-changed"
+
+
 def main(argv=None):
     parser = Parser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--repo", required=True, help="local Git checkout")
     parser.add_argument("--from", dest="from_sha", required=True, metavar="SHA")
     parser.add_argument("--to", dest="to_sha", required=True, metavar="SHA")
-    parser.add_argument("--expect-added", type=int, metavar="N")
+    parser.add_argument("--expect-added", type=int, metavar="N", help="check additions count only")
+    parser.add_argument("--expect-product", nargs=2, metavar=("MODE", "ID"),
+                        help="forward: absent to active; inverse: active to hidden; no other product changes")
     args = parser.parse_args(argv)
+    if args.expect_product is not None:
+        mode, key = args.expect_product
+        if mode not in ("forward", "inverse") or not key:
+            parser.error("invalid product expectation")
 
     if not is_checkout(args.repo):
         return failures("not-git")
@@ -122,9 +150,14 @@ def main(argv=None):
     if errors:
         return failures(*errors)
 
-    added = report(*catalogs)
+    before, after = catalogs
+    added = report(before, after)
     if args.expect_added is not None and args.expect_added != added:
-        return failures(f"added-count {added}")
+        errors.append(f"added-count {added}")
+    if args.expect_product is not None:
+        errors.extend(exact_product_errors(before, after, args.expect_product))
+    if errors:
+        return failures(*errors)
     print("PASS pilot_content_diff")
     return 0
 

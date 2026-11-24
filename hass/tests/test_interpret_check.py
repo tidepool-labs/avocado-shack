@@ -9,6 +9,7 @@ import unittest
 
 from hass import conversation, interpret_check
 from hass.ops import load_registry
+from hass.skills.acceptance_run import RecordedInterpreter
 from hass.tests.test_conversation import ConversationTestCase, _ops
 from hass.tests.test_editor import HOURS, _req
 
@@ -24,6 +25,10 @@ def call(op, **args):
     return {"op": op, "args": args}
 
 
+def recorded_listing_ops():
+    return [call("product.edit", id="photo-product-001", name="Hass")]
+
+
 class CheckTests(unittest.TestCase):
     def assertAsks(self, out, *parts):
         self.assertEqual(set(out), {"question"}, out)
@@ -34,6 +39,26 @@ class CheckTests(unittest.TestCase):
         self.assertIs(interpret_check.check(result, REGISTRY, {"beef"}), result)
         for passthrough in ({"question": "Which day?"}, {"unsupported": "Sorry."}):
             self.assertIs(interpret_check.check(passthrough, REGISTRY, ()), passthrough)
+
+    def test_recorded_listing_edit_with_null_revises_passes_unchanged(self):
+        saved = {"ops": recorded_listing_ops(), "revises": None}
+        reply = RecordedInterpreter([saved]).interpret("Rename the listing", [])
+        self.assertIs(interpret_check.check(reply, REGISTRY, ()), reply)
+        self.assertEqual(reply, saved)
+
+    def test_malformed_recorded_edit_envelope_asks_without_details(self):
+        # Saved replies can bypass upstream shape validation; assuming a list or
+        # indexing missing revises would raise instead of asking one question.
+        ops = recorded_listing_ops()
+        for name, saved in (
+            ("missing revises", {"ops": ops}),
+            ("non-list ops", {"ops": 7, "revises": None}),
+            ("non-string revises", {"ops": ops, "revises": ["fixture detail"]}),
+        ):
+            with self.subTest(name=name):
+                reply = RecordedInterpreter([saved]).interpret("Rename the listing", [])
+                self.assertEqual(interpret_check.check(reply, REGISTRY, ()),
+                                 {"question": "I couldn't read part of that message. Could you say it another way?"})
 
     def test_unknown_op_and_unknown_argument_are_named(self):
         self.assertEqual(ask([call("product.colour", id="p1")]), {"question": (

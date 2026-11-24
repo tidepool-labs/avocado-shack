@@ -21,6 +21,8 @@ class CoverageParser(argparse.ArgumentParser):
 
 
 def positive_int(value):
+    if not (value.isascii() and value.isdigit()):
+        raise argparse.ArgumentTypeError("expected a positive integer")
     number = int(value)
     if number <= 0:
         raise argparse.ArgumentTypeError("expected a positive integer")

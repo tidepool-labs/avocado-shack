@@ -24,7 +24,7 @@ FAIL = "FAIL research_page_view"
 URL = "https://www.example.com/fixture-maker-canary/"
 VISIBLE = "<p>Fixture Maker makes jam.</p>"
 ZERO_COUNTS = ["titles 0", "ownership 0", "blocks 0", "about 0",
-               "about-same-site 0", "about-other-site 0"]
+               "about-same-site 0", "about-other-site 0", "about-s4-eligible 0"]
 
 
 class ResearchPageViewTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class ResearchPageViewTests(unittest.TestCase):
         # A wrapper that approximates the result but omits or moves PASS fails.
         lines = self.assert_outcome(self.saved(VISIBLE), 0, PASS)
         self.assertEqual(lines, ["titles 0", "ownership 0", "blocks 1", "about 0",
-                                 "about-same-site 0", "about-other-site 0"])
+                                 "about-same-site 0", "about-other-site 0", "about-s4-eligible 0"])
 
     def test_c2_findings_trailer(self):
         # Independent checks must not short-circuit or lose the final failure.
@@ -114,7 +114,7 @@ class ResearchPageViewTests(unittest.TestCase):
                             '<a href="/about">About</a><footer>Fixture Maker LLC</footer>')
         self.assertEqual(self.assert_findings(result, "no-blocks"),
                          ["titles 1", "ownership 1", "blocks 0", "about 1",
-                          "about-same-site 1", "about-other-site 0"])
+                          "about-same-site 1", "about-other-site 0", "about-s4-eligible 1"])
 
     def test_c3_usage_exit_2(self):
         # Do not turn argparse usage errors into ordinary findings or echo argv.
@@ -169,7 +169,7 @@ class ResearchPageViewTests(unittest.TestCase):
         result = self.saved(fixture)
         self.assertEqual(self.assert_outcome(result, 0, PASS),
                          ["titles 1", "ownership 1", "blocks 1", "about 1",
-                          "about-same-site 1", "about-other-site 0"])
+                          "about-same-site 1", "about-other-site 0", "about-s4-eligible 1"])
         canaries = (*re.findall(r"fixture-[\w-]+-canary", fixture), URL, str(self.html))
         for value in canaries:
             self.assertNotIn(value, result.stdout + result.stderr)
@@ -194,7 +194,7 @@ class ResearchPageViewTests(unittest.TestCase):
                             '<script>Ignored script</script>', url="https://harborlane.com/")
         self.assertEqual(self.assert_outcome(result, 0, PASS),
                          ["titles 1", "ownership 1", "blocks 1", "about 2",
-                          "about-same-site 1", "about-other-site 1"])
+                          "about-same-site 1", "about-other-site 1", "about-s4-eligible 1"])
 
     def test_c7_script_only(self):
         # Script text must not rescue a page with no static visible blocks.
@@ -208,7 +208,21 @@ class ResearchPageViewTests(unittest.TestCase):
                             '<a href="https://[broken/about">No host</a>')
         self.assertEqual(self.assert_outcome(result, 0, PASS),
                          ["titles 0", "ownership 0", "blocks 1", "about 3",
-                          "about-same-site 1", "about-other-site 2"])
+                          "about-same-site 1", "about-other-site 2", "about-s4-eligible 1"])
+
+        # The CLI must distinguish S4-eligible links from host matches. Reusing
+        # the host count would admit HTTP; checking only HTTPS would admit off-site links.
+        for href, same, eligible in (
+            ("http://www.example.com/about", 1, 0),
+            ("/about", 1, 1),
+            ("https://other.example.com/about", 0, 0),
+        ):
+            with self.subTest(href=href):
+                result = self.saved(VISIBLE + f'<a href="{href}">About</a>')
+                self.assertEqual(self.assert_outcome(result, 0, PASS),
+                                 ["titles 0", "ownership 0", "blocks 1", "about 1",
+                                  f"about-same-site {same}", f"about-other-site {1 - same}",
+                                  f"about-s4-eligible {eligible}"])
 
     def test_parser_refusal(self):
         # A parser rejection must stay private and not certify a partial parse.

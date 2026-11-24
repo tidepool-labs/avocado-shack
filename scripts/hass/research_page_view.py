@@ -82,17 +82,23 @@ def show_page(url, retrieved, markup):
 
     host = site(url)
     same = sum(same_site(url, href, host) for href in page.about)
+    eligible = sum(1 for _ in research._about_links(page, research._site(page.url)))
     print(f"titles {len(page.titles)}")
     print(f"ownership {len(page.ownership)}")
     print(f"blocks {len(page.blocks)}")
     print(f"about {len(page.about)}")
     print(f"about-same-site {same}")
     print(f"about-other-site {len(page.about) - same}")
+    print(f"about-s4-eligible {eligible}")
     return None if page.blocks else "no-blocks"
 
 
 def main(argv=None):
-    parser = PrivateArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = PrivateArgumentParser(
+        description=__doc__, allow_abbrev=False,
+        epilog="about-same-site and about-other-site compare hosts only. "
+               "about-s4-eligible counts links that pass S4's URL and site checks, "
+               "not successful fetches or verified sources.")
     parser.add_argument("--html", required=True, type=Path, metavar="FILE", help="saved UTF-8 HTML")
     parser.add_argument("--url", required=True, metavar="URL", help="page address (not fetched)")
     parser.add_argument("--retrieved", required=True, type=iso_date, metavar="YYYY-MM-DD",

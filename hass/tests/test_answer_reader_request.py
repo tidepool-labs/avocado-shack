@@ -85,6 +85,22 @@ class AnswerReaderRequestTests(unittest.TestCase):
         reader.read("price", "nine", TODAY)
         self.assertEqual((reader.last_error, len(transport.sent)), ("shape", 1))
 
+    def test_missing_value_key_uses_fallback(self):
+        # Contract: a reply object WITHOUT "value" is a shape failure that tries the configured fallback once; {"value": null}
+        # is a valid abstention (no fallback). Bug: treating {} as an answer drops a reply the fallback could read.
+        for api in ("ollama", "openai"):
+            for content, want_error, want_calls, want in (('{"other": 1}', "shape", 1, {"value": "9.57"}), ("{}", "shape", 1, {"value": "9.57"}),
+                                                          ('{"value": null}', None, 0, {"value": None}), ('{"value": "4.31"}', None, 0, {"value": "4.31"})):
+                fb_reader, fb_transport = make(api)
+                primary_transport = Transport(api, content=content)
+                reader = AnswerReader("http://127.0.0.1:9", "m", transport=primary_transport, api=api, fallback=fb_reader)
+                self.assertEqual(reader.read("price", "nine", TODAY), want, (api, content))
+                self.assertEqual((len(primary_transport.sent), len(fb_transport.sent), fb_reader.calls), (1, want_calls, want_calls), (api, content))
+                self.assertIsNone(reader.last_error)
+                self.assertEqual((reader.last_primary_error, reader.last_fallback), (want_error, bool(want_calls)), (api, content))
+        reader, transport = make(api, content="{}")  # no fallback configured: still a recorded shape failure, no crash
+        self.assertEqual((reader.read("price", "nine", TODAY), reader.last_error, len(transport.sent)), ({}, "shape", 1))
+
     def test_both_api_request_bytes_unchanged(self):
         reader, t = make("ollama", )
         reader.think = False

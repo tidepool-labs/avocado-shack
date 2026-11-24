@@ -159,12 +159,13 @@ def checked_line(store: dict, today) -> str | None:
 
 
 def checked_note(store: dict, today) -> str:
-    """The whole freshness paragraph for the index template, or '' when there is no check yet."""
+    """The whole freshness paragraph for the index template, or '' when there is no check yet or its day is still to come."""
     line = checked_line(store, today)
-    if line is None:
+    day = checked_on(store)
+    if line is None or (day is not None and day > today):  # AV1124C-05: a future check is never a fresh check (as availability_label)
         return ""
     # AV1622-04: shop.js re-ages this paragraph in the browser from its own stored date (and phone); this text is the no-JS fallback.
-    day, phone = checked_on(store), store.get("phone")
+    phone = store.get("phone")
     attrs = f' data-checked-on="{day.isoformat() if day else ""}"' + (f' data-phone="{phone}"' if phone else "")
     return f'<p class="catalog-note selection-checked"{attrs}>{html.escape(line, quote=False)}</p>'
 

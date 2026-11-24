@@ -53,6 +53,18 @@ class SyncFractionCase(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertIsNone(sync._stock_text(bad))
 
+    def test_out_of_range_scale_is_refused_before_formatting(self):
+        # Contract: the stored text is bounded; a quantity with more than MAX_STOCK_SCALE decimal places is refused
+        # BEFORE it is expanded, while ordinary small counts (0.0004) are still kept exactly.
+        # Believable bug caught: only the integer side is capped, so '1E-9999999' is expanded to a ~10 MB string before trailing zeros are stripped.
+        edge = "0." + "0" * (sync.MAX_STOCK_SCALE - 1) + "1"
+        for quantity, text in (("0.0004", "0.0004"), (0.0004, "0.0004"), (edge, edge), ("1E-12", edge)):
+            with self.subTest(kept=quantity):
+                self.assertEqual(sync._stock_text(quantity), text)
+        for bad in ("1E-13", "1E-9999999", "0E-9999999", 1e-20, "0." + "0" * sync.MAX_STOCK_SCALE + "1"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(sync._stock_text(bad))
+
 
 if __name__ == "__main__":
     unittest.main()

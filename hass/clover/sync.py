@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from hass.clover import mapper
 
 MAX_STOCK_DIGITS = 12
+MAX_STOCK_SCALE = 12   # most decimal places kept; bounds the fixed-point text (<= 12 + 1 + 12 chars) before it is built
 
 
 def _ids(raw, key):
@@ -31,6 +32,8 @@ def _stock_text(value):
     try:
         q = Decimal(str(value))
         if not q.is_finite() or abs(q) >= Decimal(10) ** MAX_STOCK_DIGITS:
+            return None
+        if q.as_tuple().exponent < -MAX_STOCK_SCALE:   # '1E-9999999' would otherwise expand to millions of characters
             return None
         text = format(q, "f")   # exact digits, never an exponent. NOT mapper.format_quantity: it rounds to 3 places (0.0004 -> '0')
         return text.rstrip("0").rstrip(".") if "." in text else text

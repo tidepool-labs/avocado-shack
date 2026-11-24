@@ -35,8 +35,17 @@ def reject_constant(_token):
     raise ValueError("not a JSON number")
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def load_manifest(path):
-    tape = json.loads(read_text(path), parse_constant=reject_constant)
+    tape = json.loads(read_text(path), parse_constant=reject_constant, object_pairs_hook=unique_object)
     if (not isinstance(tape, dict) or not {"search", "pages", "extract", "verify"} <= tape.keys()
             or not all(isinstance(tape[key], dict) for key in ("search", "pages", "verify"))
             or not all(isinstance(urls, list) for urls in tape["search"].values())):

@@ -60,6 +60,10 @@ def check(config_arg, backup_arg, service_uid, backup_dir_uid):
     if stat.S_IMODE(dest_dir.st_mode) != 0o700:
         raise Refused("backup-directory-mode")
 
+    source_dir = metadata(config.parent, "config-path")
+    if (source_dir.st_dev, source_dir.st_ino) == (dest_dir.st_dev, dest_dir.st_ino):
+        raise Refused("backup-directory-same-as-config")
+
     # Only a missing leaf is success; lstat sees even a dangling link as occupied.
     try:
         backup.lstat()

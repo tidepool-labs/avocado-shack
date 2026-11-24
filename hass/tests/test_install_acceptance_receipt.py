@@ -5,9 +5,12 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
+from hass.acceptance import ALL_IDS
 from scripts.hass import install_acceptance_receipt as receipt
 
 
@@ -30,6 +33,52 @@ def metadata(stdout, **changes):
 class AcceptanceReceiptTests(unittest.TestCase):
     def validate(self, stdout, **changes):
         return receipt.validate(stdout, metadata(stdout, **changes), SHA)
+
+    def test_full_receipt_requires_producer_roster(self):
+        # Rehashing a selected run preserves consistency, and swapping an ID
+        # preserves even the full count; neither proves the producer's full roster.
+        rows = [{**(UNCOVERED if ident == UNCOVERED["id"] else PASS_ROW), "id": ident}
+                for ident in ALL_IDS]
+        summary = {**SUMMARY, "ids": len(rows), "pass": len(rows) - 1}
+        full = capture(rows=rows, summary=summary)
+        selected_summary = {**SUMMARY, "ids": 1, "not covered": 0}
+        selected = capture(rows=(PASS_ROW,), summary=selected_summary)
+        unknown_id = next(f"H{i:02d}" for i in range(100) if f"H{i:02d}" not in ALL_IDS)
+        substituted = capture(rows=[{**rows[0], "id": unknown_id}, *rows[1:]], summary=summary)
+
+        with tempfile.TemporaryDirectory() as directory:
+            stdout_file = Path(directory) / "stdout"
+            meta_file = Path(directory) / "metadata"
+            command = [sys.executable, "-B", str(Path(receipt.__file__).resolve()),
+                       "--stdout", str(stdout_file), "--metadata", str(meta_file),
+                       "--expected-runtime-sha", SHA]
+            for name, saved, require_full, expected in (
+                ("full", full, True, {"summary": summary, "not_covered_ids": ["H07"],
+                                      "full_roster": True}),
+                ("selected", selected, True, None),
+                ("substituted", substituted, True, None),
+                ("default", selected, False, {"summary": selected_summary, "not_covered_ids": []}),
+            ):
+                with self.subTest(case=name):
+                    meta = metadata(saved)
+                    stdout_file.write_bytes(saved)
+                    meta_file.write_bytes(meta)
+                    result = subprocess.run(command + (["--require-full-roster"] if require_full else []),
+                                            cwd=directory, capture_output=True, text=True, timeout=10)
+                    self.assertNotIn(NOTE, result.stdout + result.stderr)
+                    self.assertNotIn(SHA, result.stdout + result.stderr)
+                    self.assertEqual(stdout_file.read_bytes(), saved)
+                    self.assertEqual(meta_file.read_bytes(), meta)
+                    if expected is None:
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertEqual(result.stdout, "")
+                        self.assertIn("full producer H ID roster", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stderr, "")
+                        self.assertEqual(json.loads(result.stdout), {
+                            "status": "consistent (capture not authenticated)", **expected,
+                        })
 
     def test_checks_exact_saved_bytes_and_full_runtime_sha(self):
         # Parsed JSON equality and a common SHA prefix are not sufficient bindings.

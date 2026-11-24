@@ -72,7 +72,11 @@ def _snapshot_counts(state):
                 db.execute("PRAGMA query_only=ON")
                 total = 0
                 counts, invalid = Counter(), Counter()
-                for row_state, is_null in db.execute("SELECT state, payload IS NULL FROM inbound"):
+                # Only return recognized labels, regardless of the saved column's collation.
+                for row_state, is_null in db.execute(
+                    "SELECT CASE WHEN state COLLATE BINARY IN (?, ?, ?) THEN state END, "
+                    "payload IS NULL FROM inbound", STATES
+                ):
                     total += 1
                     if row_state in STATES:
                         counts[row_state] += 1
@@ -105,6 +109,9 @@ def main(argv=None):
                 if invalid[state]:
                     reason = "pending-empty" if state == "pending" else f"payload-kept {state}"
                     findings.append(f"{reason} {invalid[state]}")
+            unknown = total - sum(counts.values())
+            if unknown:
+                findings.append(f"unknown-state {unknown}")
 
     for reason in findings:
         print(f"FAIL {reason}")

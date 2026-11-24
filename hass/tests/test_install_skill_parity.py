@@ -14,7 +14,7 @@ MAINTAIN, REVIEW = "hass-npp-maintain", "hass-npp-review"
 
 class InstallSkillParityTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve(strict=True)
         self.repo = self.root / "release-checkout"
         self.repo.mkdir()
         self.env = {
@@ -92,6 +92,27 @@ class InstallSkillParityTests(unittest.TestCase):
         # A text-mode comparison would erase the only difference (CRLF vs LF).
         (Path(self.roots[MAINTAIN]) / "SKILL.md").write_bytes(b"maintain\n")
         self.check_cli({"p": self.roots}, 1, f"FAIL p {MAINTAIN}: bytes differ", f"PASS p {REVIEW}")
+
+    def test_unresolved_skill_ancestor_refuses(self):
+        # A no-follow open on just the final directory accepts this alias:
+        # the final directory and SKILL.md are the same ones as in the direct control.
+        installed = Path(self.roots[MAINTAIN])
+        alias = self.root / "ancestor-alias"
+        alias.symlink_to(installed.parent, target_is_directory=True)
+        self.check_cli({"p": self.roots}, 0, f"PASS p {MAINTAIN}", f"PASS p {REVIEW}")
+        self.check_cli({"p": {**self.roots, MAINTAIN: str(alias / installed.name)}}, 1,
+                       f"FAIL p {MAINTAIN}: cannot read a regular file", f"PASS p {REVIEW}")
+
+    def test_noncanonical_root_spelling_refuses(self):
+        # Normalizing the roster string silently would accept these alternate spellings.
+        root = self.roots[MAINTAIN]
+        for kind, spelling in (("relative", root[1:]), ("double-leading-slash", "/" + root),
+                               ("repeated-separator", root.replace("/operator-resolved", "//operator-resolved")),
+                               ("trailing-separator", root + "/"), ("dot", root + "/."),
+                               ("dot-dot", root + "/../" + MAINTAIN)):
+            with self.subTest(kind=kind):
+                self.check_cli({"p": {**self.roots, MAINTAIN: spelling}}, 1,
+                               f"FAIL p {MAINTAIN}: invalid root", f"PASS p {REVIEW}")
 
     def test_missing_and_nonregular_leaf_fail_without_reading_targets(self):
         # is_file/open can follow a matching link, or block opening a FIFO.

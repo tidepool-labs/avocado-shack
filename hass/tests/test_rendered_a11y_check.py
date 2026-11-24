@@ -148,6 +148,19 @@ class RenderedA11yCheckTests(unittest.TestCase):
         self.assert_findings(self.run_check(), "page hike/index.html h1-count 1",
                              "page index.html h1-count 1", "FAIL h1-count 2")
 
+    def test_c2_5_hidden_market_heading_is_not_a_title(self):
+        # Counting all h1 tags lets a Market page with only a hidden title pass.
+        self.copy_templates()
+        title = "<h1>{{store.headlineHtml}}</h1>"
+        self.edit("index.html", title, f"<div hidden><div>{title}</div></div>")
+        self.assert_findings(self.run_check(), "page index.html h1-count 1", "FAIL h1-count 1")
+
+    def test_c2_5_hidden_template_copy_does_not_duplicate_market_title(self):
+        # An inert template copy must not fail a page with one visible title.
+        self.copy_templates()
+        self.append_markup("<template><div><h1>Template title</h1></div></template>")
+        self.assert_result(self.run_check(), 0, ["pages 6", PASS])
+
     def test_c2_6_img_no_alt(self):
         # Count images (not pages), including self-closing markup outside links.
         self.copy_templates()

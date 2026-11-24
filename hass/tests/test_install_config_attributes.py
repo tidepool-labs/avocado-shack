@@ -48,15 +48,20 @@ class InstallConfigAttributesTests(unittest.TestCase):
 
     def test_valid_snapshot_never_opens_or_changes_fixtures(self):
         # An open-based check, backup probe, or permission repair violates this contract.
-        before = self.config.stat(), self.backup_dir.stat()
+        self.source_dir.chmod(0o700)
+        fixtures = self.config, self.source_dir, self.backup_dir
+        before = tuple(path.stat() for path in fixtures)
         with (patch("builtins.open", side_effect=AssertionError("open")),
               patch("io.open", side_effect=AssertionError("io.open")),
               patch("os.open", side_effect=AssertionError("os.open")),
               patch("os.chmod", side_effect=AssertionError("chmod"))):
             code, out, err = self.run_check()
-        self.assertEqual((code, err), (0, ""))
-        self.assertEqual(out, "PASS config-attributes; metadata snapshot only, not safe against concurrent changes\n")
-        self.assertEqual((self.config.stat(), self.backup_dir.stat()), before)
+            self.assertEqual((code, err), (0, ""))
+            self.assertEqual(out, "PASS config-attributes; metadata snapshot only, not safe against concurrent changes\n")
+            # A fresh leaf and 0700 mode alone would admit a backup beside the config.
+            self.assert_refused("backup-directory-same-as-config", backup=self.source_dir / self.backup.name)
+        self.assertEqual(tuple(path.stat() for path in fixtures), before)
+        self.assertEqual(list(self.source_dir.iterdir()), [self.config])
         self.assertEqual(list(self.backup_dir.iterdir()), [])
 
     def test_expected_owners_are_independent(self):

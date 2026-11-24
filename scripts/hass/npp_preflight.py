@@ -29,6 +29,7 @@ STAGES = (
     "hass/npp/picture.py",
     "hass/npp/reply.py",
     "hass/npp/edits.py",
+    "hass/npp/stages.py",
     "hass/tests/npp/run_npp.py",
 )
 SKILLS = (

@@ -103,7 +103,7 @@ class ReadinessTests(NoNetwork):
         code, output = self.cli()
         self.assertEqual((code, output), (0, {"result": "pass", "checks": {
             "read_only_day": "ok", "write_token_file": "ok", "settings": "ok", "daily_cap": "ok",
-            "testitem": "warn_missing_stock"}}))
+            "testitem": "warn_missing_stock", "testitem_inventory": "no-category"}}))
         code, output = self.cli(now=(NOW + timedelta(seconds=1)).isoformat())
         self.assertEqual((code, output["result"]), (1, "fail"))
         for code, failed in (self.cli(host=self.root / "missing-host"), self.cli(now="not an ISO date")):

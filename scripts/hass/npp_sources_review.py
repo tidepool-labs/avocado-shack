@@ -28,13 +28,23 @@ def reject_constant(_value):
     raise ValueError("not a JSON number")
 
 
+def unique_object(pairs):
+    # The decoder calls this for every object, before repeated keys are collapsed.
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def read_object(path):
     try:
         # Refuse a symlink at open time and never block on a named pipe.
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, encoding="utf-8") as stream:
             if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                value = json.load(stream, parse_constant=reject_constant)
+                value = json.load(stream, parse_constant=reject_constant, object_pairs_hook=unique_object)
                 if isinstance(value, dict):
                     return value
     except (OSError, ValueError, RecursionError):

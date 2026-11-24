@@ -44,6 +44,17 @@ class SelftestSummaryCheckTests(unittest.TestCase):
         )
         self.assert_output(result, 0, "checks 4", "warn beta", "warn delta", "note other-lines 3", PASS)
 
+    def test_zero_positive_checks_is_not_health_proof(self):
+        # Count agreement and zero failures can hide an empty or entirely skipped run.
+        for skipped in (0, 1):
+            with self.subTest(skipped=skipped):
+                rows = "SKIP alpha detail\n" if skipped else ""
+                result = self.run_capture(
+                    rows + f"HASS-SELFTEST fixture-stamp pass=0 warn=0 fail=0 skip={skipped}\n"
+                )
+                self.assert_output(result, 1, f"checks {skipped}", "note other-lines 0",
+                                   "FAIL no-passing-check", FAIL)
+
     def test_c2_1_no_file(self):
         # Absent and non-regular paths must produce a named verdict, not a traceback.
         for path in (self.capture, self.root):
@@ -95,8 +106,8 @@ class SelftestSummaryCheckTests(unittest.TestCase):
         result = self.run_capture(
             "FAIL alpha detail\nHASS-SELFTEST fixture-stamp pass=0 warn=0 fail=1 skip=0\n"
         )
-        self.assert_output(result, 1, "checks 1", "note other-lines 0", "FAIL failed-check alpha",
-                           "FAIL summary-fail 1", FAIL)
+        self.assert_output(result, 1, "checks 1", "note other-lines 0", "FAIL no-passing-check",
+                           "FAIL failed-check alpha", "FAIL summary-fail 1", FAIL)
 
     def test_c3_usage_exit_2(self):
         # Missing flag/value and unknown flags retain argparse's exit, not a finding verdict.

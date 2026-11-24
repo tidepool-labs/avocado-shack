@@ -96,6 +96,11 @@ class UnitsTemplateParityTests(unittest.TestCase):
 
     def test_c2_2_bad_commit(self):
         # Git accepts rev expressions, short SHAs, and peeled tags, but this CLI doesn't.
+        (self.templates / "README.md").write_text("Synthetic non-unit\n")
+        nested = self.templates / "nested"
+        nested.mkdir()
+        (nested / TIMER).write_bytes(TIMER_BYTES)
+        empty_templates = self.commit()
         self.unit()
         sha = self.commit()
         blob = self.git("rev-parse", f"HEAD:deploy/hass/{SERVICE}")
@@ -105,6 +110,10 @@ class UnitsTemplateParityTests(unittest.TestCase):
         for token in ("HEAD", sha[:12], sha.upper(), "0" * 40, blob, tag):
             with self.subTest(token=token):
                 self.assert_report(self.invoke(token), 1, "FAIL bad-commit")
+
+        # The selected commit needs a qualifying template. Comparing an empty
+        # roster would otherwise pass and report the installed service as extra.
+        self.assert_report(self.invoke(empty_templates), 1, "FAIL bad-commit")
 
     def test_c2_3_no_installed(self):
         # A file and a nonexistent path each fail as the directory, not as a unit.

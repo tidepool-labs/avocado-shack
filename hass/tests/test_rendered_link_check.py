@@ -158,6 +158,24 @@ class RenderedLinkCheckTests(unittest.TestCase):
             "note unprintable 3", "FAIL broken-link 6", FAIL,
         ])
 
+    def test_blank_image_source_is_broken_but_empty_href_is_not(self):
+        # Resolving all empty attributes as same-page links hides a missing photo;
+        # rejecting them all instead would break legitimate empty anchor hrefs.
+        photo = "assets/test-photo.webp"
+        (self.site / photo).write_bytes(b"fixture")
+        template = self.templates / "index.html"
+        original = template.read_text(encoding="utf-8")
+        for label, source in (("local photo", photo), ("empty", ""), ("whitespace", " \t ")):
+            with self.subTest(source=label):
+                template.write_text(original, encoding="utf-8")
+                self.plant("index.html", f'<a href=""></a><img alt="{PRODUCT}" src="{source}">')
+                result = self.invoke()
+                if label == "local photo":
+                    self.assert_pass(result)
+                else:
+                    lines = self.assert_failure(result, "broken-link 1")
+                    self.assertEqual(lines[3:], ["note missing-image-source 1", "FAIL broken-link 1", FAIL])
+
     def test_c3_usage_exit_2(self):
         # Usage errors are not findings and cannot leak offending argument values.
         for argv in (self.args(content=None), self.args(site=None), self.args() + ["--unknown"],

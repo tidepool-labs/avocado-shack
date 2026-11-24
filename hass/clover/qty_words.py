@@ -26,6 +26,14 @@ _UNCLEAR_QUERY = re.compile(
     r"\b(?:about|around|approximately|roughly|some|few|or|dozen|hundred|thousand|million|"
     r"dollars?|cents?|pounds?|lbs?)\b|\b(?:case of|came in)\b"
 )
+# A price, two products joined by a word, or a leading distance/duration is not
+# one product name; refuse so the message takes the normal reading instead.
+_NOT_ONE_PRODUCT = re.compile(
+    r"\b(?:bucks|euros?|quid|pence|pennies|and|plus)\b|&"
+    r"|^(?:miles?|km|kilometers?|kilometres?|foot|feet|inch(?:es)?|hours?|minutes?)\b"
+)
+# A set sentence that names the website or its photo/page is a site edit, not stock.
+_SITE_WORDS = re.compile(r"\b(?:website|photos?|pictures?|images?|pages?|listings?)\b")
 
 
 def _amount(text: str) -> tuple[Decimal, str | None, str] | None:
@@ -76,7 +84,8 @@ def _intent(mode: str, amount: tuple[Decimal, str | None, str] | None,
     # Reject leftover quantity words as well as digit-bearing tokens; neither
     # belongs to the product name when parsing an unambiguous till count.
     words = re.split(r"[ '\-]", query)
-    if (_UNCLEAR_QUERY.search(query)
+    if (_UNCLEAR_QUERY.search(query) or _NOT_ONE_PRODUCT.search(query)
+            or (mode == "set" and _SITE_WORDS.search(query))
             or any(not word.isalpha() or _word_number(word) is not None for word in words)):
         return None
     return CountIntent(mode, quantity, unit, query)

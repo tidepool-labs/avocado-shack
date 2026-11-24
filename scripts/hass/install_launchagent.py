@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check two offline LaunchAgent plist copies and the configured forwarder path."""
+"""Check two offline LaunchAgent plist copies and the configured forwarder script."""
 
 import argparse
 from itertools import zip_longest
@@ -10,6 +10,7 @@ from xml.parsers.expat import ExpatError
 
 
 TOKENS = ("@PYTHON@", "@REPO@", "@CONFIG@", "@LOGDIR@")
+PYTHON_FLAGS = ("-B", "-u")  # Supported no-operand flags before the script.
 MISSING = object()
 
 
@@ -89,12 +90,20 @@ def main(argv=None):
         findings.append("not-absolute")
     if after is not None:
         arguments = after.get("ProgramArguments")
-        matches = ([i for i, value in enumerate(arguments) if value == args.forwarder]
-                   if isinstance(arguments, list) else [])
+        if not isinstance(arguments, list):
+            arguments = []
+        matches = [i for i, value in enumerate(arguments) if value == args.forwarder]
         if not matches:
             findings.append("forwarder-not-loaded")
         elif len(matches) > 1:
             findings.append("forwarder-ambiguous")
+        # The template supplies its Python executable in argv[0], without a
+        # separate Program override. This checks shape, not executable identity.
+        elif (matches[0] == 0 or "Program" in after
+              or not isinstance(arguments[0], str)
+              or not PurePosixPath(arguments[0]).is_absolute()
+              or any(arg not in PYTHON_FLAGS for arg in arguments[1:matches[0]])):
+            findings.append("forwarder-not-script")
 
     if findings:
         for finding in findings:

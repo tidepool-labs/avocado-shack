@@ -14,7 +14,7 @@ from hass.content_model import ID_RE, load_and_validate
 from hass.npp.private_numbers import problem
 
 
-FIELDS = ("name", "description")
+FIELDS = ("name", "description", "imageAlt")
 REASON_RE = re.compile(r"^[a-z-]{1,30}$")
 
 
@@ -56,6 +56,8 @@ def main(argv=None):
         active += 1
         flagged_fields = []
         for field in FIELDS:
+            if field == "imageAlt" and field not in product:
+                continue  # Optional public copy; there is no text to count when omitted.
             reason = problem(product[field])
             screened += 1
             if reason is None:

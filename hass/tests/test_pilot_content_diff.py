@@ -131,6 +131,64 @@ class PilotContentDiffTests(unittest.TestCase):
         self.assert_result(self.invoke(old, new, "--expect-added", "2"), FAIL,
                            "added new-fixture", "added-total 1", "FAIL added-count 1")
 
+    def test_exact_catalog_effect(self):
+        # A matching added count can hide the wrong ID or a collateral edit.
+        # Undo must hide this formerly active row, not merely add zero rows.
+        other = {"id": "existing-fixture", "status": "active", "detail": {"label": "same"}}
+        edited = {**other, "detail": {"label": "changed"}}
+        target = {"id": "pilot-fixture", "status": "active", "available": "yes"}
+        # history.revert retains a new product as hidden and drops its stock fields;
+        # see the applied writer fixture in test_undo_new_item.
+        held = {"id": target["id"], "status": "hidden"}
+        old = self.commit(other)
+        forward = ("--expect-product", "forward", target["id"])
+        inverse = ("--expect-product", "inverse", target["id"])
+        wrong = self.commit(other, {**target, "id": "wrong-fixture"})
+        collateral = self.commit(edited, target)
+        for end, line in ((wrong, "added wrong-fixture"), (collateral, "added pilot-fixture")):
+            with self.subTest(diagnostic=line):
+                legacy = self.invoke(old, end, "--expect-added", "1")
+                self.assertEqual(legacy.returncode, 0, legacy.stderr)
+                self.assertIn(line, legacy.stdout)
+                self.assertIn("added-total 1", legacy.stdout)
+        new = self.commit(target, other)  # catalog ordering does not matter
+        undone = self.commit(other, held)
+        self.assert_result(self.invoke(old, new, *forward), PASS, "added pilot-fixture", "added-total 1")
+        self.assert_result(self.invoke(new, undone, *inverse), PASS,
+                           "changed pilot-fixture available status", "added-total 0")
+        for label, start, end, flags, reason in (
+            ("wrong forward ID", old, wrong, forward, "expected-product-forward"),
+            ("edited another on post", old, collateral, forward, "other-products-changed"),
+            ("not active on post", old, undone, forward, "expected-product-forward"),
+            ("already present", collateral, new, forward, "expected-product-forward"),
+            ("still active", new, self.commit({**other, "status": "hidden"}, target),
+             inverse, "expected-product-inverse"),
+            ("edited another on undo", new, self.commit(edited, held), inverse, "other-products-changed"),
+            ("lost another on undo", new, self.commit(held), inverse, "other-products-changed"),
+            ("added another on undo", new, self.commit(other, held, {"id": "extra-fixture"}),
+             inverse, "other-products-changed"),
+            ("not the writer undo form", new, self.commit(other), inverse, "expected-product-inverse"),
+            # Contract: the inverse is the writer's exact form (the forward record, hidden, minus
+            # available/available_on). Bug caught: any hidden row passed, so an altered
+            # description or a retained stock word went unnoticed.
+            ("undo altered another field", new, self.commit(other, {**held, "description": "edited"}),
+             inverse, "expected-product-inverse"),
+            ("undo kept the stock word", new, self.commit(other, {**held, "available": "yes"}),
+             inverse, "expected-product-inverse"),
+            ("undo dropped another field", self.commit(other, {**target, "name": "Fixture"}),
+             self.commit(other, held), inverse, "expected-product-inverse"),
+            ("already hidden", undone, undone, inverse, "expected-product-inverse"),
+            ("missing target in both", old, old, inverse, "expected-product-inverse"),
+        ):
+            with self.subTest(case=label):
+                result = self.invoke(start, end, *flags)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                lines = result.stdout.splitlines()
+                self.assertIn(f"FAIL {reason}", lines)
+                self.assertEqual(lines[-1], FAIL)
+                self.assertEqual(result.stderr, "")
+        self.assert_result(self.invoke(undone, new, *inverse), FAIL, "FAIL not-ancestor")
+
     def test_c3_usage_exit_2(self):
         # Named findings must not absorb argparse failures or echo rejected values.
         spec = importlib.util.spec_from_file_location("pilot_content_diff", SCRIPT)
@@ -139,7 +197,9 @@ class PilotContentDiffTests(unittest.TestCase):
         spec.loader.exec_module(module)
         valid = ["--repo", str(self.repo), "--from", self.empty, "--to", self.empty]
         for args in (valid[:-2], valid + ["--unexpected", str(self.root)],
-                     valid + ["--expect-added", str(self.root)]):
+                     valid + ["--expect-added", str(self.root)],
+                     valid + ["--expect-product", str(self.root), "fixture"],
+                     valid + ["--expect-product", "forward"]):
             with self.subTest(args=args[-2:]):
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -176,13 +236,16 @@ class PilotContentDiffTests(unittest.TestCase):
         new = self.commit({"id": "public-fixture"})
         malformed = self.commit_raw(json.dumps({"products": [private]}).encode() + b"!")
         changed = self.invoke(old, new)
+        wrong_target = self.invoke(old, new, "--expect-product", "forward", str(self.root))
         invalid = self.invoke(new, malformed)
         no_repo = self.invoke(old, new, repo=self.root / "synthetic absent checkout")
         self.assert_result(changed, PASS, "changed public-fixture chat digest externalId message path sender",
                            "added-total 0")
         self.assert_result(invalid, FAIL, "FAIL bad-content to")
         self.assert_result(no_repo, FAIL, "FAIL not-git")
-        for result in (changed, invalid, no_repo):
+        self.assert_result(wrong_target, FAIL, "changed public-fixture chat digest externalId message path sender",
+                           "added-total 0", "FAIL expected-product-forward", "FAIL other-products-changed")
+        for result in (changed, wrong_target, invalid, no_repo):
             for canary in (*private.values(), str(self.root), old, new, malformed):
                 self.assertNotIn(canary, result.stdout + result.stderr)
 

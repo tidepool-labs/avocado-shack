@@ -27,8 +27,8 @@ def register(raw=None, *, items=(ITEM,), expected=PLAN):
     return register_check(RAW if raw is None else RAW | raw, snapshot, expected)
 
 
-def site(record=None, *, link=LINK, item=ITEM):
-    return site_check(SITE if record is None else SITE | record, link, item, 5)
+def site(record=None, *, link=LINK, item=ITEM, **options):
+    return site_check(SITE if record is None else SITE | record, link, item, 5, **options)
 
 
 class CloverChecksTests(NoNetwork):
@@ -66,6 +66,43 @@ class CloverChecksTests(NoNetwork):
         self.assert_verdict(site(wrong, link=LINK | {"cloverId": "FAKEITEMB"}),
                             False, "unlinked", "name", "price", "price-unit", "hidden-vs-active", "no-word")
         self.assert_verdict(site({"available": None}), True, "no-word")
+
+    def test_words_mode_low_count_expects_yes(self):
+        # Contract: stock_site publishes 'yes' for a low count unless siteStockWords is 'limited'; a check that
+        # always expects 'limited' fails a correctly published count (false 'stock-word') and passes a wrong 'limited'.
+        low = replace(ITEM, stock=Decimal("3"))
+        self.assert_verdict(site({"available": "yes"}, item=low, words="words"), True)
+        self.assert_verdict(site({"available": "limited"}, item=low, words="words"), False, "stock-word")
+        # Healthy control: the boundary count equal to the threshold behaves the same; one above is 'yes' anyway.
+        self.assert_verdict(site({"available": "yes"}, item=replace(ITEM, stock=Decimal("5")), words="words"), True)
+
+    def test_limited_mode_low_count_expects_limited(self):
+        # Contract: 'limited' mode and the default keep today's three-word result, so existing callers do not change.
+        low = replace(ITEM, stock=Decimal("3"))
+        for options in ({}, {"words": "limited"}):
+            with self.subTest(options=options):
+                self.assert_verdict(site({"available": "limited"}, item=low, **options), True)
+                self.assert_verdict(site({"available": "yes"}, item=low, **options), False, "stock-word")
+
+    def test_words_mode_zero_and_high_counts(self):
+        # Contract: only the low band changes; an empty count is still 'no' and a high count still 'yes' in words mode.
+        for count, word, other in (("0", "no", "yes"), ("-2", "no", "yes"), ("30", "yes", "no")):
+            item = replace(ITEM, stock=Decimal(count))
+            with self.subTest(count=count):
+                self.assert_verdict(site({"available": word}, item=item, words="words"), True)
+                self.assert_verdict(site({"available": other}, item=item, words="words"), False, "stock-word")
+        # Hidden and no-count hints stay as they are: no word expected for a missing count.
+        self.assert_verdict(site({"available": "yes"}, item=replace(ITEM, stock=None), words="words"),
+                            False, "stock-word")
+        self.assert_verdict(site({"available": "no"}, item=replace(ITEM, available=False, stock=Decimal("3")),
+                                 words="words"), True)
+
+    def test_unknown_words_value_refused(self):
+        # Contract: a typo like 'word' must not silently pick a mode and certify the wrong stock word.
+        for bad in ("word", "Words", "", None):
+            with self.subTest(words=bad), self.assertRaises(ValueError) as caught:
+                site(words=bad)
+            self.assertEqual(str(caught.exception), "words")
 
     def test_c3_no_values_in_findings(self):
         # C3: caching the check could open a file or load a token; formatting diffs could leak price, count or SKU.

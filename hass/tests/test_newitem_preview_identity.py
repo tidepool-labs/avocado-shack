@@ -1,12 +1,16 @@
 """RF0345-11: apply_in_memory returns the product the real product.add created, never an older record sharing its image."""
 import copy
+import hashlib
+import io
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from hass import media, newitem, newitem_preview as preview
+from PIL import Image, PngImagePlugin
+
+from hass import newitem, newitem_preview as preview
 from hass.content_model import SHOP_TZ, load_content
 
 SHARED = "assets/products/shared.jpg"
@@ -80,30 +84,54 @@ class IdentityTests(unittest.TestCase):
             preview.apply_in_memory(self.content, [twin], SHARED, NOW)
         self.assertEqual(self.content.products, before)
 
-    def test_capture_target_uses_new_identity(self):
-        draft = {"status": "draft", "reply": "r", "question": None, "image": {"sha256": "ab" * 32, "path": SHARED, "bytes": b"after"},
-                 "ops": [add(photo=b"after")]}
-        targets = []
+    def test_capture_targets_use_created_id_and_displayed_image_bytes(self):
+        # The two sides use the same new listing, but the before URL must hash
+        # its stripped bytes, not the draft render or the metadata-bearing input.
+        with io.BytesIO() as buf:
+            Image.new("RGB", (4, 4), "blue").save(buf, "JPEG")
+            after_bytes = buf.getvalue()
+        draft = {"status": "draft", "reply": "r", "question": None,
+                 "image": {"sha256": hashlib.sha256(after_bytes).hexdigest(), "path": SHARED, "bytes": after_bytes},
+                 "ops": [add(photo=after_bytes)]}
+        created = preview.apply_in_memory(self.content, [add()], SHARED, NOW)[1]
+        captures = []
+        viewports_seen = []
 
         class FakePreviewer:
-            def __init__(self, *a, **k): pass
+            def __init__(self, repo, *, env, viewports):
+                viewports_seen.append(viewports)
 
             def capture(self, files, target, out_png, assets=None):
-                targets.append((target, files))
+                captures.append((target, files, assets))
                 return {"ok": True, "error": None, "checks": {}, "png": None}
 
+        png_info = PngImagePlugin.PngInfo()
+        png_info.add_text("Comment", "fixture")
         with (tempfile.TemporaryDirectory() as tmp, mock.patch.object(preview, "OUT", Path(tmp)),
               mock.patch.object(newitem, "draft", return_value=draft),
-              mock.patch.object(media, "_jpeg_copy", return_value=(b"web", [])),
               mock.patch.object(preview.preview, "Previewer", FakePreviewer)):
-            preview.capture_case("case", "jar", "msg", "", b"\xff\xd8photo", self.content, {}, {})
-        after = next(t for t, _ in targets if t["image"] == SHARED)
-        created = next(p for p in preview.apply_in_memory(self.content, [add()], SHARED, NOW)[0].products if p["name"] == "New jar")
-        self.assertEqual((after["id"], after["description"]), (created["id"], "A new jar."))
-        self.assertTrue(all(t["id"] == created["id"] for t, _ in targets if t["image"] == SHARED))
-        self.assertNotIn(created["id"], {p["id"] for p in self.olds})
-        files = next(f for t, f in targets if t["image"] == SHARED)
-        self.assertIn("A new jar.", files["storefront-mockup/catalog-products.js"].decode("utf-8"))
+            for fmt, ext, metadata in (("JPEG", "jpg", {"comment": b"fixture"}),
+                                       ("PNG", "png", {"pnginfo": png_info})):
+                with self.subTest(format=fmt):
+                    with Image.new("RGB", (4, 4), "red") as image, io.BytesIO() as clean, io.BytesIO() as tagged:
+                        image.save(clean, fmt)
+                        image.save(tagged, fmt, **metadata)
+                        stripped, original = clean.getvalue(), tagged.getvalue()
+                    self.assertNotEqual(original, stripped)
+                    self.assertNotEqual(stripped, after_bytes)
+                    captures.clear()
+                    viewports_seen.clear()
+                    preview.capture_case("case", "jar", "msg", "", original, self.content, {}, {})
+                    (before, _, before_assets), (after, files, after_assets) = captures
+                    self.assertEqual(viewports_seen, [("phone", "desktop")] * 2)
+                    self.assertEqual((before["id"], after["id"]), (created["id"], created["id"]))
+                    self.assertNotIn(created["id"], {p["id"] for p in self.olds})
+                    self.assertEqual((after["image"], after["description"]), (SHARED, "A new jar."))
+                    self.assertEqual(after_assets, {f"storefront-mockup/{SHARED}": after_bytes})
+                    self.assertIn("A new jar.", files["storefront-mockup/catalog-products.js"].decode("utf-8"))
+                    self.assertEqual(before_assets, {f"storefront-mockup/{before['image']}": stripped})
+                    expected_before = f"assets/products/photo-{hashlib.sha256(stripped).hexdigest()[:16]}.{ext}"
+                    self.assertEqual(before["image"], expected_before)
 
 
 if __name__ == "__main__":

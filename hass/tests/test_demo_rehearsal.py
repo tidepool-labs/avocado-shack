@@ -40,6 +40,30 @@ class Run:
 
 
 class OfflineRehearsal(unittest.TestCase):
+    def test_fixture_refuses_a_start_without_an_offset(self):
+        # astimezone() on a naive datetime silently uses the host's time zone.
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "clock.jsonl"
+            fixture.write_text('{"world": {"start": "2026-11-16T00:30:00", "ttl_seconds": 1800}}\n', "utf-8")
+            with self.assertRaises(demo.RehearsalError) as error:
+                demo.load_fixture(fixture)
+        self.assertEqual(str(error.exception), "fixture line 1: world.start must be an ISO time with an offset")
+
+    def test_equivalent_aware_starts_set_the_same_shop_clock(self):
+        # Offsets must not be stripped or reinterpreted as UTC (including across midnight).
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "clock.jsonl"
+            for start in ("2026-11-16T00:30:00Z", "2026-11-15T16:30:00-08:00", "2026-11-16T06:00:00+05:30"):
+                with self.subTest(start=start):
+                    fixture.write_text(f'{{"world": {{"start": "{start}", "ttl_seconds": 1800}}}}\n', "utf-8")
+                    world, _ = demo.load_fixture(fixture)
+                    self.assertEqual(world["start"], start)
+                    shop = demo.Shop(world)
+                    try:
+                        self.assertEqual(shop.now.isoformat(), "2026-11-16T00:30:00+00:00")
+                    finally:
+                        shop.close()
+
     def test_every_row_passes_and_the_gaps_are_the_named_ones(self):
         results = Run.get()
         bad = [(r.row["id"], r.problems) for r in results if r.status == "FAIL"]

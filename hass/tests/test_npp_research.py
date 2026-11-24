@@ -104,6 +104,8 @@ class ResearchTests(unittest.TestCase):
     def test_owner_url_checks_quote_then_separately_verifies_typed_fact(self):
         # Case 30: even a source explicitly given by the owner cannot authorize old or negated facts.
         world = World(fixture(30))
+        status, _, body = world.pages[ABOUT]
+        world.pages[ABOUT] = status, "Text/HTML; charset=utf-8", body
         result = world.maker(owner_url=ABOUT)
         self.assertEqual([(f["slot"], f["value"]) for f in result.story_facts], [("nature", "orchard"), ("makes", "dried figs")])
         self.assertEqual(result.story_facts[0], {"id": "official-nature", "slot": "nature", "value": "orchard",
@@ -116,6 +118,15 @@ class ResearchTests(unittest.TestCase):
             self.assertNotEqual(extract[0]["instructions"], request["instructions"])
             self.assertEqual(set(data), {"maker", "slot", "value", "quote"})
             self.assertEqual(request["images"], [])
+
+        # Only a declared HTML media type may supply evidence. A substring check
+        # admits this non-HTML response and sends the unchanged body for extraction.
+        world = World(fixture(30))
+        world.pages[ABOUT] = status, "application/x-text/html", body
+        result = world.maker(owner_url=ABOUT)
+        self.assertIn(ABOUT, world.urls)
+        self.assertFalse(result.story_facts)
+        self.assertEqual(world.requests, [])
 
     def test_label_seed_can_supply_identity_and_founded_year_from_official_text(self):
         # Losing label-only discovery (or blocking public calendar years as owner finance) loses real sourced slots.

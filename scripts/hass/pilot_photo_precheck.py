@@ -22,7 +22,7 @@ class PhotoParser(argparse.ArgumentParser):
         super().error("expected 1 to 10 photo paths (use -- before paths starting with -)")
 
 
-def report(k, path):
+def report(k, path, *, require_scored=False):
     with warnings.catch_warnings():
         # Decoder diagnostics can contain private metadata. Never relay them.
         warnings.simplefilter("ignore")
@@ -55,6 +55,9 @@ def report(k, path):
     print(f"photo {k} bytes {len(data)}")
     print(f"photo {k} gps {gps}")
     print(f"photo {k} sharpness {sharpness}")
+    if score is None and require_scored:
+        print(f"FAIL unscored {k}")
+        return False
     if soft:
         print(f"FAIL soft {k}")
     return not soft
@@ -66,13 +69,15 @@ def main(argv=None):
         description="Report local photo metadata and Hass sharpness. Unscored does not certify sharpness.",
     )
     parser.add_argument("photos", metavar="PHOTO", nargs="+", type=Path)
+    parser.add_argument("--require-scored", action="store_true",
+                        help="fail if any photo has no Hass sharpness score")
     args = parser.parse_args(argv)
     if len(args.photos) > 10:
         parser.error("too many photos")
 
     passed = True
     for k, path in enumerate(args.photos, 1):
-        if not report(k, path):
+        if not report(k, path, require_scored=args.require_scored):
             passed = False
     print(f"{'PASS' if passed else 'FAIL'} pilot_photo_precheck")
     return 0 if passed else 1

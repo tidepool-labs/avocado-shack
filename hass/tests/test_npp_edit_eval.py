@@ -87,6 +87,40 @@ class EditEvalTests(unittest.TestCase):
                     self.assertEqual(lines[:-2], [f"{key}: {score}" for key, _, score in answers])
                     self.assertEqual(lines[-2], "accuracy: 2/8 (25.00%); exact=2 partial=1 wrong=3 invalid=2")
                     self.assertEqual(lines[-1], f"{trailer} npp_edit_eval")
+
+            # A perfect subset or a padded tape can appear complete if full replay
+            # checks only accuracy or row count instead of each phrase's coverage.
+            full = [
+                {"id": p["id"], "model": None, "output": ASK if p["expected"] == "ask" else
+                 {"action": "patch", "patches": p["expected"], "ask_id": None}}
+                for p in self.phrases
+            ]
+            replay = ["--replay", str(tape)]
+            tape.write_text(json.dumps(full[:1]), encoding="utf-8")
+            rc, lines = self.run_eval(replay + ["--min", "1"], transport_factory=factory)
+            self.assertEqual((rc, lines[-1]), (0, "PASS npp_edit_eval"))
+            strict = replay + ["--require-full"]
+            for rows in (full, full[::-1]):
+                tape.write_text(json.dumps(rows), encoding="utf-8")
+                rc, lines = self.run_eval(strict + ["--min", "1"], transport_factory=factory)
+                self.assertEqual((rc, lines[-1]), (0, "PASS npp_edit_eval"))
+
+            for label, rows, counts in (
+                ("one row", full[:1], f"missing={len(full) - 1} duplicate=0 unexpected=0"),
+                ("duplicate replaces a phrase", [full[0], *full[:-1]], "missing=1 duplicate=1 unexpected=0"),
+                ("extra unknown ID", [*full, {**full[0], "id": "PRIVATE-ID"}], "missing=0 duplicate=0 unexpected=1"),
+                ("empty", [], f"missing={len(full)} duplicate=0 unexpected=0"),
+            ):
+                with self.subTest(coverage=label):
+                    tape.write_text(json.dumps(rows), encoding="utf-8")
+                    self.assertEqual(self.run_eval(strict, transport_factory=factory),
+                                     (1, [f"coverage: {counts}", "FAIL npp_edit_eval"]))
+
+            # Coverage alone must not bypass the accuracy threshold.
+            tape.write_text(json.dumps([{**full[0], "output": None}, *full[1:]]), encoding="utf-8")
+            rc, lines = self.run_eval(strict + ["--min", "1"], transport_factory=factory)
+            self.assertEqual((rc, lines[-1]), (1, "FAIL npp_edit_eval"))
+            self.assertIn("invalid=1", lines[-2])
             factory.assert_not_called()
 
     def test_c3_record_guarded(self):
@@ -100,6 +134,7 @@ class EditEvalTests(unittest.TestCase):
                 (yes + sink, "requires --yes-record and --max-calls"),
                 (cap + sink, "requires --yes-record and --max-calls"),
                 (yes + cap, "requires --out"),
+                (yes + cap + sink + ["--require-full"], "--require-full requires --replay"),
                 (["--yes-recor"] + cap + sink, "unrecognized arguments"),
             ]
             cases += [(yes + ["--max-calls", n] + sink, "between 1 and 60") for n in ("-1", "0", "61", "1000")]

@@ -110,6 +110,16 @@ class ResearchDryrunTests(unittest.TestCase):
 
     def test_c2_1_manifest_unreadable(self):
         # Following a symlink or reading invalid byte/JSON data must not silently pass.
+        # A repeated verifier key makes the tape unreadable: last-write-wins
+        # would silently turn the contradictory answers into a supported fact.
+        self.assertIn("facts-kept 1", self.assert_pass(self.cli(self.args())))
+        original = self.path.read_bytes()
+        verdict = b'"makes|jam": "supports"'
+        self.assertEqual(original.count(verdict), 1)
+        self.path.write_bytes(original.replace(verdict, b'"makes|jam": "contradicts", ' + verdict))
+        self.assert_fail(self.cli(self.args()), "manifest-unreadable")
+        self.path.write_bytes(original)
+
         link = self.inputs / "linked.json"
         link.symlink_to(self.path)
         for path in (self.inputs / "absent.json", link):

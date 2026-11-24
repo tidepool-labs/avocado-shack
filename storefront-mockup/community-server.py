@@ -1,5 +1,5 @@
 """Local Avocado Shack catalog and community forms. No external email delivery."""
-import argparse, datetime, email.utils, json, os, re, sqlite3, time
+import argparse, datetime, email.utils, json, os, re, sqlite3, time, unicodedata
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -36,18 +36,26 @@ class FormError(ValueError):
 
 def email_address(value):
     if not isinstance(value, str): raise FormError('Please enter a valid email address.')
+    # Refuse invisible/look-alike characters before trimming, so str.strip() cannot silently drop
+    # a leading/trailing U+00A0 or similar; only the plain ASCII space may be trimmed.
+    if any(c!=' ' and unicodedata.category(c) in ('Cf','Zl','Zp','Zs','Cs','Co') for c in value): raise FormError('Please enter a valid email address.')
     value = value.strip().lower()
     # Refuse (never strip) ASCII controls; the \s below misses NUL, ESC, DEL and others.
     if any(ord(c)<0x20 or ord(c)==0x7f for c in value): raise FormError('Please enter a valid email address.')
     if len(value)>254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value):
         raise FormError('Please enter a valid email address.')
+    # Refuse empty domain labels (the look-alike character check ran above, before trimming).
+    if '' in value.rpartition('@')[2].split('.'):
+        raise FormError('Please enter a valid email address.')
     return value
 
 def scheduled(event):
     try:
-        start = datetime.datetime.fromisoformat(event['startsAt'].replace('Z','+00:00'))
+        raw = event['startsAt']
+        if not isinstance(raw, str): return False
+        start = datetime.datetime.fromisoformat(raw.replace('Z','+00:00'))
         return event.get('status')=='scheduled' and start.tzinfo is not None and start>datetime.datetime.now(datetime.timezone.utc)
-    except (ValueError, KeyError, TypeError): return False
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError): return False
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*args,**kwargs): super().__init__(*args,directory=str(ROOT),**kwargs)
@@ -71,6 +79,8 @@ class Handler(SimpleHTTPRequestHandler):
             counts=dict((r['event_id'],r['seats']) for r in db.execute('SELECT event_id,SUM(party_size) seats FROM rsvps GROUP BY event_id'))
         events=[]
         for item in data.get('events',[]):
+            # A record that is not an object or has no text id cannot take an RSVP; leave it out.
+            if not isinstance(item,dict) or not isinstance(item.get('id'),str): continue
             e=dict(item); capacity=e.get('capacity')
             e['confirmedGuests']=int(counts.get(e['id'],0))
             e['remaining']=max(0,capacity-counts.get(e['id'],0)) if isinstance(capacity,int) and capacity>0 else None

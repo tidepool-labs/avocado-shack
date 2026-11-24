@@ -48,10 +48,19 @@ class LimitedModeTests(unittest.TestCase):
 
     def test_limited_mode_leaves_unwordable_products_alone(self):
         self.assertIsNone(site_op(0, 3, "no", status="hidden")[1])    # only an active product
-        self.assertIsNone(site_op(0, 3, None)[1])                     # no word on the card: leave it (as in words mode)
         self.assertEqual(site_op(3, 0, None)[1], "no")
         dr = d.build_set_stock(oil(0), 3, LIMITED)                    # no site product at all
         self.assertEqual(dr.site_ops, ())
+
+    def test_limited_mode_product_with_no_word_gets_the_sync_word(self):
+        # The stock sync publishes word(count) for a product with no word too (base None); a draft that left it bare would
+        # leave the site without 'limited' for a count of 3 (threshold 5). Bug caught: skipping the op when availability is None.
+        for count_to, want in ((3, "limited"), (5, "limited"), (6, "yes"), (30, "yes"), (0, "no")):
+            with self.subTest(count_to=count_to):
+                dr, got = site_op(2 if count_to != 2 else 4, count_to, None)
+                self.assertEqual(got, want)
+                self.assertEqual(dr.before["site"], {"id": "p", "available": None})
+        self.assertIsNone(site_op(30, 3, None, CFG)[1])               # words mode: a product with no word is still left alone
 
     def test_words_mode_unchanged(self):
         dr, got = site_op(0, 3, "no", CFG)
@@ -80,7 +89,8 @@ class CountTextTests(unittest.TestCase):
                 self.assertIn("  Count: 0 -> 4", undo.lines)
 
     def test_odd_count_text_refused_and_plain_text_read(self):
-        for bad in ("1_0", "1e1", "1E1", "\u0661\u0662", "1\u0662", "0x10"):
+        # exponent text is unreadable whatever its size or sign; bug caught: bounds checked first answered 'too high' / 'less than 0'
+        for bad in ("1_0", "1e1", "1E1", "1e100", "-1e1", "1E+100", "-1e100", "\u0661\u0662", "1\u0662", "0x10"):
             for build in (d.build_set_stock, d.build_received):
                 with self.subTest(bad=bad, build=build.__name__), self.assertRaisesRegex(d.DraftRefused, "I could not read that as a count"):
                     build(oil(4), bad, CFG)

@@ -8,6 +8,9 @@ from hass.clover import drafts as d
 from hass.tests.test_clover_drafts import CFG, till
 
 EXTREME = ("1e100", "1e1000000", "9" * 100)
+# AV1124B-01: exponent text is not a count a person typed, so it is the unreadable-count reply BEFORE any size bound; only plain digits
+# can be "too high". Each text -> the reply it must get.
+WANT = {"1e100": "could not read that as a count", "1e1000000": "could not read that as a count", "9" * 100: "too high"}
 
 
 class ExtremeCountTests(unittest.TestCase):
@@ -15,7 +18,7 @@ class ExtremeCountTests(unittest.TestCase):
         oil = till()["FAKEITEM00001"]
         for bad in EXTREME:
             with self.subTest(bad=bad):
-                with self.assertRaisesRegex(d.DraftRefused, "too high") as cm:
+                with self.assertRaisesRegex(d.DraftRefused, WANT[bad]) as cm:
                     d.build_set_stock(oil, bad, CFG)
                 self.assertLess(len(str(cm.exception)), 120)
 
@@ -23,7 +26,7 @@ class ExtremeCountTests(unittest.TestCase):
         oil = till()["FAKEITEM00001"]
         for bad in EXTREME:
             with self.subTest(bad=bad):
-                with self.assertRaisesRegex(d.DraftRefused, "too high") as cm:
+                with self.assertRaisesRegex(d.DraftRefused, WANT[bad]) as cm:
                     d.build_received(oil, bad, CFG)
                 self.assertLess(len(str(cm.exception)), 120)
 
@@ -35,9 +38,10 @@ class ExtremeCountTests(unittest.TestCase):
                     ctx.clear_flags()
                     ctx.flags[decimal.Rounded] = already_flagged
                     before = ctx.flags.copy()
-                    with self.assertRaisesRegex(d.DraftRefused, "too high"):
-                        builder(oil, "1e100", CFG)
-                    self.assertEqual(ctx.flags, before)
+                    for bad in ("1e100", "9" * 100):   # the unreadable-text path and the too-high path both leave the caller's flags alone
+                        with self.assertRaisesRegex(d.DraftRefused, WANT[bad]):
+                            builder(oil, bad, CFG)
+                        self.assertEqual(ctx.flags, before)
 
     def test_ordinary_limit_and_control_unchanged(self):
         oil = till()["FAKEITEM00001"]

@@ -103,7 +103,7 @@ class ListingTests(unittest.TestCase):
 
 class EmailTests(unittest.TestCase):
     def test_email_refuses_invisible_and_empty_label(self):
-        for raw in ("a\u200b@b.co", "a@b\u202e.co", "a@b..co", " a@.b.c ", "a@b.c.", "a@b\ue000.co", "a@b\ud800.co", "a\ufeff@b.co", "a@b.co\u200d"):
+        for raw in ("a\u200b@b.co", "a@b\u202e.co", "a@b..co", " a@.b.c ", "a@b.c.", "a@b\ue000.co", "a@b\ud800.co", "a\ufeff@b.co", "a@b.co\u200d", "\u00a0a@b.co", "a@b.co\u00a0", "\u2003a@b.co", "a@b.co\u3000", "\u2028a@b.co"):
             with self.subTest(raw=ascii(raw)):
                 with self.assertRaises(server.FormError) as caught:
                     server.email_address(raw)

@@ -36,13 +36,16 @@ class FormError(ValueError):
 
 def email_address(value):
     if not isinstance(value, str): raise FormError('Please enter a valid email address.')
+    # Refuse invisible/look-alike characters before trimming, so str.strip() cannot silently drop
+    # a leading/trailing U+00A0 or similar; only the plain ASCII space may be trimmed.
+    if any(c!=' ' and unicodedata.category(c) in ('Cf','Zl','Zp','Zs','Cs','Co') for c in value): raise FormError('Please enter a valid email address.')
     value = value.strip().lower()
     # Refuse (never strip) ASCII controls; the \s below misses NUL, ESC, DEL and others.
     if any(ord(c)<0x20 or ord(c)==0x7f for c in value): raise FormError('Please enter a valid email address.')
     if len(value)>254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value):
         raise FormError('Please enter a valid email address.')
-    # Refuse invisible/look-alike characters (format, separator, surrogate, private use) and empty domain labels.
-    if any(unicodedata.category(c) in ('Cf','Zl','Zp','Zs','Cs','Co') for c in value) or '' in value.rpartition('@')[2].split('.'):
+    # Refuse empty domain labels (the look-alike character check ran above, before trimming).
+    if '' in value.rpartition('@')[2].split('.'):
         raise FormError('Please enter a valid email address.')
     return value
 

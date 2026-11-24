@@ -92,6 +92,11 @@ class ReplyCatalogTests(unittest.TestCase):
                 self.assert_findings(self.run_catalog(), "templates-unreadable")
                 self.assertFalse(self.out.exists())
 
+        # An existing-key inventory must not turn empty reply sections into a successful page.
+        self.write_fixture(existing={"synthetic-key": "synthetic inventory value"})
+        self.assert_findings(self.run_catalog(), "no-templates")
+        self.assertFalse(self.out.exists())
+
     def test_c2_2_out_exists(self):
         # A normal write can replace a prior report or follow a dangling symlink.
         self.write_fixture()

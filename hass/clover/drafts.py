@@ -11,6 +11,7 @@ be the one the draft was made from (`is_stale`), and an undo refuses to overwrit
 """
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation, localcontext
@@ -95,12 +96,17 @@ def _per(item):
     return f" per {item.unit_name}" if item.price_type == "PER_UNIT" and item.unit_name else " each"
 
 
+_PLAIN_COUNT = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)", re.ASCII)
+
+
 def _qty(value, item, config):
     """A typed count -> Decimal, or DraftRefused. Whole numbers, except weighed (PER_UNIT) items, which allow three decimals."""
     try:
         q = value if isinstance(value, Decimal) else Decimal(str(value))
     except InvalidOperation:
         raise DraftRefused("I could not read that as a count. Send a number like 12.") from None
+    if isinstance(value, str) and q.is_finite() and not _PLAIN_COUNT.fullmatch(value.strip()):   # '1_0', '1e1', '1e100', '-1e1', Arabic-Indic digits: Decimal reads them, a count must not; read the text BEFORE any bound
+        raise DraftRefused("I could not read that as a count. Send a number like 12.")
     if not q.is_finite() or q < 0:
         raise DraftRefused("A count cannot be less than 0.")
     if q > config.max_stock:
@@ -110,6 +116,8 @@ def _qty(value, item, config):
         except InvalidOperation:  # too large to display: refuse without echoing it
             shown = "That count "
         raise DraftRefused(f"{shown}looks too high for one item. Check the number and send it again.")
+    if q == 0:
+        q = Decimal(0)   # '-0' is 0: lines, journal and undo all say 0
     if item.price_type != "PER_UNIT" and q != q.to_integral():
         raise DraftRefused(f"{item.name} is counted in whole items, so {format_quantity(q)} is not a count I can set.")
     if q != q.quantize(Decimal("0.001")):
@@ -117,10 +125,14 @@ def _qty(value, item, config):
     return q
 
 
-def _site_op(site_product, after):
-    """The one site availability change that goes with a count, or None. The site never shows a count: only the word Sold out or Available."""
+def _site_op(site_product, after, config):
+    """The one site availability change that goes with a count, or None. The site never shows a count: only the word Sold out, Limited or Available.
+    In 'limited' mode the word is exactly the one the stock sync publishes (hass.stock_site word()), including for a product that has no word yet."""
     if site_product is None or site_product.status != "active":
         return None
+    if config.site_stock_words == "limited":
+        word = "no" if after <= 0 else "limited" if after <= config.low_stock_threshold else "yes"
+        return None if site_product.availability == word else word   # a product with no word gets the sync's word too (limited or yes), not nothing
     if after == 0 and site_product.availability != "no":
         return "no"
     if after > 0 and site_product.availability == "no":
@@ -241,7 +253,7 @@ def _stock_draft(item, after, config, *, headline, extra, site_product, undo_of=
     before = item.stock
     if before == after:
         raise DraftRefused(f"{item.name} already shows {format_quantity(after)}. Nothing to change.")
-    word = site_word if undo_of else _site_op(site_product, after)    # an undo restores the journalled word; it never recomputes one
+    word = site_word if undo_of else _site_op(site_product, after, config)    # an undo restores the journalled word; it never recomputes one
     lines = [headline, f"  Count: {format_quantity(before) if before is not None else 'not counted'} -> {format_quantity(after)}"] + extra
     warnings = []
     if before is None:

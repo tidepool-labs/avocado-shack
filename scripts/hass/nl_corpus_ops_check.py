@@ -72,8 +72,7 @@ def main(argv=None):
             try:
                 problems, missing = check_args(op, call["args"], content.makers, None)
             except TypeError:
-                # The current image validator needs a site directory even for
-                # a well-formed image path. An uncheckable call is a finding.
+                # Defensive: a validator that cannot check a call is a finding.
                 reasons["arg-problem"] = None
             else:
                 missing_required += bool(missing)

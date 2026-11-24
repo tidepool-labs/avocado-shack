@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 
-from hass import photo_polish
+from hass import photo_polish, transcript
 from hass.npp.receipt import Artifacts, confirmation, instant, read_artifact
 from hass.skills import openreq
 
@@ -154,9 +154,11 @@ class Jobs:
         self.db.execute("INSERT INTO npp_turns VALUES (?,?,?,?,?,NULL,?,?)",
                         (msg.provider_id, job, kind, accepted.isoformat(), segment, refs, msg.received_at))
 
-    def reply(self, job, text, pid, attachments=()):
+    def reply(self, job, text, pid, attachments=(), link=None):
+        # HRM-21: the transcript row names this reply's card (`<job>-<n>`) or else its listing (`<job>`).
         reply = self.one("SELECT reply_clock FROM npp_turns WHERE provider_id=?", pid)
-        row = self.c.outbox.add(job["chat"], text, attachments, reply[0], ids_ok=bool(attachments))
+        with transcript.linked(self.c.outbox, link or job["job_id"]):
+            row = self.c.outbox.add(job["chat"], text, attachments, reply[0], ids_ok=bool(attachments))
         self.db.execute("UPDATE npp_turns SET reply_outbox_id=? WHERE provider_id=?", (row, pid))
         self.dirty.add(job["job_id"])
         return row
@@ -313,7 +315,7 @@ class Jobs:
                 text = self.replies["prompts"]["ready"].format(code=jid, n=version["n"])
                 if result.note and len(result.note) + 2 <= self.replies["caps"]["bracket_max_chars"]:
                     text += f" ({result.note})"
-                row = self.reply(job, text, pid, [str(card_path)])
+                row = self.reply(job, text, pid, [str(card_path)], link=f"{jid}-{version['n']}")
                 self.db.execute("UPDATE npp_versions SET image_variant=?,image_path=?,image_sha256=?,change_id=?,draft_hash=?,base=?,"
                                 "card_png_sha=?,outbox_id=?,queued_at=?,state='queued' WHERE job_id=? AND n=?",
                                 (*picture, draft["change_id"], draft["draft_hash"], draft["base"], card_sha, row, now.isoformat(), jid, version["n"]))

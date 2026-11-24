@@ -20,7 +20,7 @@ class Parser(argparse.ArgumentParser):
         self.exit(2, f"Invalid arguments; see --help.\n{LIMIT}\n")
 
 
-def sha256(path):
+def sha256_and_identity(path):
     # Open each component relative to its already-open parent. No component
     # may be a symlink, even if it points to a file with the expected bytes.
     parts = path.parts
@@ -35,12 +35,13 @@ def sha256(path):
             parent = child
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         with os.fdopen(os.open(parts[-1], flags, dir_fd=parent), "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
                 raise ValueError
             digest = hashlib.sha256()
             for chunk in iter(lambda: stream.read(65536), b""):
                 digest.update(chunk)
-            return digest.hexdigest()
+            return digest.hexdigest(), (opened.st_dev, opened.st_ino)
     finally:
         os.close(parent)
 
@@ -70,15 +71,21 @@ def main():
         print(f"FAIL {args.command}: expected a 64-digit hexadecimal SHA-256 digest.\n{LIMIT}",
               file=sys.stderr)
         return 2
+    backup_identity = None
     for role, path in inputs:
         try:
-            actual = sha256(path)
+            actual, identity = sha256_and_identity(path)
         except (OSError, ValueError):
             print(f"FAIL {args.command}: cannot read {role} as a regular file without symlinks.\n{LIMIT}",
                   file=sys.stderr)
             return 1
         if actual != expected.lower():
             print(f"FAIL {args.command}: {role} digest mismatch.\n{LIMIT}", file=sys.stderr)
+            return 1
+        if role == "backup":
+            backup_identity = identity
+        elif role == "restored" and identity == backup_identity:
+            print(f"FAIL post: backup and restored must be distinct files.\n{LIMIT}", file=sys.stderr)
             return 1
     print(f"PASS {args.command}: {success}.\n{LIMIT}")
     return 0

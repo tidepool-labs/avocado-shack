@@ -21,6 +21,7 @@ TODAY = "2026-01-15"
 PRODUCT = "Fixture Canary Pear"
 STORE = "Fixture Canary Market"
 ADDRESS = "Example Orchard Lane"
+ITEM_LINK = "https://theavocadoman.com/?item=invented-pilot-9#market"
 
 
 class RenderedAnchorCheckTests(unittest.TestCase):
@@ -232,6 +233,53 @@ class RenderedAnchorCheckTests(unittest.TestCase):
         """)
         lines = self.assert_result(self.invoke(templates=self.templates))
         self.assertEqual(lines, [*before[:-1], "note offpage 3", before[-1]])
+
+    def test_saved_item_link_checks_rendered_index_not_catalog_membership(self):
+        # A saved reply link needn't occur in any href or name a product in this copy.
+        result = self.cli("--content", self.content, "--today", TODAY, "--item-link", ITEM_LINK)
+        self.assertEqual(result.returncode, 0)
+        self.assert_result(result)
+        self.assertNotIn("invented-pilot-9", result.stdout)
+
+    def test_saved_item_link_requires_one_market_id_in_index(self):
+        # Looking across pages would accept the wrong target; a set hides duplicates.
+        self.copy_templates()
+        self.add_markup("hike/index.html", '<div id="market"></div>')
+        market = self.templates / "home/market.html"
+        original = market.read_text(encoding="utf-8")
+        for markup in (original.replace('id="market"', 'id="not-market"'), original * 2):
+            market.write_text(markup, encoding="utf-8")
+            result = self.cli("--content", self.content, "--templates", self.templates,
+                              "--today", TODAY, "--item-link", ITEM_LINK)
+            self.assertEqual(self.assert_result(result, "item-link-market-anchor"),
+                             ["FAIL item-link-market-anchor", "FAIL rendered_anchor_check"])
+
+    def test_saved_item_link_refuses_alternate_url_spellings_without_echo(self):
+        # Generic URL parsing or fragment-only checks admit targets the reply cannot emit.
+        args = ("--content", self.content, "--today", TODAY)
+        for label, link in {
+            "wrong target": ITEM_LINK.replace("#market", "#newsletter"),
+            "missing fragment": ITEM_LINK.removesuffix("#market"),
+            "lookalike host": ITEM_LINK.replace(".com/", ".com.example.invalid/"),
+            "explicit port": ITEM_LINK.replace(".com/", ".com:443/"),
+            "different scheme": ITEM_LINK.replace("https:", "http:"),
+            "different path": ITEM_LINK.replace("/?", "/index.html?"),
+            "extra query": ITEM_LINK.replace("#market", "&extra=1#market"),
+            "encoded ID": ITEM_LINK.replace("invented-", "%69nvented-"),
+            "invalid ID": ITEM_LINK.replace("invented-", "Invented_"),
+            "too-long ID": ITEM_LINK.replace("invented-pilot-9", "a" * 65),
+            "empty ID": ITEM_LINK.replace("invented-pilot-9", ""),
+            "trailing whitespace": ITEM_LINK + "\n",
+            "local path": "index.html?item=invented-pilot-9#market",
+        }.items():
+            with self.subTest(case=label):
+                result = self.cli(*args, "--item-link", link)
+                self.assertEqual(self.assert_result(result, "item-link-invalid"),
+                                 ["FAIL item-link-invalid", "FAIL rendered_anchor_check"])
+        # The last value must not mask an earlier invalid operand.
+        result = self.cli(*args, "--item-link", "not-a-link", "--item-link", ITEM_LINK)
+        self.assertEqual(self.assert_result(result, "item-link-invalid"),
+                         ["FAIL item-link-invalid", "FAIL rendered_anchor_check"])
 
 
 if __name__ == "__main__":

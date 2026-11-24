@@ -26,8 +26,17 @@ def _reject_constant(_value):
     raise ValueError("not a JSON number")
 
 
+def _unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
 def _object(text):
-    value = json.loads(text, parse_constant=_reject_constant)
+    value = json.loads(text, parse_constant=_reject_constant, object_pairs_hook=_unique_object)
     if not isinstance(value, dict):
         raise ValueError("expected a JSON object")
     return value

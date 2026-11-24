@@ -13,6 +13,7 @@ The stub transport writes its picture where the Hermes runner would. Label readi
 ``NO_LABEL`` is a read that worked and found no words; None is a read that did not work.
 Needs Pillow; no network, no Hermes, no live service.
 """
+import hashlib
 import io
 import json
 import sys
@@ -432,12 +433,48 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(photo_polish.decision(bare.media, sha)["code"], "late")
 
     def test_a_settled_photo_is_not_sent_again(self):
+        from PIL import Image
+        from hass.ops import photos
+
         bare = Bare(self)
-        sha = bare.store(photo("jar-white-sheet"))
+        data = photo("jar-white-sheet")
+        sha = bare.store(data)
         stub = Stub(said={"ok": False, "code": "api"})
         photo_polish.run(bare.media, sha, transport=stub)
         self.assertIsNone(photo_polish.start(bare.media, sha, transport=stub))
         self.assertEqual(stub.calls, 1)
+
+        house = photos.house_picture(bare_web(bare, sha))["jpeg"]
+        out = io.BytesIO()
+        with Image.open(io.BytesIO(house)) as image:
+            image.save(out, "JPEG", quality=84)
+        jpeg = out.getvalue()
+        self.assertNotEqual(jpeg, house)
+        saved = {"use": "polished", "jpeg_sha256": hashlib.sha256(jpeg).hexdigest()}
+        single = json.dumps(saved).encode("utf-8")
+        # Last-key-wins would select the polished bytes despite the conflicting house decision.
+        for raw, decision, picture in (
+            (single, saved, jpeg),
+            (b'{"use":"house",' + single[1:], {"use": "house", "code": "bad-record"}, house),
+        ):
+            with self.subTest(decision=decision):
+                bare = Bare(self)
+                sha = bare.store(data)
+                folder = photo_polish._folder(bare.media, sha)
+                record = folder / f"{sha}.json"
+                media._write_new(record, raw)
+                media._write_new(folder / f"{sha}.jpg", jpeg)
+                before = record.stat()
+                transport = mock.Mock(side_effect=AssertionError("settled photo sent again"))
+                self.assertIsNone(photo_polish.start(bare.media, sha, transport=transport))
+                transport.assert_not_called()
+                target, installed = bare.install(sha)
+                self.assertEqual(target, f"assets/products/photo-{sha[:16]}.jpg")
+                self.assertTrue(installed == picture, "installer selected different JPEG bytes")
+                self.assertEqual(photo_polish.decision(bare.media, sha), decision)
+                self.assertEqual(record.read_bytes(), raw)
+                after = record.stat()
+                self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
 
     def test_switch_off_or_without_house_render_installs_as_before(self):
         data = photo("jar-white-sheet")

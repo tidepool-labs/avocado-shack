@@ -109,7 +109,6 @@ class NppMediaUsageTests(unittest.TestCase):
         (folder / "staging").mkdir()
         self.folder(FOLDER_ONLY)
         (self.npp / "unrelated-file").touch()
-        (self.npp / "faac0005").symlink_to(folder, target_is_directory=True)
         self.create_store(JOB, ROW_ONLY, "faac0004")
         counts = ["jobs 2", "receipts 1", "cards 1", f"bytes {len(receipt) + len(PNG)}",
                   "note no-receipt 1", "note other-names 2"]
@@ -141,6 +140,28 @@ class NppMediaUsageTests(unittest.TestCase):
         plain_file = self.root / "plain-file"
         plain_file.touch()
         self.assert_finding(self.invoke("--media", plain_file), "unsafe-npp-dir")
+
+        # A valid job name must denote a real directory: silently skipping a file or
+        # symlink would give the same passing preflight as the healthy control.
+        self.npp.unlink()
+        self.npp.mkdir()
+        self.card(self.folder())
+        (self.npp / "unrelated-file").touch()
+        counts = ["jobs 1", "receipts 0", "cards 1", f"bytes {len(PNG)}",
+                  "note no-receipt 1", "note other-names 1"]
+        self.assertEqual(self.assert_report(self.report(), 0, PASS),
+                         counts + ["deletes 0", PASS])
+
+        not_dir = self.npp / FOLDER_ONLY
+        not_dir.write_bytes(b"synthetic file")
+        link = self.npp / ROW_ONLY
+        (self.state / "receipt.json").write_bytes(b"{}")
+        link.symlink_to(self.state, target_is_directory=True)
+        self.assertEqual(self.assert_finding(self.report(), "unsafe-job-dir 2"),
+                         counts + ["FAIL unsafe-job-dir 2", "deletes 0", FAIL])
+        self.assertEqual(not_dir.read_bytes(), b"synthetic file")
+        self.assertEqual(link.readlink(), self.state)
+        self.assertEqual((self.state / "receipt.json").read_bytes(), b"{}")
 
     def test_c2_3_bad_artifact(self):
         # Named receipts count even when invalid; only regular files contribute bytes.

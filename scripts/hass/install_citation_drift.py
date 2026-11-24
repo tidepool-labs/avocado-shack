@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+from typing import NoReturn
 
 
 SCOPE = "Only file and range existence were checked; semantic equivalence was not checked."
@@ -51,8 +53,21 @@ def _check(repo: Path, commit: str, path: str, end: int) -> str | None:
     return "missing from the selected commit"
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        # argparse messages can echo a pasted operand (unrecognized arguments, ignored
+        # explicit argument, ambiguous option). Never print them; use fixed text only.
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: invalid command-line arguments; "
+                     "operands are not echoed. Put citation references after `--`.\n")
+
+    def fail(self, message: str) -> NoReturn:
+        # For this script's own fixed messages, which never contain user input.
+        super().error(message)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, epilog=SCOPE)
+    parser = _Parser(description=__doc__, epilog=SCOPE)
     parser.add_argument("--repo", required=True, type=Path, help="local Git checkout")
     parser.add_argument("--commit", required=True, help="full commit object ID")
     parser.add_argument("references", nargs="+", metavar="path:start-end",
@@ -63,16 +78,16 @@ def main(argv: list[str] | None = None) -> int:
         oid_lengths = {b"sha1": 40, b"sha256": 64}
         length = oid_lengths.get(_git(args.repo, "rev-parse", "--show-object-format").strip())
     except (OSError, subprocess.CalledProcessError):
-        parser.error("cannot open the local Git checkout")
+        parser.fail("cannot open the local Git checkout")
     if length is None or not re.fullmatch(r"[0-9a-fA-F]+", args.commit) or len(args.commit) != length:
-        parser.error("--commit must be a full commit object ID")
+        parser.fail("--commit must be a full commit object ID")
     commit = args.commit.lower()
     try:
         is_commit = _git(args.repo, "cat-file", "-t", commit).strip() == b"commit"
     except (OSError, subprocess.CalledProcessError):
         is_commit = False
     if not is_commit:
-        parser.error("--commit is not an available local commit object")
+        parser.fail("--commit is not an available local commit object")
 
     print(f"Selected commit: {commit[:12]}")
     failed = False

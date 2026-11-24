@@ -92,6 +92,52 @@ class HowManyTests(unittest.TestCase):
                 self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+2000000")))
 
 
+def mugs(n, minutes_old=5):
+    """n synthetic till items sharing one name, SKUs S0.., counts 0.. (made up)."""
+    mug = [item(id=f"M{k}", name="Blue mug", sku=f"S{k}", stock=Decimal(k)) for k in range(n)]
+    return reads.Snapshot(tuple(mug), NOW - timedelta(minutes=minutes_old))
+
+
+def shown(n):
+    return "; ".join(f"Blue mug (SKU S{k}): {k} in the till" for k in range(n)) + "."
+
+
+class SameNameListTests(unittest.TestCase):
+    """Contract: a same-name answer never hides that it stopped at five items (Mike must not act on a list he thinks is complete)."""
+    ASKS = (("how_many", lambda s, **kw: reads.how_many("blue mug", s, NOW, **kw)),
+            ("in_stock", lambda s, **kw: reads.in_stock("blue mug", s, NOW, **kw)))
+
+    def test_eight_same_name_items_say_three_more(self):
+        # Bug caught: the sixth to eighth items vanish without a word.
+        for name, ask in self.ASKS:
+            with self.subTest(ask=name):
+                self.assertEqual(ask(mugs(8)), "More than one item is called that: " + shown(5) + " And 3 more.")
+
+    def test_five_or_fewer_unchanged(self):
+        # Healthy control, exact strings (green before and after): no 'more' sentence up to the limit.
+        for n in (2, 5):
+            for name, ask in self.ASKS:
+                with self.subTest(n=n, ask=name):
+                    self.assertEqual(ask(mugs(n)), "More than one item is called that: " + shown(n))
+
+    def test_six_items_say_one_more(self):
+        # Bug caught: an off-by-one at the limit (six is the first count that must add the sentence).
+        for name, ask in self.ASKS:
+            with self.subTest(ask=name):
+                self.assertEqual(ask(mugs(6)), "More than one item is called that: " + shown(5) + " And 1 more.")
+
+    def test_stale_label_still_wraps_the_longer_answer(self):
+        # Bug caught: the new sentence is added outside the freshness wrapping, or changes where the label goes.
+        body = "More than one item is called that: " + shown(5) + " And 3 more."
+        for name, ask in self.ASKS:
+            with self.subTest(ask=name):
+                self.assertEqual(ask(mugs(8, 90)), body + " (till count as of 2:00 pm)")
+                gone = ask(mugs(8, 90), reachable=False)
+                self.assertTrue(gone.startswith("I can't reach the till right now."))
+                self.assertTrue(gone.endswith(body))
+                self.assertNotIn("more", ask(mugs(8, 30 * 60)))
+
+
 class LowStockTests(unittest.TestCase):
     def test_sold_out_first_then_low_and_counts_untracked(self):
         out = [item(id="S1", name="Bread", stock=Decimal(0)), item(id="S2", name="Cheese", stock=Decimal("-1"))]

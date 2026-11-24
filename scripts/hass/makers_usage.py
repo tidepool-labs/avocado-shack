@@ -50,9 +50,9 @@ def report(content):
                     unlinked.append(product_id)
             continue
         linked += is_active
-        if not isinstance(key, str) or key not in content.makers:
+        if not isinstance(key, str) or key not in makers:
             unknown += 1
-        elif key in makers:
+        else:
             used.add(key)
             if is_active:
                 active_on_hidden += key in hidden

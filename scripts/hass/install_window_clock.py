@@ -110,10 +110,20 @@ def report(events, now, findings):
         print(f"{step} {minutes:02d}:{seconds:02d} {status}")
 
 
+def require_complete(events, findings):
+    for step in STEPS:
+        if "start" not in events[step]:
+            findings.append(f"missing {step}")
+        elif "end" not in events[step]:
+            findings.append(f"unclosed {step}")
+
+
 def main(argv=None):
     parser = ArgumentParser(prog="install_window_clock.py", description=__doc__)
     parser.add_argument("--log", required=True, type=Path, metavar="FILE")
     parser.add_argument("--now", required=True, metavar="ISO", help="UTC timestamp ending in Z")
+    parser.add_argument("--require-complete", action="store_true",
+                        help="also FAIL any of switch, listing-1..3 with no start or no end")
     args = parser.parse_args(argv)
     findings = []
     try:
@@ -121,7 +131,10 @@ def main(argv=None):
     except ValueError:
         findings.append("bad-time")
     else:
-        report(read_events(args.log, findings), now, findings)
+        events = read_events(args.log, findings)
+        report(events, now, findings)
+        if args.require_complete:
+            require_complete(events, findings)
     for finding in findings:
         print(f"FAIL {finding}")
     print("FAIL install_window_clock" if findings else "PASS install_window_clock")

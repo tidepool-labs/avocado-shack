@@ -126,6 +126,28 @@ class ContentNumberScanTests(unittest.TestCase):
                            "private fixture-a displayBrand", "private fixture-z displayBrand",
                            "private fixture-z imageAlt", "FAIL private-number 3", FAIL)
 
+    def test_c2_6_no_active_products(self):
+        # Protects: a screen that examined nothing never reads as "no private numbers". A wrong or
+        # truncated copy (empty list, only hidden/held/malformed items, with or without a blank-lines
+        # private file) would otherwise print a zero-count PASS. Reports only the fixed reason.
+        canary = "Canary hidden listing 4242"
+        self.private.write_text("\n  \n\n", encoding="utf-8")
+        for label, items in (("empty", ()),
+                             ("no-active", (product("fixture-a", status="hidden", name=canary),
+                                            product("fixture-b", status="held"), [canary], None))):
+            for private in ((), ("--private-file", self.private)):
+                with self.subTest(items=label, private=bool(private)):
+                    self.write_content(*items)
+                    result = self.scan(*private)
+                    self.assert_report(result, 1, "FAIL no-active-products", FAIL)
+                    self.assertNotIn(canary, result.stdout)
+
+    def test_c2_7_blank_private_file_healthy_control(self):
+        # Control: the new refusal keys on active products, not on a blank-lines-only amounts file.
+        self.private.write_text("\n  \n\n", encoding="utf-8")
+        self.write_content(product("fixture-a", name="Figs"))
+        self.assert_report(self.scan("--private-file", self.private), 0, "active 1", "fields 1", PASS)
+
     def test_c3_usage_exit_2(self):
         # Usage errors must not become report findings or exit 1.
         for args in ((), ("--content", self.content, "--unexpected", self.private),

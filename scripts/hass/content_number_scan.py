@@ -71,6 +71,10 @@ def report(products: list[dict], private: set[Decimal]) -> int:
             else:
                 findings[reason].append((product_id, field))
 
+    if not active:
+        # Nothing was examined, so a zero-count PASS would read as "no private numbers".
+        return fail("no-active-products")
+
     print(f"active {active}")
     print(f"fields {fields}")
     if malformed:

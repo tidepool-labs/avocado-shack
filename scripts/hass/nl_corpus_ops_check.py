@@ -69,13 +69,19 @@ def main(argv=None):
             if op is None:
                 reasons["unknown-op"] = None
                 continue
-            # No site directory is supplied: offline replay validates image
-            # syntax only (hass.ops._image_file_problem), so a well-formed
-            # image path passes and a malformed one is a problem.
-            problems, missing = check_args(op, call["args"], content.makers, None)
-            missing_required += bool(missing)
-            if problems:
+            try:
+                problems, missing = check_args(op, call["args"], content.makers, None)
+            except TypeError:
+                # The current image validator needs a site directory even for
+                # a well-formed image path. An uncheckable call is a finding.
                 reasons["arg-problem"] = None
+            else:
+                missing_required += bool(missing)
+                # Offline replay: without a site root check_args validates image
+                # path syntax only (hass.ops _image_file_problem), so a well-formed
+                # image path passes and a malformed one is still a problem.
+                if problems:
+                    reasons["arg-problem"] = None
         findings.extend(reason + suffix for reason in reasons)
 
     print(f"cases {len(corpus)}")

@@ -46,6 +46,14 @@ def reject_constant(_token):
     raise ValueError("non-JSON number")
 
 
+def reject_repeated_key(pairs):
+    # json.loads would keep only the last value of a repeated key; the message names no content.
+    keys = [name for name, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("repeated key")
+    return dict(pairs)
+
+
 def read_products(repo, sha):
     spec = f"{sha}:{CATALOG}"
     result = git(repo, "cat-file", "blob", spec)
@@ -54,7 +62,8 @@ def read_products(repo, sha):
         return None, "bad-content" if exists else "no-content"
 
     try:
-        document = json.loads(result.stdout, parse_constant=reject_constant)
+        document = json.loads(result.stdout, parse_constant=reject_constant,
+                              object_pairs_hook=reject_repeated_key)
         rows = document.get("products") if isinstance(document, dict) else None
         if not isinstance(rows, list):
             return None, "bad-content"

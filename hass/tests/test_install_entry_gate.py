@@ -102,14 +102,22 @@ class InstallEntryGateTests(unittest.TestCase):
         target = self.commit(f"Merge pull request #73103x from a/{PRIVATE}", single, branch)
         self.assertEqual(self.invoke(target, {"D": {"pr": 73103, "paths": [TREE_PATH]}}),
                          (1, "D: PR #73103; no merge found; path 1: present\n", ""))
-        self.assertEqual(self.invoke(self.base, {"D": {"pr": 73103, "paths": []}}),
-                         (1, "D: PR #73103; no merge found\n", ""))
+        self.assertEqual(self.invoke(self.base, {"D": {"pr": 73103, "paths": [TREE_PATH]}}),
+                         (1, "D: PR #73103; no merge found; path 1: present\n", ""))
 
     def test_duplicate_merges_do_not_pick_a_winner(self):
         # A first/last match selector silently produces an ambiguous gate SHA.
         target = self.merge(73104, self.merge(73104))
-        self.assertEqual(self.invoke(target, {"E": {"pr": 73104, "paths": []}}),
-                         (1, "E: PR #73104; duplicate merges found\n", ""))
+        self.assertEqual(self.invoke(target, {"E": {"pr": 73104, "paths": [TREE_PATH]}}),
+                         (1, "E: PR #73104; duplicate merges found; path 1: present\n", ""))
+
+    def test_known_merge_without_paths_refuses(self):
+        # all([]) would let a unique merge pass without proving any retained path.
+        target = self.merge(73108)
+        self.assertEqual(self.invoke(target, {"B": {"pr": 73108, "paths": []}}, cli=True),
+                         (2, "", "error: malformed units JSON: known pr requires at least one path\n"))
+        self.assertEqual(self.invoke(target, {"B": {"pr": None, "paths": []}}),
+                         (1, "B: PR null; FILL-IN open\n", ""))
 
     def test_missing_literal_path_and_open_pr_both_fail(self):
         # Worktree lookup or Git pathspec expansion accepts a path absent from the pinned tree.
@@ -121,9 +129,9 @@ class InstallEntryGateTests(unittest.TestCase):
                              "path 3: present\n", ""))
         # A skipped open PR must not make the kit look ready, even with present paths.
         self.assertEqual(self.invoke(target, {"G": {"pr": None, "paths": [TREE_PATH]},
-                                              "H": {"pr": 73105, "paths": []}}),
+                                              "H": {"pr": 73105, "paths": [TREE_PATH]}}),
                          (1, f"G: PR null; FILL-IN open; path 1: present\n"
-                             f"H: PR #73105; {target}; ancestor: yes\n", ""))
+                             f"H: PR #73105; {target}; ancestor: yes; path 1: present\n", ""))
 
     def test_cli_errors_redact_argument_values_and_input_filenames(self):
         # Argparse and file-open diagnostics ordinarily echo untrusted values.
@@ -145,7 +153,7 @@ class InstallEntryGateTests(unittest.TestCase):
         tag = self.git("rev-parse", "fixture-tag")
         for target in ("0" * 40, self.tree, blob, tag, f"{self.base}^{{commit}}", PRIVATE):
             with self.subTest(target=target):
-                code, out, err = self.invoke(target, {"H": {"pr": 73106, "paths": []}})
+                code, out, err = self.invoke(target, {"H": {"pr": 73106, "paths": [TREE_PATH]}})
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn("unknown target or target is not a commit", err)
 
@@ -172,7 +180,7 @@ class InstallEntryGateTests(unittest.TestCase):
 
     def test_checkout_failures_are_named_and_redacted(self):
         # Raw Git diagnostics expose the repo name; a shallow history cannot establish uniqueness.
-        units = {"B": {"pr": 73107, "paths": []}}
+        units = {"B": {"pr": 73107, "paths": [TREE_PATH]}}
         code, out, err = self.invoke(self.base, units, repo=self.repo / PRIVATE)
         self.assertEqual((code, out), (2, ""))
         self.assertIn("--repo must name a local Git checkout", err)

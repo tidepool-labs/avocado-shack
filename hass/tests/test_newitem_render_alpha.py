@@ -89,6 +89,8 @@ class AlphaRender(unittest.TestCase):
         self.assertLessEqual(out["report"]["exposure_gain"], 1.25)
 
     def test_opaque_input_metadata_free_and_deterministic(self):
+        from PIL import Image
+
         buf = io.BytesIO()
         Image.new("RGB", (400, 500), (240, 238, 230)).save(buf, "PNG")
         a, b = nr.render(buf.getvalue()), nr.render(buf.getvalue())
@@ -97,6 +99,21 @@ class AlphaRender(unittest.TestCase):
         self.assertEqual((im.mode, im.size), ("RGB", (800, 800)))
         self.assertFalse(im.getexif())
         self.assertNotIn("icc_profile", im.info)
+
+        # Only exact opacity may take the RGB path; a near-opaque cutoff
+        # would send the 254 case to background isolation instead.
+        for coverage in (255, 254, 200):
+            with self.subTest(coverage=coverage):
+                rgba = Image.new("RGBA", (400, 500), (240, 238, 230, 255 if coverage == 200 else coverage))
+                if coverage == 200:
+                    rgba.putpixel((200, 250), (240, 238, 230, 200))
+                buf = io.BytesIO()
+                rgba.save(buf, "PNG")
+                out = nr.render(buf.getvalue())
+                if coverage == 255:
+                    self.assertEqual(out, a)
+                else:
+                    self.assertEqual(out["report"].get("source"), "alpha channel")
 
 
 if __name__ == "__main__":

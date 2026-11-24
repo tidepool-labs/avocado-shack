@@ -80,6 +80,22 @@ class TranscriptInboundParityTests(unittest.TestCase):
         self.assert_result(self.invoke(), 0, "inbound-done 2", "matched 2",
                            "note transcript-only 1", "unparsed 3", PASS)
 
+        # A settled copy without the unique index must not turn duplicate rows
+        # into extra coverage; a different transcript-only ID remains just a note.
+        with closing(sqlite3.connect(self.inbox)) as db, db:
+            db.execute("UPDATE inbound SET state = 'history' WHERE provider_id = 'start'")
+        with closing(sqlite3.connect(self.transcript)) as db, db:
+            db.execute("DROP INDEX inbound_id")
+            db.execute("UPDATE events SET direction = 'out' WHERE provider_id = 'start'")
+        self.assert_unchanged_report(0, "inbound-done 1", "matched 1",
+                                     "note transcript-only 1", "unparsed 3", PASS)
+        with closing(sqlite3.connect(self.transcript)) as db, db:
+            db.execute("INSERT INTO events SELECT * FROM events "
+                       "WHERE provider_id = 'middle' AND direction = 'in'")
+        self.assert_unchanged_report(1, "inbound-done 1", "matched 1",
+                                     "note transcript-only 1", "unparsed 3",
+                                     "FAIL transcript-surplus 1", FAIL)
+
     def test_c2_1_missing_db(self):
         # A normal read/write connect would create the absent databases.
         self.assert_result(self.invoke(), 1, "FAIL missing-db inbox.sqlite3",

@@ -159,6 +159,60 @@ class StockCase(unittest.TestCase):
         with self.queue().locked(): self.assertEqual(self.runq(), 'busy')
         self.assertEqual(self.path.read_bytes(), b'{'); self.assertFalse(self.live.calls)
 
+    def put(self, data): self.path.write_text(json.dumps(data, sort_keys=True))
+
+    def healthy(self):
+        # Contract: a private file that is whole loads. Bug it catches: the new checks refusing a real state.
+        data = json.loads(self.clean); pid = self.ids[0]
+        words = {pid: dict(till='T0', base='yes', target='no')}
+        data['sets']['stk-fixture'] = dict(hash=s.digest(words), words=words, approved_by=None, approved_at=None, state='open')
+        data['counts'][pid] = dict(till='T0', count='12.5')
+        data['inflight'] = dict(change_id='fixture-change', products={})
+        data['pending'][pid] = dict(target='no', base='yes', till='T0', crossing='c1', first=1.5, attempts=0, reason='', held=None, parked=None, new=False)
+        return data
+
+    def test_healthy_state_still_loads(self):
+        self.baseline(); self.clean = self.path.read_bytes(); data = self.healthy(); self.put(data)
+        self.assertEqual(self.queue().load(), data)
+        data['inflight'] = None; self.put(data); self.assertEqual(self.queue().load(), data)
+
+    def test_damaged_state_refused_with_fixed_value_error(self):
+        # Contract: a damaged private file is refused with its own fixed ValueError, never a crash or a value.
+        # Bug it catches: KeyError/AttributeError/TypeError/InvalidOperation tracebacks, or a half-read file accepted.
+        self.baseline(); self.clean = self.path.read_bytes(); pid = self.ids[0]
+        def setfield(key, value):
+            def edit(d):
+                st = self.healthy()['sets']['stk-fixture']
+                if value is KeyError: del st[key]
+                else: st[key] = value
+                d['sets']['stk-fixture'] = st
+            return edit
+        def hold(key, value): return lambda d: d.update({key: value})
+        def entry(**c):
+            def edit(d):
+                d['counts'][pid] = dict(till='T0', count='1'); d['counts'][pid].update(c)
+                for k in [k for k, v in c.items() if v is KeyError]: del d['counts'][pid][k]
+            return edit
+        def first(value): return lambda d: d['pending'].__setitem__(pid, dict(self.healthy()['pending'][pid], first=value))
+        cases = [('stock set', 'no hash', setfield('hash', KeyError)), ('stock set', 'hash null', setfield('hash', None)),
+                 ('stock set', 'hash number', setfield('hash', 7)), ('stock set', 'wrong hash', setfield('hash', '0' * 64)),
+                 ('stock inflight', 'text', hold('inflight', 'LEAK')), ('stock inflight', 'list', hold('inflight', [])),
+                 ('stock inflight', 'empty', hold('inflight', {})), ('stock inflight', 'no products', hold('inflight', dict(change_id='LEAK'))),
+                 ('stock inflight', 'no change', hold('inflight', dict(products={}))),
+                 ('stock count', 'text', lambda d: d['counts'].__setitem__(pid, 'LEAK')), ('stock count', 'null', lambda d: d['counts'].__setitem__(pid, None)),
+                 ('stock count', 'list', lambda d: d['counts'].__setitem__(pid, [])), ('stock count', 'no count', entry(count=KeyError)),
+                 ('stock count', 'no till', entry(till=KeyError)), ('stock count', 'till number', entry(till=5)),
+                 ('stock count', 'count null', entry(count=None)), ('stock count', 'count number', entry(count=3)),
+                 ('stock count', 'count text', entry(count='LEAK')), ('stock count', 'count nan', entry(count='NaN')),
+                 ('stock count', 'count infinite', entry(count='-Infinity')),
+                 ('stock pending', 'first true', first(True)), ('stock pending', 'first false', first(False))]
+        for message, name, edit in cases:
+            with self.subTest(f'{message}: {name}'):
+                data = self.healthy(); edit(data); self.put(data); before = self.path.read_bytes()
+                with self.assertRaises(ValueError) as caught: self.runq()
+                self.assertEqual(str(caught.exception), message)
+                self.assertNotIn('LEAK', str(caught.exception)); self.assertEqual(self.path.read_bytes(), before)
+
     def test_pause_is_not_bypassed(self):
         self.baseline(); self.pull(**{self.ids[0]: 0})
         with sqlite3.connect(self.repo.state / 'conversation.sqlite3') as db:

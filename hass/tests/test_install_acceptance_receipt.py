@@ -80,6 +80,20 @@ class AcceptanceReceiptTests(unittest.TestCase):
                             "status": "consistent (capture not authenticated)", **expected,
                         })
 
+    def test_unknown_producer_id_is_refused(self):
+        # Protects: a receipt can only cite cases the producer can emit (it exits 2
+        # on H99). Believable bug: shape-only H<digits> validation passes H99.
+        unknown_id = next(f"H{i:02d}" for i in range(100) if f"H{i:02d}" not in ALL_IDS)
+        selected = {**PASS_ROW, "id": ALL_IDS[-1]}  # genuine selected run, no full roster
+        summary = {**SUMMARY, "ids": 1, "not covered": 0}
+        self.assertEqual(self.validate(capture(rows=(selected,), summary=summary)),
+                         {"summary": summary, "not_covered_ids": []})
+        bogus = capture(rows=({**PASS_ROW, "id": unknown_id},), summary=summary)
+        with self.assertRaisesRegex(receipt.ReceiptError, "outside the producer"):
+            self.validate(bogus)
+        with self.assertRaisesRegex(receipt.ReceiptError, "full producer H ID roster"):
+            receipt.validate(bogus, metadata(bogus), SHA, require_full_roster=True)
+
     def test_checks_exact_saved_bytes_and_full_runtime_sha(self):
         # Parsed JSON equality and a common SHA prefix are not sufficient bindings.
         saved = capture()

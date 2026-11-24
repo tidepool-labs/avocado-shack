@@ -198,6 +198,23 @@ class ErrorTests(NoNetwork):
         client, transport, _ = make({f"{BASE}/categories?limit=1000&offset=0": [(503, {}, {}), (200, {}, fixture("categories.json"))]})
         self.assertEqual(len(client.list_categories()), 4)
 
+    def test_507_is_retried_then_reported(self):
+        # Protects: a read answered 507 follows the documented 5xx schedule (1, 2, 4), and a write is still sent once.
+        # Catches: 507 missing from RETRY_STATUS, so one recoverable 507 aborts a read with CloverError and no retry.
+        client, transport, clock = make({f"{BASE}/categories?limit=1000&offset=0": [(507, {}, {}), (200, {}, fixture("categories.json"))]})
+        self.assertEqual(client.list_categories()[0]["name"], "Pantry")
+        self.assertEqual((len(transport.seen), clock.sleeps), (2, [1]))
+        exc, transport, clock = self.run_status(507)
+        self.assertIsInstance(exc, cl.CloverUnavailable)
+        self.assertEqual((exc.status, len(transport.seen), clock.sleeps), (507, 4, [1, 2, 4]))
+        for method, path in (("POST", "/items"), ("PUT", "/item_stocks/ABC123")):
+            with self.subTest(method=method):
+                sent = []
+                writer = cl.CloverWriteClient(MID, Token(FAKE_TOKEN), lambda r: sent.append(r) or cl.Response(507), min_interval=0, sleep=clock.sleep)
+                with self.assertRaises(cl.CloverUnavailable):
+                    writer.write(method, path, {})
+                self.assertEqual(len(sent), 1)
+
     def test_a_dead_transport_is_reported_with_a_fixed_phrase(self):
         client, _, _ = make({})       # no recorded answer: the replay layer raises LookupError
         with self.assertRaises(cl.CloverUnavailable) as ctx:

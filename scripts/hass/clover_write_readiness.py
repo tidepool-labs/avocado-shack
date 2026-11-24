@@ -20,6 +20,8 @@ from hass.host import HostConfigError, _private_json  # noqa: E402
 
 
 CHECKS = ("read_only_day", "write_token_file", "settings", "daily_cap", "testitem")
+INVENTORY = "testitem_inventory"
+INPUT_ERRORS = (cache.CacheUnsafe, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RecursionError)
 GAP = timedelta(minutes=30)
 
 
@@ -86,34 +88,59 @@ def _write_token(config, path):
 
 def _testitem(state, config):
     journal = Journal(state, config)  # locating it does not open or lock it
-    created, hidden, stocked = set(), set(), set()
+    hidden, stocked = set(), set()
+    changes = {}
     with _database(journal.path) as db:
         row = db.execute("SELECT v FROM meta WHERE k = 'identity'").fetchone()
         if row != (journal.identity,):
-            return "identity"
+            return "identity", "identity"
         for draft, result in db.execute("SELECT draft, result FROM changes WHERE status = 'applied' ORDER BY rowid"):
             entry = json.loads(draft)
             kind = entry["kind"]
             if kind == "create_item":
                 new_id = json.loads(result)["result_item_id"]
                 if isinstance(new_id, str) and new_id:
-                    created.add(new_id)
-            elif kind in ("set_hidden", "set_stock") and entry["item_id"] in created:
+                    changes[new_id] = [entry]
+            elif kind in ("set_hidden", "set_stock") and entry["item_id"] in changes:
                 if kind == "set_stock":
                     stocked.add(entry["item_id"])
                 elif entry["after"]["hidden"] is True:
                     hidden.add(entry["item_id"])
-    if not hidden:
-        return "missing_proof"
-    return "ok" if hidden & stocked else "warn_missing_stock"
+            if kind != "create_item" and isinstance(entry.get("item_id"), str) and entry["item_id"] in changes:
+                changes[entry["item_id"]].append(entry)
+    legacy = ("ok" if hidden & stocked else "warn_missing_stock") if hidden else "missing_proof"
+    try:
+        return legacy, _testitem_inventory(changes)
+    except INPUT_ERRORS:
+        return legacy, "unreadable"
+
+
+def _testitem_inventory(changes):
+    if not changes:
+        return "no-create"
+    filed = [entries for entries in changes.values() if any(
+        req["method"] == "POST" and req["path"] == "/category_items"
+        for req in entries[0].get("requests", ())
+    )]
+    if not filed:
+        return "no-category"
+    counted = [entries for entries in filed if any(e["kind"] == "set_stock" for e in entries)]
+    if not counted:
+        return "no-count"
+    for entries in counted:
+        last = entries[-1]
+        if last["kind"] == "set_hidden" and last["after"]["hidden"] is True:
+            return "ok"
+    return "not-hidden"
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, type=Path)
     parser.add_argument("--now", metavar="ISO")
+    parser.add_argument("--for", dest="purpose", choices=("inventory",))
     args = parser.parse_args(argv)
-    checks: dict[str, str] = dict.fromkeys(CHECKS, "unreadable")
+    checks: dict[str, str] = dict.fromkeys((*CHECKS, INVENTORY), "unreadable")
     unreadable = False
     try:
         now = datetime.fromisoformat(args.now) if args.now is not None else datetime.now(timezone.utc)
@@ -126,7 +153,7 @@ def main(argv=None):
             raise ValueError
         raw = host.get("clover", {})
         if raw == {}:
-            checks = dict.fromkeys(CHECKS, "not_configured")
+            checks = dict.fromkeys(checks, "not_configured")
         else:
             if not isinstance(raw, dict):
                 raise ValueError
@@ -140,18 +167,24 @@ def main(argv=None):
             checks["settings"] = "ok" if {"writes", "liveApproved", "writeTokenFile"} <= raw.keys() else "missing"
             checks["daily_cap"] = "ok" if config.daily_write_cap <= 5 else "over_cap"
             checks["write_token_file"] = _write_token(config, path)
-            for name, check, params in (("read_only_day", _read_only_day, (state, config, now)),
-                                        ("testitem", _testitem, (state, config))):
-                try:
-                    checks[name] = check(*params)
-                except FileNotFoundError:
-                    checks[name] = "missing"
-                except (cache.CacheUnsafe, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RecursionError):
-                    unreadable = True
+            try:
+                checks["read_only_day"] = _read_only_day(state, config, now)
+            except FileNotFoundError:
+                checks["read_only_day"] = "missing"
+            except INPUT_ERRORS:
+                unreadable = True
+            try:
+                checks["testitem"], checks[INVENTORY] = _testitem(state, config)
+            except FileNotFoundError:
+                checks["testitem"], checks[INVENTORY] = "missing", "no-create"
+            except INPUT_ERRORS:
+                unreadable = True
     except (HostConfigError, ConfigProblem, OSError, ValueError, KeyError):
         unreadable = True
     passed = all(word == "ok" or name == "testitem" and word == "warn_missing_stock"
-                 for name, word in checks.items())
+                 for name, word in checks.items() if name != INVENTORY or args.purpose == "inventory")
+    if args.purpose == "inventory" and checks[INVENTORY] == "unreadable":
+        unreadable = True
     print(json.dumps({"result": "pass" if passed else "fail", "checks": checks}))
     return 2 if unreadable else 0 if passed else 1
 

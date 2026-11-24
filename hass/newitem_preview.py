@@ -80,11 +80,11 @@ def capture_case(name, term, message, answer, photo, content, spec, env, viewpor
         message = f"{message} {answer}"
     result = newitem.draft(message, photo, content=content, spec=spec, selection_checked=True, renderer=newitem_render.render)
     assert result["status"] in ("draft", "draft-with-warnings"), result
-    sha = result["image"]["sha256"]
     after_path = result["image"]["path"]
     web, _removed = media._jpeg_copy(photo) if photo[:2] == b"\xff\xd8" else media._png_copy(photo)
     ext = "jpg" if photo[:2] == b"\xff\xd8" else "png"
-    before_path = f"assets/products/photo-{sha[:16]}.{ext}"
+    before_sha = hashlib.sha256(web).hexdigest()
+    before_path = f"assets/products/photo-{before_sha[:16]}.{ext}"
     runs = {}
     for side, ops, path, picture in (("before", before_ops(result, message), before_path, web), ("after", result["ops"], after_path, result["image"]["bytes"])):
         after_content, product = apply_in_memory(content, ops, path, now)

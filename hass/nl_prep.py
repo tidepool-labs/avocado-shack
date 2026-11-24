@@ -132,11 +132,15 @@ def _entry(p) -> dict:
     return out
 
 
-def _decide(span, products):
+def _decide(span, products, *, prefer_ordered=False):
     """('is'|'ambiguous', [products]) for a span of vocabulary tokens, or None when no product contains it."""
     want = frozenset(span)
     contains = [p for p in products if want <= p["set"]]
     exact = [p for p in contains if p["set"] == want]
+    if prefer_ordered:
+        ordered = [p for p in exact if p["tokens"] == span]
+        if ordered:
+            return ("is" if len(ordered) == 1 else "ambiguous"), ordered
     kind = [p for p in contains if p["head"] == span[-1] and p not in exact]
     cands = exact + kind
     if not cands:  # only a word inside names (or in none): products whose description uses the word are candidates too (coffee)
@@ -151,7 +155,7 @@ def _decide(span, products):
     return "ambiguous", cands
 
 
-def _spans(words, index, alias_seqs):
+def _spans(words, index, alias_seqs, guessed):
     """Greedy, longest first: non-overlapping (start, end, kind, data) over the vocabulary tokens of one run of words."""
     found, taken = [], [False] * len(words)
     options = []
@@ -170,7 +174,8 @@ def _spans(words, index, alias_seqs):
         elif len(raw) == 1 and raw[0] in SHELVES:
             found.append((i, j, "shelf", None))
         else:
-            decision = _decide(list(raw), index.products)
+            # A spelling correction must not break a tie between whole names.
+            decision = _decide(span, index.products, prefer_ordered=not any(guessed[i:j]))
             maker = next((m for m in index.makers if m["tokens"] == list(raw)), None)
             if maker is not None and (decision is None or decision[0] == "ambiguous" or len(raw) < max(len(p["tokens"]) for p in decision[1])):
                 found.append((i, j, "maker", maker))
@@ -213,7 +218,7 @@ def phrase_hints(text, index, aliases) -> dict:
             continue
         if run:
             words = [canon[x] for x in run]
-            for i, j, kind, data in _spans(words, index, alias_seqs):
+            for i, j, kind, data in _spans(words, index, alias_seqs, [guessed[x] for x in run]):
                 phrase = " ".join(raw[x] for x in run[i:j])
                 span = words[i:j]
                 fuzzy = any(guessed[x] for x in run[i:j])

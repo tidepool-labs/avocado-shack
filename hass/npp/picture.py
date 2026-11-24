@@ -33,9 +33,12 @@ class FrozenPicture:
         """Text inside the job runner's single fallback bracket."""
         return _NOTES.get(self.variant, "")
 
-    def matches_draft(self, draft: dict) -> bool:
+    def matches_draft(self, draft: object) -> bool:
         """Use before S8 capture: a path alone does not identify the picture bytes."""
-        return draft.get("assets", {}).get(self.image_path) == "sha256:" + self.image_sha256
+        if not isinstance(draft, dict):
+            return False
+        assets = draft.get("assets")
+        return isinstance(assets, dict) and assets.get(self.image_path) == "sha256:" + self.image_sha256
 
 
 def read_text(data: bytes, *, timeout: float = 30) -> str | None:

@@ -106,7 +106,7 @@ def _qty(value, item, config):
         raise DraftRefused("A count cannot be less than 0.")
     if q > config.max_stock:
         with localcontext():  # display must not change the caller's decimal flags
-            # A count too long to show is refused without echoing it (RF1810-11); format_quantity itself no longer raises.
+            # A count too long to show is refused without echoing it (RF1810-11); the size check here (not format_quantity raising) is what keeps it unechoed.
             shown = f"{format_quantity(q)} " if q.adjusted() <= MAX_SHOWN_ADJUSTED else "That count "
         raise DraftRefused(f"{shown}looks too high for one item. Check the number and send it again.")
     if item.price_type != "PER_UNIT" and q != q.to_integral():

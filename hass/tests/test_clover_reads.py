@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from hass.clover import reads
+from hass.clover import mapper, reads
 from hass.tests.test_clover_mapper import item, items
 
 PT = reads.PACIFIC
@@ -77,11 +77,14 @@ class HowManyTests(unittest.TestCase):
         self.assertIn("SKU none", got)
         self.assertIn("SKU S-9", got)
 
-    # Contract: reads answer for any finite till count (spec: exact digits for huge and tiny counts; never a traceback). Bug caught: a
-    # length cap in format_quantity raised InvalidOperation out of in_stock / how_many / low_stock for 1E+64 and 4E-64.
+    # Contract: reads answer for every count the mapper admits (spec: exact digits for huge and tiny counts; never a traceback). Bug caught:
+    # a length cap in format_quantity raised InvalidOperation out of in_stock / how_many / low_stock for 1E+64 and 4E-64, and a lossy
+    # fallback printed 4E-300 as '4E-300'.
     def test_in_stock_answers_for_huge_and_tiny_counts(self):
-        for raw, shown in (("1E+64", "1" + "0" * 64), ("4E-64", "0." + "0" * 63 + "4"), ("-4E-64", None), ("1E+1000000", "1E+1000000")):
-            with self.subTest(raw=raw):
+        edge = Decimal("1E+%d" % (mapper.MAX_PLAIN_DIGITS - 1))
+        for raw, shown in (("1E+64", "1" + "0" * 64), ("4E-64", "0." + "0" * 63 + "4"), ("-4E-64", None), ("4E-300", "0." + "0" * 299 + "4"),
+                           ("1.234567890123456789E+300", "1234567890123456789" + "0" * 282), (str(edge), "1" + "0" * (int(edge.adjusted()))), ):
+            with self.subTest(raw=raw[:24]):
                 s = snap(extra=[item(id="X9", name="Saffron", stock=Decimal(raw))])
                 got = reads.in_stock("saffron", s, NOW)
                 if shown is None:
@@ -89,7 +92,7 @@ class HowManyTests(unittest.TestCase):
                 else:
                     self.assertEqual(got, f"Yes, Saffron: {shown} in the till.")
                 self.assertTrue(reads.how_many("saffron", s, NOW).startswith("Saffron: "))
-                self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+2000000")))
+                self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+1000")))
 
 
 def mugs(n, minutes_old=5):

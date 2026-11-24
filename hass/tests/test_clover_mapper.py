@@ -1,6 +1,7 @@
 """HASS-CLOVER-1: item mapping both ways, price-in-cents maths, exact matching. Recorded fixtures and constructed items only.
 Run: python3 -B -m unittest hass.tests.test_clover_mapper
 """
+import decimal
 import unittest
 from decimal import Decimal
 
@@ -83,18 +84,30 @@ class MoneyTests(unittest.TestCase):
             with self.subTest(q=q):
                 self.assertEqual(m.format_quantity(Decimal(q)), text)
 
-    # Contract: format_quantity never raises for a finite count (reads.in_stock, low_stock, reports and previews all print through it), and
-    # a count of any size prints either its exact plain digits (up to MAX_PLAIN_DIGITS) or a short exponent form. Bug caught: a
-    # length cap that raised InvalidOperation for 1E+64 / 4E-64 and crashed the reply; or an uncapped format() building a million-digit string.
-    def test_any_finite_count_prints_without_raising_and_stays_short(self):
+    # Contract: every count the mapper admits (plain form up to MAX_PLAIN_DIGITS) prints as its exact plain digits, never an exponent, never
+    # rounded away: nonzero counts below 0.0005 and huge counts alike. Bug caught: a 64-digit cap raised InvalidOperation for 1E+64 / 4E-64
+    # (the read crashed); then a lossy exponent fallback printed 4E-300 and 1.2345678901234568E+300 instead of the digits.
+    def test_admitted_counts_print_exact_plain_digits_across_the_boundary(self):
+        edge = m.MAX_PLAIN_DIGITS
+        long_frac = "1." + "234567890" * 33 + "E+300"            # 298 digits, exponent 3: a long, precise, huge count
         for q, text in (("1E+64", "1" + "0" * 64), ("-1E+64", "-1" + "0" * 64), ("4E-64", "0." + "0" * 63 + "4"), ("-4E-64", "-0." + "0" * 63 + "4"),
-                        ("1E+255", "1" + "0" * 255), ("9" * 100, "9" * 100),
-                        ("1E+257", "1E+257"), ("4E-300", "4E-300"), ("1E+1000000", "1E+1000000"), ("-1E-1000000", "-1E-1000000"),
-                        ("1E+999999999999999999", "1E+999999999999999999"), ("4E-999999999999999999", "4E-999999999999999999"),
-                        ("1." + "2" * 400 + "E+300", "1.2222222222222222E+300"), ("1" + "2" * 4999, "1.2222222222222222E+4999")):
-            with self.subTest(q=q[:20]):
+                        ("1E+255", "1" + "0" * 255), ("1E+256", "1" + "0" * 256), ("1E+257", "1" + "0" * 257),
+                        ("4E-300", "0." + "0" * 299 + "4"), ("-4E-300", "-0." + "0" * 299 + "4"),
+                        ("1.234567890123456789E+300", "1234567890123456789" + "0" * 282),
+                        ("9" * 100, "9" * 100),
+                        ("1E+%d" % (edge - 1), "1" + "0" * (edge - 1)),                    # exactly MAX_PLAIN_DIGITS digits: still exact
+                        ("4E-%d" % (edge - 1), "0." + "0" * (edge - 2) + "4")):             # 0. and exactly MAX_PLAIN_DIGITS digits after it
+            with self.subTest(q=q[:24]):
                 self.assertEqual(m.format_quantity(Decimal(q)), text)
-        self.assertLessEqual(len(m.format_quantity(Decimal("9" * 2000000))), 30)
+        self.assertEqual(m.format_quantity(Decimal(long_frac)), format(Decimal(long_frac), "f"))
+
+    # Contract: past MAX_PLAIN_DIGITS format_quantity refuses before building a string (so a draft refusal never echoes a huge count and a
+    # reply never carries one). Bug caught: an uncapped format() building a million-digit string for 1E+1000000.
+    def test_count_past_the_boundary_is_refused_not_built(self):
+        edge = m.MAX_PLAIN_DIGITS
+        for q in ("1E+%d" % edge, "4E-%d" % edge, "-4E-%d" % edge, "1E+1000000", "4E-1000000", "1E+999999999999999999", "9" * (edge + 1)):
+            with self.subTest(q=q[:24]), self.assertRaises(decimal.InvalidOperation):
+                m.format_quantity(Decimal(q))
 
     # Healthy control: values the function already formatted correctly stay byte-identical.
     def test_ordinary_counts_unchanged(self):
@@ -137,6 +150,17 @@ class ItemMappingTests(unittest.TestCase):
         free = got["FAKEITEM00006"]
         self.assertEqual((free.price_type, free.price_cents, free.stock, free.stock_modified), ("VARIABLE", None, None, None))
         self.assertEqual(got["FAKEITEM00002"].sku, "")
+
+    # Contract: the till's count is admitted only if it can be printed exactly (plain form up to MAX_PLAIN_DIGITS); a longer one is treated
+    # like a count the till did not give (None), so no read ever has to print or sum it. Bug caught: 1E+1000000 admitted, then a reply
+    # either raised or built a million-digit string; the boundary itself (1E+999) must still be kept.
+    def test_parse_item_admits_counts_up_to_the_print_boundary_only(self):
+        edge = m.MAX_PLAIN_DIGITS
+        for q, kept in (("1E+64", True), ("4E-300", True), ("1E+%d" % (edge - 1), True), ("4E-%d" % (edge - 1), True),
+                        ("1E+%d" % edge, False), ("4E-%d" % edge, False), ("1E+1000000", False), ("4E-999999999999999999", False)):
+            with self.subTest(q=q):
+                got = m.parse_item({"id": "A1", "name": "N", "itemStock": {"quantity": q}}).stock
+                self.assertEqual(got, Decimal(q) if kept else None)
 
     def test_odd_values_do_not_become_prices_or_counts(self):
         raw = {"id": "A1", "name": "N", "price": True, "itemStock": {"quantity": "x"}, "modifiedTime": -4, "hidden": "yes", "priceType": "WEIRD"}

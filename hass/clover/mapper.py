@@ -12,7 +12,7 @@ curly apostrophes ignored; nothing else), and only when exactly one item answers
 import re
 import unicodedata
 from dataclasses import dataclass
-from decimal import MAX_EMAX, MIN_EMIN, ROUND_HALF_UP, Context, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from hass.content_model import SELLING_PRICE_RE
 
@@ -21,7 +21,7 @@ AVAILABILITY = ("yes", "limited", "no")                                         
 PRICE_TYPES = ("FIXED", "VARIABLE", "PER_UNIT")
 MAX_PRICE_CENTS = 100_000          # $1,000.00: a typo guard (a misread number), changed in config, not a business rule
 MAX_NAME = 100
-MAX_PLAIN_DIGITS = 256             # format_quantity prints exact digits up to this many; longer prints a short exponent form
+MAX_PLAIN_DIGITS = 1000            # a till count is admitted (parse_item) and printed (format_quantity) in exact plain digits up to this many
 
 
 class MapError(ValueError):
@@ -66,26 +66,30 @@ def pct_change(old_cents, new_cents):
     return (Decimal(new_cents - old_cents) * 100 / Decimal(old_cents)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
+def plain_length(d):
+    """Characters of digits in the exact plain (no exponent) form of a finite Decimal; computed from the tuple, so no huge string is built."""
+    _, digits, exp = d.as_tuple()
+    return len(digits) + exp if exp >= 0 else max(len(digits), -exp) + 1
+
+
 def format_quantity(q):
     """12, 12.5 (never 12.0, never an exponent). Rounds to three places, but a nonzero count that would round to 0 (or -0) and a count too
-    long to round print their exact plain digits instead (0.0004 -> '0.0004'; 1E+64 -> 1 and 64 zeros). Zero of either sign is '0'.
-    Never raises for a finite count. Past MAX_PLAIN_DIGITS the count prints in a short exponent form (so a reply stays short); a caller
-    that must not echo a huge number (drafts._qty) checks its size itself."""
+    long to round print their exact plain digits instead (0.0004 -> '0.0004'; 1E+64 -> 1 and 64 zeros; 4E-300 -> 0. 299 zeros 4).
+    Zero of either sign is '0'. Every count parse_item admits (plain_length <= MAX_PLAIN_DIGITS) prints exactly and never raises. A count
+    longer than that raises InvalidOperation before any long string is built (drafts._qty turns it into a no-echo refusal)."""
     d = Decimal(q)
     if not d.is_finite():
         return format(d.quantize(Decimal("0.001")).normalize(), "f")    # NaN / Infinity: refused as before
     if not d:
         return "0"
+    if plain_length(d) > MAX_PLAIN_DIGITS:
+        raise InvalidOperation("count too long to print")
     try:
         rounded = d.quantize(Decimal("0.001"))
     except InvalidOperation:            # more digits than the default context holds
         rounded = None
     if rounded:                         # nonzero after rounding: unchanged behaviour (0.0006 -> '0.001')
         return format(rounded.normalize(), "f")
-    _, digits, exp = d.as_tuple()
-    if (len(digits) + exp if exp >= 0 else max(len(digits), -exp) + 1) > MAX_PLAIN_DIGITS:
-        # Never raises, never builds a huge string: 17 significant digits in exponent form (1E+1000000, 4E-1000000), a few characters at most.
-        return format(d.normalize(Context(prec=17, Emax=MAX_EMAX, Emin=MIN_EMIN)), "E")
     text = format(d, "f")               # exact digits, no rounding, no exponent
     return text.rstrip("0").rstrip(".") if "." in text else text
 
@@ -149,7 +153,8 @@ def _decimal(v):
         d = Decimal(str(v))
     except InvalidOperation:
         return None
-    return d if d.is_finite() else None
+    # Not finite, or too long to ever print in exact digits (1E+5000): no usable count, like a missing one. Keeps every read bounded.
+    return d if d.is_finite() and plain_length(d) <= MAX_PLAIN_DIGITS else None
 
 
 def parse_item(raw):

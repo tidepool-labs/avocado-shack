@@ -112,6 +112,18 @@ class ShortBodyTests(unittest.TestCase):
                     with self.assertRaises(BridgeError) as ctx: self.fetch(b"1234", announced=announced, coding=coding)
                     self.assertEqual((ctx.exception.code, ctx.exception.status), ("size-mismatch", None))
 
+    def test_chunked_lookalike_headers_are_refused_but_real_chunked_works(self):
+        """Contract: the chunked bypass follows http.client's own decision. Bug it catches: `chunked` plus a trailing space or tab
+        is not decoded by http.client but was treated as chunked, so Content-Length 8 with body 1234 came back
+        as a successful four-byte photo."""
+        for coding in (b"chunked ", b"chunked\t", b"chunked  ", b"Chunked, identity"):
+            for announced in (8, None):
+                with self.subTest(coding=coding, announced=announced):
+                    with self.assertRaises(BridgeError) as ctx: self.fetch(b"1234", announced=announced, coding=coding)
+                    self.assertEqual((ctx.exception.code, ctx.exception.status), ("size-mismatch", None))
+        self.assertEqual(self.fetch(b"1234", chunked=True), [b"1234"])  # healthy control: real chunked
+        self.assertEqual(self.fetch(b"1234", announced=8, chunked=True), [b"1234"])  # chunked wins over Content-Length
+
     def test_body_without_content_length_is_unchanged(self):
         self.assertEqual(self.fetch(b"1234"), [b"1234"])  # close-delimited, nothing announced
         self.assertEqual(self.fetch(b"1234", chunked=True), [b"1234"])

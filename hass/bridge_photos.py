@@ -35,12 +35,12 @@ class _ShortBody(Exception):
 
 
 def _announced(response):
-    """The announced Content-Length as an int, or None when absent or malformed, or when exact `chunked` encoding (which
-    http.client decodes and which overrides Content-Length) is in use. Any other Transfer-Encoding (identity, gzip, a
-    list...) is not decoded by http.client, so the body cannot be shown complete: _ShortBody."""
-    coding = response.headers.get("Transfer-Encoding")
-    if isinstance(coding, str):  # http.client headers give str or None; a non-str stub value is treated as absent
-        if coding.strip().lower() == "chunked": return None
+    """The announced Content-Length as an int, or None when absent or malformed, or when http.client itself decoded the
+    body as chunked (response.chunked is True; that overrides Content-Length). Any other Transfer-Encoding value (identity,
+    gzip, a list, `chunked ` with trailing whitespace...) is not decoded by http.client, so the body cannot be shown
+    complete: _ShortBody. The decoder's own decision is used, not a re-implementation of its header test."""
+    if getattr(response, "chunked", None) is True: return None
+    if isinstance(response.headers.get("Transfer-Encoding"), str):  # a non-str stub value is treated as absent
         raise _ShortBody()
     value = response.headers.get("Content-Length")
     return int(value) if isinstance(value, str) and value.isascii() and value.isdigit() else None

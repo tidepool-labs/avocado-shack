@@ -47,8 +47,8 @@ class UnstatedTests(unittest.TestCase):
         self.assertEqual(self.hits("Grown in Los Osos.", "Creamy."), [])  # removing a claim is not adding one
 
     def test_whole_terms_only_and_hyphen_variants(self):
-        # "organically" and "locale" are other words, not the terms "organic"/"local"; plural "organics" likewise
-        self.assertEqual(self.hits("", "Organically minded, a fine locale, Massa Organics"), [])
+        # "locale" is another word, not the term "local"; plural "organics" likewise; "organically" is itself a variant term (asked)
+        self.assertEqual(self.hits("", "Organically minded, a fine locale, Massa Organics"), ["organically"])
         self.assertEqual(self.hits("", "Pesticide free"), ["pesticide-free"])
         self.assertEqual(self.hits("", "pesticide-free and non\u2011GMO"), ["pesticide-free", "non-gmo"])
         self.assertEqual(self.hits("", "Pesticide-free", "it is pesticide free"), [])

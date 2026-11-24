@@ -111,6 +111,14 @@ class InstallCiReceiptTests(unittest.TestCase):
         # Checking only the required names on page one could miss a newer rerun.
         self.assert_receipt(self.invoke(run(), total=2), "FAIL truncated")
 
+    def test_count_larger_than_total_is_refused(self):
+        # Protects: a capture certifies only when total_count equals its runs. A one-sided
+        # `total > len(runs)` check would print PASS for total_count 0 with a green run.
+        self.assert_receipt(self.invoke(run(), total=1), "lint success", passed=True)
+        self.assert_receipt(self.invoke(run(), total=0), "FAIL bad-json")
+        self.assert_receipt(self.invoke(run(), run("unit"), total=1), "FAIL bad-json")
+        self.assert_receipt(self.invoke(run(), total=2), "FAIL truncated")
+
     def test_missing_check(self):
         # An unrelated success can't satisfy a required name.
         self.assert_receipt(self.invoke(run("unit")), "FAIL missing-check lint")

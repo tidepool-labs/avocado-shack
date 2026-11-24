@@ -103,6 +103,8 @@ def main(argv=None):
             raise ValueError
         if total > len(runs):
             return refuse("truncated")
+        if total < len(runs):
+            raise ValueError
         by_name = index_runs(runs, args.sha)
     except (OSError, ValueError, KeyError, RecursionError, OverflowError):
         return refuse("bad-json")

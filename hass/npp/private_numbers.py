@@ -99,11 +99,44 @@ class Finance:
     private: frozenset = field(default=frozenset(), repr=False)
     has_cost: bool = False
     has_qty: bool = False
+    # The owner's one unambiguous typed cost and count, labelled (has_cost/has_qty without a value = mentioned but not established), for his private intake record only (never public text).
+    cost: str | None = field(default=None, repr=False)
+    qty: int | None = field(default=None, repr=False)
 
 
 _BASIS = re.compile(r'(?:(?:/\s*|\s+(?:per|a)\s+)([a-z]+)|\s+(each|apiece|items?|lbs?|pounds?|baskets?))$', re.I)
 _COST_CUE = re.compile(r'\b(?:bought|purchased|paid|costs?|wholesale)\b', re.I)
 _SPOKEN_MONEY = re.compile(r'(costs?|sell(?:ing)?)\s+([a-z -]+?)(?:\s+(each|per (?:lb|pound)))?', re.I)
+
+
+_QTY_CUE = re.compile(r'\b(?:bought|got|have|purchased|qty|quantity|stock)\b', re.I)
+_MONEY_AMOUNT = re.compile(
+    rf'[$¢€£¥]\s*\d[\d,.]*|\d[\d,.]*\s*(?:cents?|dollars?|bucks?|usd)\b|'
+    rf'\b(?:{_WORD}[ -]+)?{_WORD}\s+(?:cents?|dollars?|bucks?)\b', re.I)
+
+
+_PAID_CUE = re.compile(r'\b(?:paid|costs?|wholesale)\b', re.I)
+_FOR_AMOUNT = re.compile(r'(?:\b(?:for|at)\b|@)(.*)', re.I)
+
+
+def _names_cost(part):
+    """The clause talks about what the owner paid, with an amount or a word, whether or not it can be read.
+
+    paid/cost/wholesale plus any number name a cost. "bought"/"purchased" also name how many, so on their own
+    ("bought 5") they are a count only; they name a cost only beside money or an amount after "for"/"at".
+    """
+    if not _COST_CUE.search(part):
+        return False
+    if _PAID_CUE.search(part):
+        return bool(_MONEY_AMOUNT.search(part) or _MONEY.search(part) or values(part))
+    return bool(_MONEY_AMOUNT.search(part) or _MONEY.search(part)
+                or ((after := _FOR_AMOUNT.search(part)) and values(after[1])))
+
+
+def _names_qty(part):
+    """The clause talks about how many he has, whether or not the count can be read (money amounts are not counts)."""
+    rest = _MONEY_AMOUNT.sub(' ', part)
+    return bool(_QTY_CUE.search(rest) or re.search(r'\bin\s+stock\b', rest, re.I)) and bool(values(rest))
 
 
 def finance(caption, *, answer_unit=None, local_answers=None):
@@ -116,7 +149,12 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     extra = intake.commerce_answers(local_answers)
     costs = {a['cost'] for a in (parsed, extra) if 'cost' in a}
     counts = {a['qty'] for a in (parsed, extra) if 'qty' in a}
+    # Owner-typed evidence only: the reader's `extra` values guard against leaks (they join `private`) but never label.
+    typed_costs = {parsed['cost']} if 'cost' in parsed else set()
+    typed_counts = {parsed['qty']} if 'qty' in parsed else set()
     prices, public_parts = [], []
+    cost_said = qty_said = False  # a clause named the field, whether or not it could be read
+    cost_unclear = qty_unclear = False  # a clause named the field but gave no one value for it
     for start, end, clause in intake.caption_spans(caption):
         part = clause.strip().rstrip('.!').strip()
         remainder, atoms = intake.caption_answers(part)
@@ -132,10 +170,16 @@ def finance(caption, *, answer_unit=None, local_answers=None):
             count = intake._parse_qty(quantity[1])
             if count and type(count[0]) is int and 0 <= count[0] <= 100000:
                 atoms['qty'], remainder = count[0], ''
+        names_cost, names_qty = _names_cost(part), _names_qty(part)
+        cost_said, qty_said = cost_said or names_cost or 'cost' in atoms, qty_said or names_qty or 'qty' in atoms
+        cost_unclear = cost_unclear or (names_cost and 'cost' not in atoms)
+        qty_unclear = qty_unclear or (names_qty and 'qty' not in atoms)
         if 'cost' in atoms:
             costs.add(atoms['cost'])
+            typed_costs.add(atoms['cost'])
         if 'qty' in atoms:
             counts.add(atoms['qty'])
+            typed_counts.add(atoms['qty'])
         priced = re.sub(r'\s+retail$', '', part, flags=re.I) if part.startswith('$') else part
         basis = _BASIS.search(priced)
         unit = answer_unit
@@ -149,6 +193,7 @@ def finance(caption, *, answer_unit=None, local_answers=None):
                 amount, remainder = found, ''
                 if 'qty' not in extra:
                     counts.clear()  # the entire turn is a direct answer to the price question
+                    typed_counts.clear()
         if amount and unit in {'each', 'per lb'} and 'cost' not in atoms and not intake.unresolved_finance(remainder):
             prices.append((f'{amount} {unit}', (start, end)))
         if remainder:
@@ -164,5 +209,9 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     price, span = prices[0] if len(prices) == 1 and not unresolved else (None, None)
     if price is None or not valid_selling_price(price) or (parsed.get('price') is not None and not price.startswith(parsed['price'] + ' ')):
         price, span = None, None
+    # Labelled only when the owner's own words give exactly one value, no other clause of his leaves that field
+    # unresolved, and no reader value disagrees with it.
+    cost = next(iter(typed_costs)) if len(typed_costs) == 1 and costs == typed_costs and not cost_unclear else None
+    qty = next(iter(typed_counts)) if len(typed_counts) == 1 and counts == typed_counts and not qty_unclear else None
     return Finance(intake.without_unresolved_finance(public), price, span, frozenset(private),
-                   bool(costs), bool(counts))
+                   bool(costs) or cost_said, bool(counts) or qty_said, cost=cost, qty=qty)

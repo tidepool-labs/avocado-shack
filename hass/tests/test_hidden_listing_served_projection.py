@@ -56,7 +56,10 @@ INERT = {"template", "noscript"}  # a script inside these never runs for a visit
 
 
 class _ScriptSources(html.parser.HTMLParser):
-    """The `src` of every real script element that a browser would run (comments, text, other types and inert parents are skipped)."""
+    """(base href in force at that point, `src`) of every real script element a browser would run.
+
+    Comments, text, other script types and anything inside an inert parent are skipped. A base element counts only
+    outside inert content, only the first one counts, and it applies only to the scripts that come after it."""
 
     def __init__(self):
         super().__init__()
@@ -66,10 +69,10 @@ class _ScriptSources(html.parser.HTMLParser):
         attrs = {name: value for name, value in attrs}
         if tag in INERT:
             self.inert += 1
-        elif tag == "base" and self.base is None and attrs.get("href"):
-            self.base = attrs["href"]  # the first base element decides what relative addresses mean
+        elif tag == "base" and not self.inert and self.base is None and attrs.get("href"):
+            self.base = attrs["href"]  # the first live base element decides what later relative addresses mean
         elif tag == "script" and not self.inert and attrs.get("src") and (attrs.get("type") or "").strip().lower() in SCRIPT_TYPES:
-            self.sources.append(attrs["src"].strip())
+            self.sources.append((self.base, attrs["src"].strip()))
 
     def handle_endtag(self, tag):
         if tag in INERT and self.inert:
@@ -83,8 +86,8 @@ def page_loads_catalog(page, page_url):
     parser.feed(page.decode("utf-8", "replace"))
     parser.close()
     origin = urllib.parse.urlsplit(page_url)
-    base = urllib.parse.urljoin(page_url, parser.base) if parser.base else page_url
-    for src in parser.sources:
+    for base_href, src in parser.sources:
+        base = urllib.parse.urljoin(page_url, base_href) if base_href else page_url
         target = urllib.parse.urlsplit(urllib.parse.urljoin(base, src))
         if (target.scheme, target.netloc) == (origin.scheme, origin.netloc) and target.path == CATALOG_URL:
             return True
@@ -302,6 +305,12 @@ class HiddenListingServedProjectionTests(journey.NppUndoJourneyTests):
                              (b'<script src="' + same_origin + b'/catalog-products.js"></script>', []),  # absolute, same origin
                              (b'<base href="/"><script src="catalog-products.js"></script>', []),
                              (b'<template></template><script src="catalog-products.js"></script>', []),  # a closed template is not inert for what follows
+                             (b'<template><base href="/wrong/"></template><script src="catalog-products.js"></script>', []),  # a base inside a template is not the document base
+                             (b'<script src="catalog-products.js"></script><base href="/wrong/">', []),  # a later base does not move an earlier script
+                             (b'<base href="/"><base href="/wrong/"><script src="catalog-products.js"></script>', []),  # only the first base counts
+                             (b'<base target="_blank"><script src="catalog-products.js"></script>', []),  # a base without href changes nothing
+                             (b'<template><base href="/"></template><base href="/wrong/"><script src="catalog-products.js"></script>', loads),  # the live base is /wrong/
+                             (b'<script src="catalog-products.js"></script><base href="/wrong/"><script src="catalog-products.js"></script>', []),  # the earlier script still loads it
                              (b'<html><!-- <script src="catalog-products.js"></script> --></html>', loads),
                              (b"<p>we load catalog-products.js later</p>", loads),
                              (b'<script>var u = "catalog-products.js";</script>', loads),

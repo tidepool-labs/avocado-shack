@@ -154,6 +154,15 @@ class ProductionStages(Stages):
                                        duplicate_confirmed=work.answers.get('duplicate') is True,
                                        near_maker_confirmed=work.answers.get('near_maker'))
         if not decision.ready:
+            if decision.missing == ('identity',) and shas:
+                # He gave a price and only the item is unknown: when the photo itself cannot be used (screen or
+                # person in frame, or blurry), ask for the retake the raw picture step would send, not what it is.
+                try:
+                    retake = picture.unidentified_retake(self._photo(shas[0]), reading.get('has_person_or_screen'))
+                except (OSError, ValueError):
+                    retake = None
+                if retake is not None:
+                    return Plan(retake=retake.reason, identified=False)
             return Plan(questions=decision.questions, identified=decision.identified)
         maker = decision.maker
         town, url = _site_words(maker.phrase, texts)

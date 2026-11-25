@@ -14,6 +14,8 @@ from hass import claims, label_reader, live_policy
 RULES = "hass-missing-info/missing-info.json"
 # The pinned duplicate rule prescribes this question but does not give it a template ID.
 DUPLICATE = "That looks like an existing listing. Do you want to add another?"
+# Shelves a non-food item may use; every other category is a food shelf.
+NON_FOOD_CATEGORIES = ("flowers", "general")
 
 
 @dataclass(frozen=True)
@@ -149,8 +151,12 @@ class MissingInfo:
         item = label_reader.identity_text("name", owner_item, title=True) or photo_item
         kind = evidence.get("kind") if photo_item else None
         defaults = self.rules["kind_default_category"]
-        category = ("general" if kind == "non-food" else evidence.get("category_guess")
-                    if kind and confidence.get("category", 0) >= minimum else None) or defaults.get(kind)
+        guess = evidence.get("category_guess") if kind and confidence.get("category", 0) >= minimum else None
+        # A non-food item may sit only on a non-food shelf: a confident flowers read is kept (golden 12),
+        # household items and any food-shelf guess fall back to the kind default (general).
+        if kind == "non-food" and guess not in NON_FOOD_CATEGORIES:
+            guess = None
+        category = guess or defaults.get(kind)
 
         amount = price.amount if not price.unresolved and re.fullmatch(r"[0-9]{1,6}\.[0-9]{2}", price.amount or "") else None
         # A package is ordinarily sold by the item, not the pound. Fresh/unclassified

@@ -52,25 +52,43 @@ def private_words_in(value):
     return found
 
 
+INERT = {"template", "noscript"}  # a script inside these never runs for a visitor
+
+
 class _ScriptSources(html.parser.HTMLParser):
-    """The `src` of every real script element that a browser would run (comments, text and other types are skipped)."""
+    """The `src` of every real script element that a browser would run (comments, text, other types and inert parents are skipped)."""
 
     def __init__(self):
         super().__init__()
-        self.sources = []
+        self.sources, self.base, self.inert = [], None, 0
 
     def handle_starttag(self, tag, attrs):
         attrs = {name: value for name, value in attrs}
-        if tag == "script" and attrs.get("src") and (attrs.get("type") or "").strip().lower() in SCRIPT_TYPES:
-            self.sources.append(attrs["src"])
+        if tag in INERT:
+            self.inert += 1
+        elif tag == "base" and self.base is None and attrs.get("href"):
+            self.base = attrs["href"]  # the first base element decides what relative addresses mean
+        elif tag == "script" and not self.inert and attrs.get("src") and (attrs.get("type") or "").strip().lower() in SCRIPT_TYPES:
+            self.sources.append(attrs["src"].strip())
+
+    def handle_endtag(self, tag):
+        if tag in INERT and self.inert:
+            self.inert -= 1
 
 
-def page_loads_catalog(page):
-    """True only when the page has a script element whose src is the catalog script (any query string is ignored)."""
+def page_loads_catalog(page, page_url):
+    """True only when the page has a runnable script element whose src, resolved against the page's own address
+    (and any base element), is the same-origin catalog script served at CATALOG_URL. Query strings are ignored."""
     parser = _ScriptSources()
     parser.feed(page.decode("utf-8", "replace"))
     parser.close()
-    return any(urllib.parse.urlparse(src).path.rsplit("/", 1)[-1] == CATALOG_URL.lstrip("/") for src in parser.sources)
+    origin = urllib.parse.urlsplit(page_url)
+    base = urllib.parse.urljoin(page_url, parser.base) if parser.base else page_url
+    for src in parser.sources:
+        target = urllib.parse.urlsplit(urllib.parse.urljoin(base, src))
+        if (target.scheme, target.netloc) == (origin.scheme, origin.netloc) and target.path == CATALOG_URL:
+            return True
+    return False
 
 
 class Site:
@@ -119,7 +137,7 @@ def served_card(site, pid):
     """What a visitor gets for item `pid`: (record or None, photo SHA-256 or None, catalog bytes, problems about the page)."""
     problems = []
     page = site.get(MARKET_URL)
-    if page is None or not page_loads_catalog(page):
+    if page is None or not page_loads_catalog(page, site.base + MARKET_URL):
         problems.append("the served Market page does not load the catalog script")
     script = site.get(CATALOG_URL)
     if script is None:
@@ -271,13 +289,19 @@ class HiddenListingServedProjectionTests(journey.NppUndoJourneyTests):
 
     def test_s5c_a_comment_or_text_or_wrong_script_does_not_count_as_loading_the_catalog(self):
         # Contract: the served Market page must reference the catalog in a real <script src>. Bug it catches: an HTML
-        # comment, visible text, an inline script or a non-script element naming catalog-products.js passing the check.
+        # comment, visible text, an inline script or a non-script element naming catalog-products.js passing the check,
+        # or a script that resolves to a different path, a foreign origin or sits in an inert template while the
+        # visitor never loads the catalog this proof fetches from /catalog-products.js.
         self.publish()
         approved = self.approved_card()
         loads = ["the served Market page does not load the catalog script"]
+        same_origin = self.web.base.encode()
         for page, expect in ((b'<html><script src="catalog-products.js"></script></html>', []),
                              (b'<script src="/catalog-products.js?v=3"></script>', []),
                              (b"<SCRIPT SRC='./catalog-products.js' ></SCRIPT>", []),
+                             (b'<script src="' + same_origin + b'/catalog-products.js"></script>', []),  # absolute, same origin
+                             (b'<base href="/"><script src="catalog-products.js"></script>', []),
+                             (b'<template></template><script src="catalog-products.js"></script>', []),  # a closed template is not inert for what follows
                              (b'<html><!-- <script src="catalog-products.js"></script> --></html>', loads),
                              (b"<p>we load catalog-products.js later</p>", loads),
                              (b'<script>var u = "catalog-products.js";</script>', loads),
@@ -285,6 +309,15 @@ class HiddenListingServedProjectionTests(journey.NppUndoJourneyTests):
                              (b'<script src="catalog-products.js.bak"></script>', loads),
                              (b'<script src="other/not-catalog-products.js"></script>', loads),
                              (b'<script type="text/plain" src="catalog-products.js"></script>', loads),
+                             (b'<script src="/wrong/catalog-products.js"></script>', loads),  # wrong path
+                             (b'<script src="wrong/catalog-products.js"></script>', loads),
+                             (b'<script src="https://example.invalid/catalog-products.js"></script>', loads),  # foreign origin
+                             (b'<script src="//example.invalid/catalog-products.js"></script>', loads),
+                             (b'<script src="http://127.0.0.1:1/catalog-products.js"></script>', loads),  # same host, other port
+                             (b'<template><script src="catalog-products.js"></script></template>', loads),  # inert
+                             (b'<noscript><script src="catalog-products.js"></script></noscript>', loads),
+                             (b'<base href="https://example.invalid/"><script src="catalog-products.js"></script>', loads),
+                             (b'<base href="/wrong/"><script src="catalog-products.js"></script>', loads),
                              (b"<script src=\"x.js\"></script>", loads)):
             self.web.stale[MARKET_URL] = page
             self.assertEqual(mismatches(approved, self.served()), expect, page)

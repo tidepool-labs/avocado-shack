@@ -101,10 +101,59 @@ def confirmed(row):
     return None
 
 
+# PNG colour type -> (samples per pixel, allowed bit depths)
+PNG_COLOUR = {0: (1, (1, 2, 4, 8, 16)), 2: (3, (8, 16)), 3: (1, (1, 2, 4, 8)), 4: (2, (8, 16)), 6: (4, (8, 16))}
+# Adam7 passes: (x start, y start, x step, y step)
+ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
+
+
+def ihdr_fields(body):
+    """(width, height, depth, colour type, interlace) of a valid IHDR body, else None."""
+    if len(body) != 13:
+        return None
+    width, height = int.from_bytes(body[:4], 'big'), int.from_bytes(body[4:8], 'big')
+    depth, colour, compression, filtering, interlace = body[8:13]
+    if not (0 < width <= 0x7fffffff and 0 < height <= 0x7fffffff):
+        return None
+    if colour not in PNG_COLOUR or depth not in PNG_COLOUR[colour][1] or compression or filtering or interlace > 1:
+        return None
+    return width, height, depth, colour, interlace
+
+
+def pass_sizes(width, height, depth, colour, interlace):
+    """[(row bytes without the filter byte, rows)] for each image pass the IHDR describes."""
+    bits = PNG_COLOUR[colour][0] * depth
+    if not interlace:
+        return [((width * bits + 7) // 8, height)]
+    out = []
+    for x0, y0, dx, dy in ADAM7:
+        w, h = (width - x0 + dx - 1) // dx, (height - y0 + dy - 1) // dy
+        if w > 0 and h > 0:
+            out.append(((w * bits + 7) // 8, h))
+    return out
+
+
+def scanline_bytes(*header):
+    """Decompressed size the IHDR demands: one filter byte plus the packed pixels for every scanline."""
+    return sum((row + 1) * rows for row, rows in pass_sizes(*header))
+
+
+def filters_valid(raw, *header):
+    """True when every scanline starts with a defined PNG filter type (0-4)."""
+    pos = 0
+    for row, rows in pass_sizes(*header):
+        for _ in range(rows):
+            if raw[pos] > 4:
+                return False
+            pos += row + 1
+    return True
+
+
 def png_problem(data):
     """None if `data` is a structurally complete PNG, else why not. The eight-byte signature alone proves nothing:
     walk every chunk (4-byte length, 4-letter type, data, CRC-32 over type+data), require IHDR first with a non-zero
-    size, at least one IDAT whose joined data is one complete zlib stream, and IEND last with no bytes after it."""
+    size, at least one IDAT whose joined data is one complete zlib stream that decodes to exactly the scanlines the
+    IHDR describes (one valid filter byte plus the packed pixels per row), and IEND last with no bytes after it."""
     if not data.startswith(PNG_MAGIC):
         return 'signature'
     pos, chunks, idat = len(PNG_MAGIC), [], []
@@ -123,7 +172,8 @@ def png_problem(data):
             return 'bad-crc'
         chunks.append(kind)
         if kind == b'IHDR':
-            if len(body) != 13 or not int.from_bytes(body[:4], 'big') or not int.from_bytes(body[4:8], 'big'):
+            header = ihdr_fields(body)
+            if header is None:
                 return 'bad-ihdr'
         elif kind == b'IDAT':
             idat.append(body)
@@ -136,14 +186,17 @@ def png_problem(data):
         return 'no-idat'
     if chunks[-1] != b'IEND' or pos != len(data):
         return 'no-iend' if chunks[-1] != b'IEND' else 'bytes-after-iend'
+    if header[3] == 3 and b'PLTE' not in chunks:
+        return 'no-plte'
+    want = scanline_bytes(*header)
     stream = zlib.decompressobj()
     try:
-        stream.decompress(b''.join(idat))
+        raw = stream.decompress(b''.join(idat), want + 1)
     except zlib.error:
         return 'bad-image-data'
-    if not stream.eof or stream.unused_data:
+    if not stream.eof or stream.unused_data or len(raw) != want:
         return 'bad-image-data'
-    return None
+    return None if filters_valid(raw, *header) else 'bad-image-data'
 
 
 def read_png(path):

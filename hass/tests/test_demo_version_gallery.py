@@ -15,13 +15,21 @@ from scripts.hass import demo_version_gallery as gallery
 HEAD = 'b' * 40
 
 
-def png(seed):
-    """A tiny valid PNG whose pixel bytes depend on `seed`; equal length for equal-length seeds."""
-    def chunk(kind, data):
-        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
-    raw = b'\x00' + seed.encode().ljust(12, b'.')[:12]
-    return (gallery.PNG_MAGIC + chunk(b'IHDR', struct.pack('>IIBBBBB', 4, 1, 8, 6, 0, 0, 0))
+def chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+
+
+def make_png(width, height, depth, colour, raw, *, interlace=0, extra=()):
+    """A PNG with valid chunk CRCs around the exact decompressed bytes `raw` (filter bytes included)."""
+    return (gallery.PNG_MAGIC + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, depth, colour, 0, 0, interlace))
+            + b''.join(chunk(kind, data) for kind, data in extra)
             + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def png(seed):
+    """A decodable 4x1 RGBA PNG (1 filter byte + 4*4 pixel bytes = 17 decompressed bytes) whose pixels depend on
+    `seed`; equal length for equal-length seeds."""
+    return make_png(4, 1, 8, 6, b'\x00' + seed.encode().ljust(16, b'.')[:16])
 
 
 def sha(data):
@@ -205,8 +213,6 @@ class VersionGalleryTests(unittest.TestCase):
         idat = good.index(b'IDAT') - 4
         idat_len = int.from_bytes(good[idat:idat + 4], 'big')
 
-        def chunk(kind, data):
-            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
         bad_stream = good[:idat] + chunk(b'IDAT', b'\x78\x9c not deflate') + good[idat + 12 + idat_len:]
         no_idat = good[:idat] + good[idat + 12 + idat_len:]
         cases = {
@@ -222,6 +228,74 @@ class VersionGalleryTests(unittest.TestCase):
         for reason, data in cases.items():
             with self.subTest(reason=reason):
                 self.assertEqual(gallery.png_problem(data), reason)
+
+    def test_png_positive_controls_decode_to_exactly_the_ihdr_scanlines(self):
+        # Contract: png_problem accepts only images whose zlib stream is exactly what the IHDR describes. These are
+        # genuinely decodable controls, so a validator that rejects everything fails here: the 4x1 RGBA helper is
+        # 17 bytes; 3x2 grey 1-bit packs each row into 1 byte; palette needs PLTE; 16-bit RGB; grey+alpha; and an
+        # Adam7 3x3 8-bit grey image whose seven passes (1x1, none, none, 1x1, 2x1, 1x2, 3x1) need 15 bytes.
+        rgba = png('control')
+        idat = rgba.index(b'IDAT')
+        stream = rgba[idat + 4:idat + 4 + int.from_bytes(rgba[idat - 4:idat], 'big')]
+        self.assertEqual(len(zlib.decompress(stream)), 17)
+        samples = {
+            'rgba-4x1': rgba,
+            'grey-1bit-3x2': make_png(3, 2, 1, 0, b'\x00\xa0\x01\x40'),
+            'palette-2x2': make_png(2, 2, 8, 3, b'\x00\x00\x01\x00\x01\x00', extra=[(b'PLTE', b'\x00' * 6)]),
+            'rgb16-1x1': make_png(1, 1, 16, 2, b'\x00' + b'\x12\x34' * 3),
+            'grey-alpha-2x1': make_png(2, 1, 8, 4, b'\x04' + b'\x00\x01\x02\x03'),
+            'adam7-3x3-grey': make_png(3, 3, 8, 0, b'\x00\x07' + b'\x00\x07' + b'\x00\x07\x07' + b'\x00\x07' * 2 + b'\x00\x07\x07\x07', interlace=1),
+        }
+        for name, data in samples.items():
+            with self.subTest(name=name):
+                self.assertIsNone(gallery.png_problem(data))
+        self.assertEqual(gallery.scanline_bytes(3, 3, 8, 0, 1), 15)
+
+    def test_png_whose_image_data_does_not_match_the_ihdr_is_refused(self):
+        # Review t_5ad8caa3 (round 2): valid chunk CRCs and a complete zlib stream are not enough; the stream must
+        # hold the IHDR's scanlines. A 1x1 RGBA PNG around zlib.compress(b'') was accepted and shown.
+        samples = {
+            'empty-stream-1x1-rgba': make_png(1, 1, 8, 6, b''),
+            'short-row': make_png(4, 1, 8, 6, b'\x00' + b'x' * 15),
+            'long-row': make_png(4, 1, 8, 6, b'\x00' + b'x' * 17),
+            'missing-row': make_png(1, 2, 8, 0, b'\x00\x07'),
+            'filter-byte-out-of-range': make_png(1, 1, 8, 0, b'\x05\x07'),
+            'interlaced-with-flat-size': make_png(3, 3, 8, 0, b'\x00' * 12, interlace=1),
+            'palette-without-plte': make_png(1, 1, 8, 3, b'\x00\x00'),
+        }
+        for name, data in samples.items():
+            with self.subTest(name=name):
+                self.assertEqual(gallery.png_problem(data), 'no-plte' if name.startswith('palette') else 'bad-image-data')
+        header = {
+            'colour-type-1': make_png(1, 1, 8, 1, b'\x00\x00'),
+            'depth-3': make_png(1, 1, 3, 0, b'\x00\x00'),
+            'depth-16-palette': make_png(1, 1, 16, 3, b'\x00\x00\x00', extra=[(b'PLTE', b'\x00' * 3)]),
+            'interlace-2': make_png(1, 1, 8, 0, b'\x00\x00', interlace=2),
+        }
+        for name, data in header.items():
+            with self.subTest(name=name):
+                self.assertEqual(gallery.png_problem(data), 'bad-ihdr')
+
+    def test_confirmed_png_with_no_decodable_image_is_refused_end_to_end(self):
+        # Same contract, through the command: confirmed digest-matching files that are structurally framed but carry
+        # no (or the wrong) image data exit 1, are marked not-a-png and nothing is copied; the decodable control
+        # in case 11 is still shown and copied.
+        b = self.bundle
+        b.deliver(12, 1, make_png(1, 1, 8, 6, b''))
+        b.deliver(12, 2, make_png(4, 1, 8, 6, b'\x00' + b'x' * 12))  # the old helper's 13 bytes
+        b.reference('12', make_png(2, 1, 8, 6, b''))
+        b.deliver(11, 1, png('good-delivered'))
+        b.reference('11', png('good-reference'))
+        code, result = b.run()
+        self.assertEqual((code, result['status']), (1, 'refused'))
+        rows = json.loads((b.root / 'page' / 'receipt.json').read_text())['rows']
+        versions, ref = cells(rows, 12)
+        self.assertEqual([versions[n]['reason'] for n in (1, 2)], ['not-a-png'] * 2)
+        self.assertEqual((ref['status'], ref['reason']), ('refused', 'not-a-png'))
+        versions, ref = cells(rows, 11)
+        self.assertEqual((versions[1]['status'], ref['status']), ('delivered', 'shown'))
+        self.assertEqual(sorted(p.name for p in (b.root / 'page').glob('*.png')),
+                         ['chat-11-v1.png', 'reference-11.png'])
 
     def test_variants_are_kept_apart_and_reference_only_on_the_base_case(self):
         b = self.bundle

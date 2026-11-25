@@ -4,11 +4,13 @@ import io
 import json
 import os
 import struct
+import sys
 import tempfile
 import unittest
 import zlib
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from scripts.hass import demo_version_gallery as gallery
 
@@ -230,10 +232,10 @@ class VersionGalleryTests(unittest.TestCase):
                 self.assertEqual(gallery.png_problem(data), reason)
 
     def test_png_positive_controls_decode_to_exactly_the_ihdr_scanlines(self):
-        # Contract: png_problem accepts only images whose zlib stream is exactly what the IHDR describes. These are
-        # genuinely decodable controls, so a validator that rejects everything fails here: the 4x1 RGBA helper is
-        # 17 bytes; 3x2 grey 1-bit packs each row into 1 byte; palette needs PLTE; 16-bit RGB; grey+alpha; and an
-        # Adam7 3x3 8-bit grey image whose seven passes (1x1, none, none, 1x1, 2x1, 1x2, 3x1) need 15 bytes.
+        # Contract: png_problem accepts only images whose zlib stream is exactly what the IHDR describes and which the
+        # pinned Pillow decodes. These are genuinely decodable controls, so a validator that rejects everything fails
+        # here: the 4x1 RGBA helper is 17 bytes; 3x2 grey 1-bit packs each row into 1 byte; palette needs PLTE;
+        # 16-bit RGB; grey+alpha.
         rgba = png('control')
         idat = rgba.index(b'IDAT')
         stream = rgba[idat + 4:idat + 4 + int.from_bytes(rgba[idat - 4:idat], 'big')]
@@ -244,12 +246,20 @@ class VersionGalleryTests(unittest.TestCase):
             'palette-2x2': make_png(2, 2, 8, 3, b'\x00\x00\x01\x00\x01\x00', extra=[(b'PLTE', b'\x00' * 6)]),
             'rgb16-1x1': make_png(1, 1, 16, 2, b'\x00' + b'\x12\x34' * 3),
             'grey-alpha-2x1': make_png(2, 1, 8, 4, b'\x04' + b'\x00\x01\x02\x03'),
-            'adam7-3x3-grey': make_png(3, 3, 8, 0, b'\x00\x07' + b'\x00\x07' + b'\x00\x07\x07' + b'\x00\x07' * 2 + b'\x00\x07\x07\x07', interlace=1),
         }
         for name, data in samples.items():
             with self.subTest(name=name):
                 self.assertIsNone(gallery.png_problem(data))
-        self.assertEqual(gallery.scanline_bytes(3, 3, 8, 0, 1), 15)
+
+    def test_real_pngs_in_the_repo_are_accepted(self):
+        # The envelope must fit real renders: every PNG shipped in the repo (phone cards, gallery cards, mockups)
+        # passes, so a validator that refuses real images fails here.
+        found = [p for p in gallery.ROOT.rglob('*.png')
+                 if not any(part.startswith('.') or part == 'node_modules' for part in p.relative_to(gallery.ROOT).parts)]
+        self.assertGreaterEqual(len(found), 12)
+        for path in found:
+            with self.subTest(path=str(path.relative_to(gallery.ROOT))):
+                self.assertEqual(gallery.read_png(path)[1], None)
 
     def test_png_whose_image_data_does_not_match_the_ihdr_is_refused(self):
         # Review t_5ad8caa3 (round 2): valid chunk CRCs and a complete zlib stream are not enough; the stream must
@@ -260,7 +270,6 @@ class VersionGalleryTests(unittest.TestCase):
             'long-row': make_png(4, 1, 8, 6, b'\x00' + b'x' * 17),
             'missing-row': make_png(1, 2, 8, 0, b'\x00\x07'),
             'filter-byte-out-of-range': make_png(1, 1, 8, 0, b'\x05\x07'),
-            'interlaced-with-flat-size': make_png(3, 3, 8, 0, b'\x00' * 12, interlace=1),
             'palette-without-plte': make_png(1, 1, 8, 3, b'\x00\x00'),
         }
         for name, data in samples.items():
@@ -296,6 +305,83 @@ class VersionGalleryTests(unittest.TestCase):
         self.assertEqual((versions[1]['status'], ref['status']), ('delivered', 'shown'))
         self.assertEqual(sorted(p.name for p in (b.root / 'page').glob('*.png')),
                          ['chat-11-v1.png', 'reference-11.png'])
+
+    def test_png_outside_the_preview_envelope_is_refused_before_inflating(self):
+        # Review t_5ad8caa3 (round 3): a CRC-valid IHDR of 2147483647 x 2147483647, 16-bit RGBA, with an empty
+        # stream raised OverflowError. The envelope is now checked from the IHDR alone, before any inflate, with
+        # plain integer comparisons. Boundaries: MAX_SIDE per side and MAX_PIXELS in total; interlaced is outside.
+        side, pixels = gallery.MAX_SIDE, gallery.MAX_PIXELS
+        too_large = {
+            'review-round-3': make_png(0x7fffffff, 0x7fffffff, 16, 6, b''),
+            'one-past-side': make_png(side + 1, 1, 1, 0, b''),
+            'one-past-pixels': make_png(pixels // side + 1, side, 1, 0, b''),
+        }
+        with mock.patch.object(gallery.zlib, 'decompressobj', side_effect=AssertionError('inflated')):
+            for name, data in too_large.items():
+                with self.subTest(name=name):
+                    self.assertEqual(gallery.png_problem(data), 'too-large')
+            adam7 = make_png(3, 3, 8, 0, b'\x00\x07' + b'\x00\x07' + b'\x00\x07\x07' + b'\x00\x07' * 2 + b'\x00\x07\x07\x07',
+                             interlace=1)
+            self.assertEqual(gallery.png_problem(adam7), 'interlaced')
+        width = pixels // side  # exactly MAX_PIXELS, 1-bit grey, all black: inside the envelope and decodable
+        at_limit = make_png(width, side, 1, 0, (b'\x00' + b'\x00' * ((width + 7) // 8)) * side)
+        self.assertIsNone(gallery.png_problem(at_limit))
+        b = self.bundle
+        b.deliver(12, 1, too_large['review-round-3'])
+        b.reference('12', adam7)
+        b.deliver(11, 1, png('good-delivered'))
+        code, result = b.run()
+        self.assertEqual((code, result['status']), (1, 'refused'))
+        rows = json.loads((b.root / 'page' / 'receipt.json').read_text())['rows']
+        versions, ref = cells(rows, 12)
+        self.assertEqual((versions[1]['status'], versions[1]['reason']), ('refused', 'outside-envelope'))
+        self.assertEqual((ref['status'], ref['reason']), ('refused', 'outside-envelope'))
+        self.assertEqual(cells(rows, 11)[0][1]['status'], 'delivered')
+        self.assertEqual(sorted(p.name for p in (b.root / 'page').glob('*.png')), ['chat-11-v1.png'])
+
+    def test_stream_that_inflates_past_the_ihdr_stops_early(self):
+        # A small file inside the envelope whose stream inflates to far more than its 64x64 RGBA IHDR needs is refused
+        # after at most one INFLATE_STEP past the wanted size, never inflated in full.
+        want = 64 * (1 + 64 * 4)
+        bomb = make_png(64, 64, 8, 6, b'\x00' * (want + 16 * gallery.INFLATE_STEP))
+        self.assertLess(len(bomb), 64 * 1024)
+        seen = []
+        real = gallery.zlib.decompressobj
+
+        class Counting:
+            def __init__(self):
+                self.inner = real()
+
+            def decompress(self, data, limit):
+                piece = self.inner.decompress(data, limit)
+                seen.append(len(piece))
+                return piece
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        with mock.patch.object(gallery.zlib, 'decompressobj', Counting):
+            self.assertEqual(gallery.png_problem(bomb), 'bad-image-data')
+        self.assertLessEqual(sum(seen), want + gallery.INFLATE_STEP)
+        self.assertTrue(all(n <= gallery.INFLATE_STEP for n in seen))
+
+    def test_file_over_the_byte_limit_is_refused_from_its_size(self):
+        b = self.bundle
+        data = png('big-file')
+        b.deliver(13, 1, data)
+        with mock.patch.object(gallery, 'MAX_FILE_BYTES', len(data) - 1), \
+                mock.patch.object(gallery.os, 'fdopen', side_effect=AssertionError('read')):
+            versions, _ = cells(b.build()[1], 13)
+        self.assertEqual((versions[1]['status'], versions[1]['reason']), ('refused', 'outside-envelope'))
+        self.assertIsNone(gallery.png_problem(data))
+
+    def test_without_pillow_the_command_holds_and_shows_nothing(self):
+        b = self.bundle
+        b.deliver(1, 1, png('no-pillow'))
+        with mock.patch.dict(sys.modules, {'PIL': None}):
+            code, result = b.run()
+        self.assertEqual((code, result), (1, {'status': 'hold', 'reasons': ['pillow-missing']}))
+        self.assertFalse((b.root / 'page').exists())
 
     def test_variants_are_kept_apart_and_reference_only_on_the_base_case(self):
         b = self.bundle

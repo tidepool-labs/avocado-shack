@@ -16,8 +16,9 @@ For every case it shows chat v1, chat v2 and the gallery reference side by side:
                   exact bytes. Only these are drawn.
   missing         the delivery row exists but the file does not; shown as unavailable.
   not delivered   no confirmed delivery row. A file without a row is never shown (no inferred delivery).
-  refused         the file's bytes are not the delivered bytes (swapped, edited or not a PNG), or the
-                  file is a link or not a regular file. Any refusal makes the command exit 1.
+  refused         the file's bytes are not the delivered bytes (swapped, edited or not a PNG the pinned Pillow
+                  decodes completely), the image is outside the preview envelope (outside-envelope: too large
+                  or interlaced), or the file is a link or not a regular file. Any refusal makes the command exit 1.
 The gallery reference is a v1 render; a v2 reference does not exist and the page says so.
 
 Read-only on its inputs. Writes index.html, receipt.json and copies of the shown PNGs into a new or empty
@@ -26,6 +27,7 @@ acceptance, approval, attendance or a live listing, and it makes no network call
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -101,10 +103,16 @@ def confirmed(row):
     return None
 
 
+# Envelope for a chat card or gallery reference. Real ones are non-interlaced phone renders (all 87 PNGs tracked in
+# the repo are non-interlaced; the largest is 1440 x 3190, 4.6 M pixels, 3.1 MB). Anything outside it is refused
+# from the file size or the IHDR alone, before one image byte is decompressed, so a small file cannot claim a huge
+# image and no size arithmetic can overflow.
+MAX_FILE_BYTES = 32 * 1024 * 1024
+MAX_SIDE = 8192
+MAX_PIXELS = 8 * 1024 * 1024
+INFLATE_STEP = 1 << 20
 # PNG colour type -> (samples per pixel, allowed bit depths)
 PNG_COLOUR = {0: (1, (1, 2, 4, 8, 16)), 2: (3, (8, 16)), 3: (1, (1, 2, 4, 8)), 4: (2, (8, 16)), 6: (4, (8, 16))}
-# Adam7 passes: (x start, y start, x step, y step)
-ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
 
 
 def ihdr_fields(body):
@@ -120,43 +128,60 @@ def ihdr_fields(body):
     return width, height, depth, colour, interlace
 
 
-def pass_sizes(width, height, depth, colour, interlace):
-    """[(row bytes without the filter byte, rows)] for each image pass the IHDR describes."""
-    bits = PNG_COLOUR[colour][0] * depth
-    if not interlace:
-        return [((width * bits + 7) // 8, height)]
-    out = []
-    for x0, y0, dx, dy in ADAM7:
-        w, h = (width - x0 + dx - 1) // dx, (height - y0 + dy - 1) // dy
-        if w > 0 and h > 0:
-            out.append(((w * bits + 7) // 8, h))
-    return out
+def outside_envelope(width, height, depth, colour, interlace):
+    """Why an IHDR is outside the preview envelope, or None. Plain integer comparisons on bounded values."""
+    if width > MAX_SIDE or height > MAX_SIDE or width * height > MAX_PIXELS:
+        return 'too-large'
+    return 'interlaced' if interlace else None
 
 
-def scanline_bytes(*header):
-    """Decompressed size the IHDR demands: one filter byte plus the packed pixels for every scanline."""
-    return sum((row + 1) * rows for row, rows in pass_sizes(*header))
-
-
-def filters_valid(raw, *header):
-    """True when every scanline starts with a defined PNG filter type (0-4)."""
-    pos = 0
-    for row, rows in pass_sizes(*header):
-        for _ in range(rows):
-            if raw[pos] > 4:
+def inflated_size_is(stream_bytes, want):
+    """True when the joined IDAT data is one complete zlib stream that inflates to exactly `want` bytes. Inflates in
+    INFLATE_STEP pieces and stops as soon as the count passes `want`, so memory stays at one piece whatever the
+    stream claims."""
+    stream, total, pending = zlib.decompressobj(), 0, stream_bytes
+    try:
+        while True:
+            piece = stream.decompress(pending, INFLATE_STEP)
+            total += len(piece)
+            if total > want:
                 return False
-            pos += row + 1
-    return True
+            pending = stream.unconsumed_tail
+            if not pending and len(piece) < INFLATE_STEP:
+                break
+    except zlib.error:
+        return False
+    return stream.eof and not stream.unused_data and total == want
+
+
+def _pillow():
+    """The pinned Pillow (CI installs Pillow==$PILLOW_VERSION, the host per docs/hass/PILLOW-HOST.md). Without it the
+    command holds rather than showing a file it cannot decode."""
+    try:
+        from PIL import Image, ImageFile
+    except ImportError:
+        raise Hold('pillow-missing') from None
+    if ImageFile.LOAD_TRUNCATED_IMAGES:
+        raise Hold('pillow-accepts-truncated-images')
+    return Image
 
 
 def png_problem(data):
-    """None if `data` is a structurally complete PNG, else why not. The eight-byte signature alone proves nothing:
-    walk every chunk (4-byte length, 4-letter type, data, CRC-32 over type+data), require IHDR first with a non-zero
-    size, at least one IDAT whose joined data is one complete zlib stream that decodes to exactly the scanlines the
-    IHDR describes (one valid filter byte plus the packed pixels per row), and IEND last with no bytes after it."""
+    """None if `data` is a complete PNG inside the preview envelope, else why not. The eight-byte signature alone
+    proves nothing. In order:
+      1. framing: 4-byte length, 4-letter type, data, CRC-32 over type+data; IHDR first and once, at least one IDAT,
+         PLTE for a palette image, IEND last with no bytes after it;
+      2. envelope: file size, width, height, pixel count and non-interlaced, from the IHDR alone;
+      3. size: the joined IDAT data is one complete zlib stream holding exactly the IHDR's scanlines (one filter
+         byte plus the packed pixels per row), counted in bounded pieces;
+      4. pixels: the pinned Pillow, a maintained decoder, reads it as a PNG of the IHDR's size and decodes every
+         scanline (an undefined filter type or broken stream is refused).
+    Raises Hold without Pillow."""
+    if len(data) > MAX_FILE_BYTES:
+        return 'too-large'
     if not data.startswith(PNG_MAGIC):
         return 'signature'
-    pos, chunks, idat = len(PNG_MAGIC), [], []
+    pos, chunks, idat, header = len(PNG_MAGIC), [], [], None
     while pos < len(data):
         if len(data) - pos < 12:
             return 'truncated-chunk'
@@ -180,7 +205,7 @@ def png_problem(data):
         pos = end + 4
         if kind == b'IEND':
             break
-    if not chunks or chunks[0] != b'IHDR' or chunks.count(b'IHDR') != 1:
+    if header is None or not chunks or chunks[0] != b'IHDR' or chunks.count(b'IHDR') != 1:
         return 'no-ihdr'
     if not idat:
         return 'no-idat'
@@ -188,27 +213,40 @@ def png_problem(data):
         return 'no-iend' if chunks[-1] != b'IEND' else 'bytes-after-iend'
     if header[3] == 3 and b'PLTE' not in chunks:
         return 'no-plte'
-    want = scanline_bytes(*header)
-    stream = zlib.decompressobj()
+    outside = outside_envelope(*header)
+    if outside:
+        return outside
+    width, height, depth, colour, _ = header
+    want = height * (1 + (width * PNG_COLOUR[colour][0] * depth + 7) // 8)
+    if not inflated_size_is(b''.join(idat), want):
+        return 'bad-image-data'
+    image_module = _pillow()
     try:
-        raw = stream.decompress(b''.join(idat), want + 1)
-    except zlib.error:
+        with image_module.open(io.BytesIO(data), formats=['PNG']) as image:
+            if image.format != 'PNG' or image.size != (width, height):
+                return 'bad-image-data'
+            image.load()
+    except Exception:  # noqa: BLE001 - any decoder failure (OSError, ValueError, SyntaxError, zlib, bomb) is a refusal
         return 'bad-image-data'
-    if not stream.eof or stream.unused_data or len(raw) != want:
-        return 'bad-image-data'
-    return None if filters_valid(raw, *header) else 'bad-image-data'
+    return None
 
 
 def read_png(path):
-    """(bytes, None) for a regular non-link, structurally complete PNG file; (None, reason) otherwise; (None, None)
-    if absent."""
+    """(bytes, None) for a regular non-link PNG file inside the preview envelope that passes png_problem; (None,
+    reason) otherwise; (None, None) if absent. A file larger than MAX_FILE_BYTES is refused from its size without
+    being read; reason is 'outside-envelope' (too large or interlaced) or 'not-a-png' (anything else)."""
     if not os.path.lexists(path):
         return None, None
     if path.is_symlink() or not path.is_file():
         return None, 'not-a-regular-file'
-    data = path.read_bytes()
-    if png_problem(data):
-        return None, 'not-a-png'
+    if path.stat().st_size > MAX_FILE_BYTES:
+        return None, 'outside-envelope'
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(fd, 'rb') as handle:
+        data = handle.read(MAX_FILE_BYTES + 1)
+    problem = png_problem(data)
+    if problem:
+        return None, 'outside-envelope' if problem in ('too-large', 'interlaced') else 'not-a-png'
     return data, None
 
 

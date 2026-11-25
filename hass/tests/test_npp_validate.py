@@ -162,6 +162,52 @@ class ValidateTests(unittest.TestCase):
         # A private number (the owner's qty 12) inside the story is never exempt.
         self.assertIn('card-number', card('It started as a roadside stand 12 years ago.').problems)
 
+    def test_existing_maker_catalog_story_may_narrate_origin_but_no_other_claim(self):
+        # Contract: an existing maker's unchanged catalog story is the text every other card of that maker already shows.
+        # Origin narration in it ("a family farm", "organic orchard", "raw and unfiltered") is not a new claim by this draft.
+        # Bug caught (private replay, golden cases 5/6/11): 17 of 26 real catalog stories tripped the origin/organic class,
+        # so no new product from those makers could ever be drawn ("I couldn't draw the card yet").
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+
+        def card(story, extra=()):
+            return self.verdict(makers={'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}, origin=origin,
+                                card_nodes=[*self.nodes, origin, story, *extra]).problems
+        narration = 'A small family farm in Oakdale; an organic orchard. The honey is raw and unfiltered.'
+        self.assertFalse(validate._panel_clean(narration))  # the old rule refused it
+        plain = card('We grow plums on a small hill.')  # this fixture's owner never names the maker: existing-claims only
+        self.assertEqual(plain, ('existing-claims',))
+        self.assertEqual(card(narration), plain)
+        # Any other claim kind still keeps the story off the card, even next to origin narration.
+        for story in ('An organic orchard in Oakdale. This cures cancer.', 'A family farm in Oakdale. Award-winning jam.',
+                      'The best farm in Oakdale.'):
+            with self.subTest(story=story):
+                self.assertIn('card-copy', card(story))
+        # The exemption is the exact catalog fragment: the same narration typed as another card line is still refused.
+        self.assertIn('card-copy', card(narration, extra=['An organic orchard.']))
+
+    def test_existing_maker_catalog_story_number_words_are_fine_but_private_and_money_are_not(self):
+        # Contract: published catalog text may use a number-like word ("The point is the fruit") or a founded year.
+        # Bug caught (private replay, golden case 11): "point" read as a spoken decimal made the story 'number-unclear',
+        # failing both the record check (public-text) and the card scan (card-number).
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+
+        def card(story):
+            return self.verdict(makers={'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}, origin=origin,
+                                card_nodes=[*self.nodes, origin, story]).problems
+        plain = card('We grow plums on a small hill.')
+        self.assertEqual(plain, ('existing-claims',))  # this fixture's owner never names the maker
+        self.assertEqual(card('We grow plums. The point is the fruit.'), plain)
+        self.assertEqual(card('We grow plums. The point is the fruit, since 1976.'), plain)
+        # A reading equal to a private value (qty 12, cost 3) is never exempt, spelled, digits or ambiguous.
+        for story in ('We planted twelve trees. The point is the fruit.', 'We planted about 12 trees.',
+                      'Three generations. The point is the fruit.', 'Jars were $5 in 1976.', 'Call 805-555-0100 to visit.'):
+            with self.subTest(story=story):
+                problems = card(story)
+                self.assertTrue({'public-text', 'card-number', 'card-copy', 'card-contact'} & set(problems), problems)
+                self.assertIn('public-text', problems)
+
     def test_existing_maker_name_and_place_are_shown_only_when_they_carry_no_protected_claim(self):
         # Contract: the card-copy gate binds EVERY maker-panel fragment, not only the story. Bug caught: an existing
         # maker whose catalog name/place was "This cures cancer." was auto-allowed on the card (no contact or number in it).

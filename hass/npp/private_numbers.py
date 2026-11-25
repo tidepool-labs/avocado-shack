@@ -59,7 +59,7 @@ def problem(text, private=(), *, permitted=(), digits_allowed=False):
     if normalized != text and any(c.isnumeric() for c in normalized):
         return 'number-unclear'
     numbers = values(text)
-    idioms = literal_spans(text, ['half-and-half', 'half and half'])
+    idioms = tuple(m.span() for m in intake.HALF_AND_HALF.finditer(text))
     if ((numbers and _UNCLEAR.search(text)) or any(not n.amounts for n in numbers)
             or any(not any(a <= m.start() < b for a, b in (*idioms, *((n.start, n.end) for n in numbers)))
                    for m in _UNPLACED.finditer(text))

@@ -147,6 +147,18 @@ class ResearchDecisionTests(unittest.TestCase):
         failures, _ = run_npp.run_research(view)
         self.assertTrue(any(f.startswith("kept_facts") for f in failures), failures)
 
+    def test_private_digit_check_reads_owner_text_not_the_photo_count(self):
+        # Contract (case 13, design 1.9): a one-photo identify request is not a leak of a $1 cost,
+        # but the same digit in owner text handed to a cloud mapper still fails the case.
+        expect = {"cloud_bodies_lack_digits_from": ["1", "50"]}
+        state, calls = {}, run_npp.Counter()
+        clean = [run_npp.identify_body((b"photo",)), run_npp.identify_body((b"a", b"b"))]
+        self.assertEqual(run_npp.check_conversation(expect, [], state, calls, clean, {}), [])
+        leaked = clean + [run_npp.stub_body("edit_map", "bought 50 for 1", ["sellingPrice"])]
+        self.assertEqual(run_npp.check_conversation(expect, [], state, calls, leaked, {}),
+                         ["no_private_values: digit 1 reached a cloud request body",
+                          "no_private_values: digit 50 reached a cloud request body"])
+
 
 class AuditTests(unittest.TestCase):
     """The audit is the offline enforcement of the decision; each rule is shown to catch a planted violation."""

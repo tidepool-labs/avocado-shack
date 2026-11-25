@@ -253,8 +253,14 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
     # an existing maker's catalog name, place and story are not part of this copy, so each is shown only when it carries
     # no protected claim (health/awards/endorsements, superlatives, ...).
     panel = [maker.get(key) for key in ('name', 'place') if _panel_clean(maker.get(key))]
+    # An existing maker's catalog story is already published text. The record check above already lets it carry digits
+    # (a founded year) but no private number or contact. Give the card scan the same exemption for that exact fragment.
+    # Without it, every new product from a known maker whose story has a year failed as 'card-number'.
+    catalog_story = ()
     if not new_makers and _panel_clean(maker.get('story')):
         panel.append(maker.get('story'))
+        if not _contact(maker['story']) and not numbers.problem(maker['story'], private, digits_allowed=True):
+            catalog_story = (maker['story'],)
     # The computed origin line is derived from the maker's place ("Based in <place>"), so it is bound the same way: it is
     # shown only when its source is clean (an owner-said supplier, no place, or a place with no protected claim).
     origin_ok = bool(supplier) or not maker.get('place') or (_panel_clean(maker.get('place')) and _panel_clean(origin))
@@ -265,7 +271,7 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
     if card_evidence is not None or card_png is not None:
         card_nodes, price_index, maker_count = captured_dom(card_evidence, card_png, product.get('id'))
     if price and (problem := dom_problem(card_nodes, price_index, price, text.get('name'),
-                                        tuple(text[k] for k in ('name', 'story') if text.get(k)), private,
+                                        tuple(text[k] for k in ('name', 'story') if text.get(k)) + catalog_story, private,
                                         allowed=shown_ok,
                                         maker=maker['name'] if _panel_clean(maker.get('name')) else None,
                                         maker_count=maker_count,

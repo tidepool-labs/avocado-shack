@@ -105,6 +105,24 @@ class MissingTests(unittest.TestCase):
         self.assertEqual(contradiction.note, "maker left off: label says Hillside Kitchen")
         self.assertTrue(contradiction.ready)
 
+    def test_made_by_outranks_a_possessive_read_of_the_same_maker(self):
+        # Golden cases 4/5 (live recording): "made by Brian's, Brian's sourdough bread" was read as the possessive
+        # "Brian" (near, so a needless "Is that the Brian's already on the website?") instead of the typed "Brian's".
+        makers = {"Brian's": {"name": "Brian's"}, "acme": {"name": "Acme"}}
+        price = OwnerPrice("8.00", "item")
+        jam = dict(EXAMPLES[1], brand_on_label=None)
+        for words in (("made by Brian's, Brian's Raspberry jam, $8 each",), ("Brian's Raspberry jam, made by Brian's",),
+                      ("made by Brian's", "Brian's Raspberry jam")):
+            with self.subTest(words=words):
+                result = self.rules.decide(jam, price=price, makers=makers, owner_texts=words)
+                self.assertEqual((result.maker.state, result.maker.key), ("known", "Brian's"))
+                self.assertEqual(result.questions, ())
+        # Possessive alone still strips the suffix, and a hedged "made by" still names no maker.
+        alone = self.rules.decide(jam, price=price, makers=makers, owner_texts=("Acme’s Raspberry jam",))
+        self.assertEqual((alone.maker.state, alone.maker.key), ("known", "acme"))
+        hedged = self.rules.decide(jam, price=price, makers=makers, owner_texts=("made by Acme maybe, Acme’s Raspberry jam",))
+        self.assertEqual(hedged.maker.state, "absent")
+
     def test_duplicate_exact_local_name_prompts_once_and_never_waives_confirmation(self):
         # Same-name catalog/maker/till rows are one bounded question; private cached values are not read back.
         jam = dict(EXAMPLES[1], item="Raspberry Jam")

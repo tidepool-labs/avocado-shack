@@ -167,6 +167,7 @@ class ProductionStages(Stages):
         # Printed claims reach only the Writer's drop list and the owner's card note, never public text.
         label_claims = _widest_claims([claim for claim in reading.get('visible_claims') or [] if isinstance(claim, str)
                                        and not validate._contact(claim) and not private_numbers.problem(claim, private)])
+        supplier = self._owner_supplier(texts)
         # The durable listing is a narrow projection, not a caption, full model read, or research transcript.
         return Plan(listing={
             'name': decision.item, 'category': decision.category or 'general', 'kind': reading.get('kind') or 'non-food',
@@ -177,7 +178,26 @@ class ProductionStages(Stages):
             'facts': [{**{k: fact[k] for k in ('id', 'slot', 'value', 'url', 'quote')}, 'verdict': 'supports'} for fact in facts],
             'photo': shas[0], 'personOrScreen': reading.get('has_person_or_screen'),
             'size': reading.get('size_text'), 'labelWords': label_words, 'labelClaims': label_claims,
+            **({'supplier': supplier} if supplier else {}),
         }, identified=True)
+
+    def _owner_supplier(self, texts):
+        """The source he typed as its own clause ("from Etto $3.50 a lb" keeps "from Etto" after the price is read),
+        read by the same deterministic S10 supplier form his later "from River Farm" edit uses: no mapper, no model, no
+        photo, S2 or S3 reading. Only a clause the reader turns into exactly one supplier patch counts; two different
+        sources, an unclear name or any other form give none (the card then says to ask in store, as before)."""
+        # The port's own pinned grammar (a stage port assembled without Stages.__init__ reads the same pinned file).
+        grammar = getattr(self, 'grammar', None) or edits.Grammar(self.pinned[1])
+        found = set()
+        for text in texts:
+            for clause in re.split(r'[;,\n]', text):
+                words = ' '.join(clause.split()).strip(' .!')
+                if not words:
+                    continue
+                edit = edits.read(grammar, words, {}, mapper=None)
+                if len(edit.patch) == 1 and edit.patch[0][0] == 'supplier':
+                    found.add(edit.patch[0][1])
+        return found.pop() if len(found) == 1 else None
 
     def _picture(self, work, listing, private, *, local):
         sha = work.request['attachments'][0]

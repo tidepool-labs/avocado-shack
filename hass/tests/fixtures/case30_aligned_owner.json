@@ -1,0 +1,27 @@
+{
+  "about": "Separate, non-scoring regression for the case-30 owner journey (plan H52, adopted from offline proposal H49 option 1). Strict NPP case 30, its goldens, the manifest and every recording stay unchanged and keep refusing the reserved .example address; this file is never a strict case and never adds to a replay score.",
+  "base_case": 30,
+  "reserved_url": "https://minersfigs.example/about",
+  "owner_url": "https://minersfigs.com/about",
+  "owner_url_note": "an ordinary-looking address for the same maker, served only by the harness's local fake host from the case's own page file (pages/miners-about-mixed.html); nothing is ever fetched from the network",
+  "identify": {
+    "note": "hand-authored S2 reading of the public synthetic photo npp:figs.jpg (label text MINERS / Dried Figs / Net wt 8 oz, drawn by make_npp_photos.py); no model produced it",
+    "output": {
+      "is_product": true,
+      "kind": "food",
+      "item": "Dried Figs",
+      "brand_on_label": "MINERS",
+      "size_text": "8 oz",
+      "label_words": ["MINERS", "Dried Figs", "Net wt 8 oz"],
+      "visible_claims": [],
+      "category_guess": "pantry",
+      "has_person_or_screen": false,
+      "confidence": {
+        "item": 0.97,
+        "brand": 0.95
+      }
+    }
+  },
+  "description_equals": "Pick up Dried Figs for the kitchen. Set Dried Figs out on the table.",
+  "description_note": "the product keeps label casing for the item mid-sentence (strict case 36 expects 'Ridge Roast Dark Coffee'), so the reading 'Dried Figs' gives this description"
+}

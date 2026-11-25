@@ -1,9 +1,10 @@
 """NPP case 27a: a pale label inside a cleanly cut-out product is product, not photo background left inside it.
 
-The renderer fills every enclosed pocket of its cut-out into the product. Only the pockets the photo itself shows on the
-background plane (a counter seen through a handle) can be leftover background; those still hit the area limit. A cream
-label (a few levels from the house ivory, ~20 from the counter) no longer turns a clean photo into a retake. Pictures we
-did not cut out ourselves (catalog files, a supplied alpha, a busy-background fallback) keep the full check.
+The renderer fills every enclosed pocket of its cut-out into the product. A pocket counts as a label only with positive
+evidence: print on it and no patch on the background plane. A plain pale pocket (the counter seen through a handle, lit
+brighter or not), a counter-coloured one or one with a counter-coloured patch still hits the area limit. A printed cream
+label (a few levels from the house ivory) no longer turns a clean photo into a retake. Pictures we did not cut out
+ourselves (catalog files, a supplied alpha, a busy-background fallback) keep the full check.
 """
 from __future__ import annotations
 
@@ -45,12 +46,16 @@ def _jar(label, words=True):
     return _jpg(img)
 
 
-def _frame(inner):
-    """A dark open frame (basket handle, picture frame) whose middle shows ``inner``."""
+def _frame(inner, words=False):
+    """A dark open frame (basket handle, picture frame) whose middle shows ``inner``; ``words`` prints on it."""
     img = Image.new("RGB", (640, 640), COUNTER)
     pen = ImageDraw.Draw(img)
     pen.rectangle((150, 150, 490, 540), fill="#3b2a1a")
     pen.rectangle((185, 185, 455, 505), fill=inner)
+    if words:
+        font = ImageFont.load_default(size=24)
+        for i, line in enumerate(("HARBOR GOODS", "Sea Salt", "Net wt 4 oz")):
+            pen.text((205, 220 + i * 28), line, fill="#111111", font=font, stroke_width=1, stroke_fill="#111111")
     return _jpg(img)
 
 
@@ -98,7 +103,9 @@ class EnclosedLabelTests(unittest.TestCase):
         self.assertIn(INSIDE, hs.check_image(out["jpeg"], self.spec, enclosed_background=0)["hard_failures"])
 
     def test_counter_seen_through_an_opening_is_still_background(self):
-        for inner in (COUNTER, "#ede8de"):  # exactly the counter, and 4 levels off it
+        # exactly the counter, 4 levels off it, and lit 18-20 levels brighter than the border plane (RETURN t_7be375f7):
+        # a plain pale pocket carries no evidence that it is a label, whatever its light
+        for inner in (COUNTER, "#ede8de", CREAM):
             with self.subTest(inner=inner):
                 out = self.render(_frame(inner))
                 self.assertEqual(out["report"]["isolation"], "cutout")
@@ -106,17 +113,22 @@ class EnclosedLabelTests(unittest.TestCase):
                 self.assertFalse(_inside(out["check"])["ok"])
                 self.assertEqual(photos.house_picture(_frame(inner))["problems"], ["style"])
 
-    def test_cream_inside_the_same_opening_is_product(self):
-        out = self.render(_frame(CREAM))
+    def test_counter_coloured_opening_with_print_is_still_background(self):
+        out = self.render(_frame(COUNTER, words=True))
+        self.assertGreater(out["report"]["enclosed_background"], 0.1)
+        self.assertFalse(_inside(out["check"])["ok"])
+
+    def test_printed_cream_inside_the_same_opening_is_product(self):
+        out = self.render(_frame(CREAM, words=True))
         self.assertEqual(out["report"]["enclosed_background"], 0)
         self.assertTrue(_inside(out["check"])["ok"])
 
     def test_label_controls(self):
-        for label, words in ((CREAM, True), (CREAM, False), (TAN, True), (None, False)):
+        for label, words, product in ((CREAM, True, True), (TAN, True, True), (None, False, True), (CREAM, False, False)):
             with self.subTest(label=label, words=words):
                 out = self.render(_jar(label, words))
-                self.assertEqual(out["report"]["enclosed_background"], 0)
-                self.assertTrue(out["check"]["pass"], out["check"]["hard_failures"])
+                self.assertEqual(out["report"]["enclosed_background"] == 0, product)
+                self.assertEqual(out["check"]["pass"], product, out["check"]["hard_failures"])
 
     def test_supplied_cutout_gets_no_renderer_exemption(self):
         img = Image.new("RGBA", (400, 400), (0, 0, 0, 0))

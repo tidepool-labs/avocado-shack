@@ -321,9 +321,9 @@ def check_image(data: bytes, spec=None, *, enclosed_background=None) -> dict:
     """Score picture bytes (JPEG/PNG/WEBP) against the measured catalog look.
 
     ``enclosed_background`` is the renderer's own measure (share of its analysis frame) of the enclosed pockets of its
-    cut-out that the photo showed on the background plane. ``None`` (any picture we did not cut out ourselves) keeps
-    the full check. When it is 0 (no patch of photo background in any enclosed pocket), every ivory-coloured patch inside
-    the product is product (a pale label), so only the patch count limit applies."""
+    cut-out it could not show to be product (a pocket is product only when printed and off the background plane).
+    ``None`` (any picture we did not cut out ourselves) keeps the full check. When it is 0, every ivory-coloured patch
+    inside the product is a printed label, so only the patch count limit applies."""
     spec = spec or load_spec()
     m_spec = spec["pictures"]["catalog"]["metrics"]
     im, _ = open_image(data)

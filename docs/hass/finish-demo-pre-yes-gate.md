@@ -16,9 +16,12 @@ python3 -B scripts/hass/demo_pre_yes_gate.py after  --state <state-dir> --worktr
     --job <job id> --photo <the same photo file> --version <n>
 ```
 
-`before` prints `READY yes <job>-<n>` (exit 0): type exactly that line, once. Anything else is `ABORT <reason>` (exit 1) and the
-line to type is not given. `after` prints `SERVED undo` (exit 0): the shop serves your photo; `undo` is the one-step take-down.
-Output is only a fixed word and reason; no name, text, path, id or picture is printed.
+`before` prints `READY yes <job>-<n>` (exit 0). `READY` is the status word, not part of the message: the only thing to type in
+the owner's chat is `yes <job>-<n>` (the words after `READY`), once. Anything else is `ABORT <reason>` (exit 1) and no line to
+type is given. `after` prints `SERVED undo` (exit 0): the shop serves your photo; `undo` is the one-step take-down.
+Output is only a fixed word and reason; no name, text, path, id or picture is printed. Every path you give (state, media,
+worktree, photo) must be free of links: each part of it is opened without following a link, and a path with a link anywhere on it
+is refused (`photo-unreadable`, `catalog-unreadable`, `card-bytes-missing-or-changed` or `could-not-check`).
 
 ## What READY means (all must hold)
 

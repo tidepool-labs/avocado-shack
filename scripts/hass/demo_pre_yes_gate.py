@@ -11,12 +11,13 @@ It joins only things that match, and READS only (nothing is opened for writing, 
            version's card hash, and an outgoing chat event that attaches it
   served   what the shop serves now (the public catalog in the worktree and its photo file)
 
-`before` prints `READY yes <job>-<n>` only when: the job exists and is waiting for a yes; the photo in your hand is the listing's
+`before` prints `READY yes <job>-<n>` (READY is the status word; the chat message to type is only `yes <job>-<n>`) only when: the job exists and is waiting for a yes; the photo in your hand is the listing's
 photo; the version is the newest one and the one you hold; its card was delivered and its file bytes match; the card is in the
 chat; the card's picture (when it is the owner's own photo) is the listing's photo; the listing has a name; and the shop does
 not serve that name yet. Anything else prints `ABORT <label>` and you do NOT type the yes.
 `after` prints `SERVED undo` when the served photo file is the listing's photo, otherwise `ABORT <label>`. `undo` is the take-down word.
 
+Every path (photo, card, catalog, state) must be free of links: each component is opened without following one.
 Output is a fixed word and a fixed label only: never a name, text, id, path or byte. Exit 0 READY/SERVED, 1 ABORT, 2 unusable arguments.
 This is a rehearsal aid for the attended demo: it does not authorize or perform a yes, and it is not a live listing.
 """
@@ -47,47 +48,65 @@ PHOTO_MAX = 20 * 1024 * 1024
 DB_NAME = "conversation.sqlite3"
 
 
+_VIEWER = []
+
+
 def _viewer():
-    spec = importlib.util.spec_from_file_location("restored_chat_view", HERE / "restored_chat_view.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    if not _VIEWER:
+        spec = importlib.util.spec_from_file_location("restored_chat_view", HERE / "restored_chat_view.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _VIEWER.append(module)
+    return _VIEWER[0]
+
+
+def read_plain(path, limit=PHOTO_MAX):
+    """Bytes of a regular file reached WITHOUT following any link: every component of the absolute path (parents and leaf) is
+    opened with O_NOFOLLOW and the leaf is checked on the open handle, so a swap between a check and a read cannot slip a link in.
+    None for a missing file, a link anywhere on the path, anything that is not a regular file, or one bigger than `limit`."""
+    try:
+        data = _viewer().read_nofollow("/", os.path.abspath(path).lstrip("/"))
+    except (OSError, ValueError):
+        return None
+    return data if len(data) <= limit else None
 
 
 def sha256_file(path, limit=PHOTO_MAX):
-    """SHA-256 of a regular, non-link file no bigger than `limit`; None for anything else."""
-    path = Path(path)
-    try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
-            return None
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
+    """SHA-256 of a regular file reached without any link (see read_plain); None for anything else."""
+    data = read_plain(path, limit)
+    return None if data is None else hashlib.sha256(data).hexdigest()
 
 
 def open_conversation(state):
     """Read-only handle on the saved conversation DB (no mkdir, no chmod, no create, no link followed)."""
+    if not _viewer().plain_path(state):
+        raise ValueError("state path has a link")
     path = Path(os.path.abspath(state)) / DB_NAME
     st = path.lstat()
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
         raise ValueError("unsafe conversation store")
     db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)
     db.row_factory = sqlite3.Row
+    db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()  # the file is really opened now
+    after = path.lstat()
+    if (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino):  # the leaf was swapped while it was being opened
+        db.close()
+        raise ValueError("conversation store changed while opening")
     return db
 
 
 def served_records(worktree):
-    """{public name: record} from the worktree's served catalog; None when it cannot be read."""
+    """{public name: record} from the worktree's served catalog; None when it cannot be read (or a link is on its path)."""
+    data = read_plain(Path(worktree) / CATALOG)
+    if data is None:
+        return None
     try:
-        path = Path(worktree) / CATALOG
-        if path.is_symlink() or not path.is_file():
-            return None
-        first = path.read_bytes().split(b"\n", 1)[0]
+        first = data.split(b"\n", 1)[0]
         if not first.startswith(CATALOG_HEAD):
             return None
         products = json.loads(first[len(CATALOG_HEAD):].rstrip(b";"))
         return {p["name"]: p for p in products if isinstance(p, dict) and isinstance(p.get("name"), str)}
-    except (OSError, ValueError):
+    except ValueError:
         return None
 
 

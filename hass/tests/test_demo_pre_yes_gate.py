@@ -36,9 +36,7 @@ def _make():
             return (d12((Path(state) / "transcript.sqlite3").read_bytes()), self.commits_in(wt), sorted(self.names_in(wt)),
                     conv.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], git(wt, "status", "--porcelain"))
 
-        def run_gate(self, which, wt, state, media, job, photo, version):
-            photo_file = Path(self._photos) / f"{d12(photo)}.png"
-            photo_file.write_bytes(photo)
+        def run_files(self, which, state, media, wt, job, photo_file, version):
             cmd = [sys.executable, "-B", str(SCRIPT), which, "--state", str(state), "--worktree", str(wt), "--job", job,
                    "--photo", str(photo_file), "--version", str(version)]
             if which == "before":
@@ -46,6 +44,11 @@ def _make():
             done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             self.assertEqual(done.stderr, "")
             return done.returncode, done.stdout.strip()
+
+        def run_gate(self, which, wt, state, media, job, photo, version):
+            photo_file = Path(self._photos) / f"{d12(photo)}.png"
+            photo_file.write_bytes(photo)
+            return self.run_files(which, state, media, wt, job, photo_file, version)
 
         def must_abort(self, want, wt, state, media, conv, job, photo, version):
             before = self.fingerprint(wt, state, conv)
@@ -105,6 +108,35 @@ def _make():
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual((done.returncode, done.stdout.strip(), done.stderr), (1, "ABORT photo-unreadable", ""))
                 self.must_abort("no-such-listing", *args, conv, "../x", mike["photo"], 1)
+
+                # a link anywhere on a path is refused, never followed: photo leaf or parent, card parent, media root, worktree, state
+                link_dir, real = Path(tmp) / "linkdir", Path(tmp) / "real-photos"
+                real.mkdir(mode=0o700)
+                (real / "m.png").write_bytes(mike["photo"])
+                link_dir.symlink_to(real, target_is_directory=True)
+                leaf = Path(tmp) / "leaf.png"
+                leaf.symlink_to(real / "m.png")
+                self.assertEqual(self.run_files("before", state, media, wt, jm, real / "m.png", 1), (0, f"READY yes {jm}-1"))
+                for photo_path in (link_dir / "m.png", leaf):
+                    self.assertEqual(self.run_files("before", state, media, wt, jm, photo_path, 1), (1, "ABORT photo-unreadable"))
+                    self.assertEqual(self.run_files("after", state, media, wt, jm, photo_path, 1), (1, "ABORT photo-unreadable"))
+                moved = Path(tmp) / "moved-card-dir"
+                card_dir = Path(media) / "npp" / jm
+                card_dir.rename(moved)
+                card_dir.symlink_to(moved, target_is_directory=True)
+                self.assertEqual(self.run_files("before", state, media, wt, jm, real / "m.png", 1),
+                                 (1, "ABORT card-bytes-missing-or-changed"))
+                card_dir.unlink()
+                moved.rename(card_dir)
+                for name, field in (("media-link", "media"), ("worktree-link", "wt"), ("state-link", "state")):
+                    link = Path(tmp) / name
+                    link.symlink_to({"media": media, "wt": wt, "state": state}[field], target_is_directory=True)
+                    use = {"media": media, "wt": wt, "state": state}
+                    use[field] = link
+                    code, out = self.run_files("before", use["state"], use["media"], use["wt"], jm, real / "m.png", 1)
+                    self.assertEqual(code, 1, (name, out))
+                    self.assertIn(out, {"ABORT card-bytes-missing-or-changed", "ABORT catalog-unreadable", "ABORT could-not-check"})
+                self.assertEqual(self.run_files("before", state, media, wt, jm, real / "m.png", 1), (0, f"READY yes {jm}-1"))
 
                 # the one yes posts Mike's listing only; the gate then reports what is served
                 before_commits = self.commits_in(wt)

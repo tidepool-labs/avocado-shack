@@ -60,7 +60,7 @@ class NppIdiomVariantsTests(unittest.TestCase):
 
     def test_c2_findings_trailer(self):
         # A later acceptance must not clear an earlier finding or change the exit code.
-        with patch.object(self.script, "VARIANTS", ("Half & Half", *ACCEPTED)):
+        with patch.object(self.script, "VARIANTS", ("half/half", *ACCEPTED)):
             status, lines = self.invoke()
         self.assertEqual(status, 1)
         self.assertEqual(lines[-1], FAIL)
@@ -69,7 +69,7 @@ class NppIdiomVariantsTests(unittest.TestCase):
 
     def test_c2_1_idiom_refused(self):
         # Findings must be numbered by spelling position, not by refusal count.
-        variants = (ACCEPTED[0], "Half & Half", ACCEPTED[1], "half/half")
+        variants = (ACCEPTED[0], "half/half", ACCEPTED[1], "half / half")
         with patch.object(self.script, "VARIANTS", variants):
             status, lines = self.invoke()
         self.assertEqual(status, 1)
@@ -147,7 +147,8 @@ class NppIdiomVariantsTests(unittest.TestCase):
         status, lines = self.invoke()
         self.assertEqual(status, 1)
         self.assertEqual(lines[-1], FAIL)
-        refused = (3, 4, 5, 6, 7, 8, 12)
+        # "&" and "n" spellings are the product name (HALF_AND_HALF); only the slash stays refused.
+        refused = (8,)
         self.assertEqual([line for line in lines if line.startswith("idiom ")], [
             f"idiom {i:02d} problem={'number-unclear' if i in refused else 'none'}"
             for i in range(1, 13)

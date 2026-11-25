@@ -90,7 +90,7 @@ def captured_dom(evidence, png, product_id):
 
 
 def dom_problem(nodes, price_index, price, name, approved=(), private=(), allowed=None, required=(), *,
-                maker=None, maker_count=None, organic=False):
+                maker=None, maker_count=None, organic=False, once=()):
     """`nodes` are visible DOM text fragments in order, with the exact price element identified.
 
     Keep numbers licensed in copy only in exact, already checked fields; no numeric-value
@@ -98,6 +98,7 @@ def dom_problem(nodes, price_index, price, name, approved=(), private=(), allowe
     When `allowed` is given, every other public fragment must equal one of those approved
     strings (whitespace-folded) and every `required` string must be rendered, so a swapped
     description or any extra claim fails even if it has no contact or number in it.
+    Each string in `once` may be rendered at most once (an exempted catalog fragment cannot be repeated).
     """
     if not isinstance(nodes, (tuple, list)):
         return 'card-text'
@@ -141,6 +142,8 @@ def dom_problem(nodes, price_index, price, name, approved=(), private=(), allowe
     # Also inspect adjacent fragments for OCR-like/spoken splits of numbers and money.
     if numbers.problem(' '.join(scan), private):
         return 'card-number'
+    if any(shown.count(_flat(text)) > 1 for text in once):
+        return 'card-copy'
     if allowed is not None:
         if any(text and text not in allowed for text in shown):
             return 'card-copy'
@@ -174,14 +177,22 @@ def _catalog_story_shown(story):
 
 
 def _catalog_story_numbers_ok(story, private):
-    """Published catalog text may carry a founded year or a number-like word ("the point is"), never a money amount,
-    a contact or any reading that equals one of this listing's private values (cost, quantity)."""
+    """Published catalog text may carry a founded year or the bare word "point" ("The point is the fruit"), never a
+    money amount, a contact or a reading that equals one of this listing's private values (cost, quantity).
+
+    Fail closed: 'number-unclear' is tolerated only when its sole cause is "point" in a story with no number reading or
+    numeric character at all (so it cannot be a decimal separator). Any other unclear reading ("twelve hundred",
+    "a couple", Unicode numerals, NFKC changes) keeps the story off."""
     if not isinstance(story, str) or _contact(story):
         return False
-    if numbers.problem(story, private, digits_allowed=True) not in (None, 'number-unclear'):
+    found = numbers.problem(story, private, digits_allowed=True)
+    if found is None:
+        return True  # problem() already refuses money and any private reading
+    if found != 'number-unclear':
         return False
-    folded = unicodedata.normalize('NFKC', story)
-    return not any(n.amounts & set(private) for n in (*numbers.values(story), *numbers.values(folded)))
+    if unicodedata.normalize('NFKC', story) != story or any(c.isnumeric() for c in story) or numbers.values(story):
+        return False
+    return numbers.problem(re.sub(r'\bpoint\b', ' ', story, flags=re.I), private, digits_allowed=True) is None
 
 
 @dataclass(frozen=True)
@@ -289,9 +300,10 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
     # claim is origin narration (_catalog_story_shown) and it carries no money, contact or private reading; a founded
     # year or "the point is" is fine. Without this every new product from most known makers failed as 'card-copy' or
     # 'card-number' (private replay, golden cases 5, 6 and 11).
-    catalog_story = ()
+    catalog_story, once = (), ()
     if not new_makers and _catalog_story_shown(maker.get('story')):
         panel.append(maker.get('story'))
+        once = (maker['story'],)  # the maker panel shows it once; a repeated copy is an extra claim line
         if _catalog_story_numbers_ok(maker['story'], private):
             catalog_story = (maker['story'],)
     # The computed origin line is derived from the maker's place ("Based in <place>"), so it is bound the same way: it is
@@ -309,6 +321,7 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
                                         maker=maker['name'] if _panel_clean(maker.get('name')) else None,
                                         maker_count=maker_count,
                                         organic=claims_passed and bool(re.search(r'\borganic\b', product.get('name') or '', re.I)),
+                                        once=once,
                                         required=tuple(text[k] for k in ('name', 'description', 'story') if text.get(k)))):
         problems.append(problem)
     if not claims_passed:

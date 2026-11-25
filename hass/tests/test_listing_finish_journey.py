@@ -6,8 +6,10 @@ transcript through a verify and a restore drill. Reuses the HRM-04 undo-journey 
 local writer and transcript). No network, no Clover, no live site.
 """
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import tempfile
@@ -23,6 +25,14 @@ from hass.tests.test_editor import git
 PUBLIC_KEYS = {"id", "name", "brand", "category", "image", "description", "producerKey", "displayBrand",
                "imageAlt", "sellingPrice", "addedOn"}
 PRIVATE_WORDS = ("cost", "qty", "quantity", "stock", "count", "margin", "wholesale", "supplier")
+COLUMNS = "direction, kind, disposition, draft_code, text, attachments"
+
+
+def leaks(history, text):
+    """True if a conversation message is in the release text: a long one anywhere, a short one as a whole line or JSON value."""
+    if len(text) >= 20:
+        return text in history
+    return json.dumps(text) in history or any(line[1:].strip() == text for line in history.splitlines())
 
 
 class ListingFinishJourneyTests(journey.NppUndoJourneyTests):
@@ -40,10 +50,10 @@ class ListingFinishJourneyTests(journey.NppUndoJourneyTests):
     def public(self):
         return next((p for p in self.repo.catalog() if p["id"] == self.pid), None)
 
-    def transcript(self):
-        path = self.repo.state / "transcript.sqlite3"
+    def transcript(self, path=None):
+        path = path or self.repo.state / "transcript.sqlite3"
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
-            return db.execute("SELECT direction, kind, disposition, draft_code, text FROM events ORDER BY id").fetchall()
+            return db.execute(f"SELECT {COLUMNS} FROM events ORDER BY id").fetchall()
 
     def test_f1_public_listing_is_the_approved_card_and_nothing_private(self):
         self.publish()
@@ -60,11 +70,12 @@ class ListingFinishJourneyTests(journey.NppUndoJourneyTests):
             self.assertNotIn(word, [k.lower() for k in public], word)
             self.assertNotIn(f'"{word}', blob, word)
         # The release commit touches only the content records, their generated site files and this item's own photo.
+        photo = "storefront-mockup/" + public["image"]
         expected = {"hass/content/makers.json", "hass/content/products.json", journey.CATALOG, journey.PRODUCERS,
-                    "storefront-mockup/producers.js", "storefront-mockup/" + public["image"]}
+                    "storefront-mockup/producers.js", photo}
         self.assertEqual(set(self.repo.committed()), expected)
         # No chat or sender id reaches anything the release wrote (a bool, so a failure never prints the diff).
-        patch = git(self.repo.wt, "show", "--format=", "HEAD", "--", *sorted(expected - {"storefront-mockup/" + public["image"]}))
+        patch = git(self.repo.wt, "show", "--format=", "HEAD", "--", *sorted(expected - {photo}))
         for secret in (CHAT, OWNER):
             self.assertFalse(secret in patch, "private id in a release diff")
 
@@ -82,27 +93,39 @@ class ListingFinishJourneyTests(journey.NppUndoJourneyTests):
         self.draft_hide()
         self.confirm_hide()
         rows = self.transcript()
-        self.assertEqual([(r[0], r[2]) for r in rows if r[0] == "in"],
-                         [("in", "npp-working"), ("in", "approved"), ("in", "proposed"), ("in", "approved")])
         inbound = [r for r in rows if r[0] == "in"]
-        self.assertEqual([r[4] for r in inbound][0], f"sell ${journey.PRICE}")
+        outbound = [r for r in rows if r[0] == "out"]
+        self.assertEqual([r[2] for r in inbound], ["npp-working", "approved", "proposed", "approved"])
+        self.assertEqual(inbound[0][4], f"sell ${journey.PRICE}")
         self.assertTrue(inbound[1][4].startswith("yes "))
         self.assertEqual(inbound[2][4], "undo")
         self.assertEqual(inbound[3][4], f"yes {self.hide_code}")
-        # Every reply Hass queued is on file too, and the card and the yes share the listing's code.
-        self.assertTrue(any(r[0] == "out" and r[3] and r[3].endswith("-1") for r in rows))
-        self.assertEqual(sum(r[0] == "out" for r in rows), len(rows) - 4)
+        # Every reply Hass sent is on file, matched one by one to what the fake transport independently captured:
+        # the card (text + picture) and each preview (text + picture), with the picture's own SHA-256.
+        sent = [(text, hashlib.sha256(png).hexdigest()) for text, png, _digest in self.transport.cards.values()]
+        sent += [(text, hashlib.sha256(pic).hexdigest()) for text, pics in self.transport.previews for pic in pics]
+        self.assertEqual(len(sent), 4)
+        self.assertFalse(self.transport.texts)  # nothing went out by a path the transcript might miss
+        self.assertEqual(sorted((r[4], tuple(json.loads(r[5]))) for r in outbound), sorted((t, (d,)) for t, d in sent))
+        self.assertEqual(len(rows), len(inbound) + len(outbound))
         path = self.repo.state / "transcript.sqlite3"
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:  # the ids the git checks below look for are really here
             self.assertEqual(db.execute("SELECT DISTINCT chat, sender FROM events WHERE direction='in'").fetchall(), [(CHAT, OWNER)])
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-        wt = self.repo.wt.resolve()
-        self.assertNotIn(wt, path.resolve().parents)
-        tracked = git(self.repo.wt, "ls-files").splitlines()
-        self.assertFalse([t for t in tracked if t.endswith(".sqlite3")])
-        history = git(self.repo.wt, "log", "-p", f"{self.base_head}..HEAD")  # what the two approvals committed
-        for secret in (CHAT, OWNER, "transcript.sqlite3", "yes " + self.hide_code):
+        self.assertNotIn(self.repo.wt.resolve(), path.resolve().parents)
+        self.assertFalse([t for t in git(self.repo.wt, "ls-files").splitlines() if t.endswith(".sqlite3")])
+        # Nothing the two approvals committed (messages and diffs) carries any conversation message, either approval
+        # code as a token, or a "yes <code>" phrase. Booleans only, so a failure never prints private text.
+        history = git(self.repo.wt, "log", "-p", "--format=%B", f"{self.base_head}..HEAD")
+        for direction, kind, _disposition, _code, text, _attachments in rows:
+            self.assertFalse(leaks(history, text), f"a {direction} {kind} message is in a release commit")
+        for code in (self.publish_code, self.hide_code):
+            self.assertFalse(re.search(rf"(?<![0-9A-Za-z-]){re.escape(code)}(?![0-9A-Za-z])", history), "approval code in a release commit")
+            self.assertFalse(f"yes {code}" in history)
+        for secret in (CHAT, OWNER, "transcript.sqlite3"):
             self.assertFalse(secret in history, "private text in a release commit")
+        # The leak check can fail: a message put into the release text is found.
+        self.assertTrue(leaks(history + "\n+undo\n", "undo") and leaks(history + f"\n {inbound[0][4]}", inbound[0][4]))
 
     def test_f4_backup_carries_the_transcript_through_a_restore_drill(self):
         self.publish()
@@ -122,10 +145,7 @@ class ListingFinishJourneyTests(journey.NppUndoJourneyTests):
             git(self.repo.main, "worktree", "add", "-q", "-b", "hass/drill", str(drill_wt))
             drilled = statebackup.drill(backup, Path(tmp) / "restored", drill_wt, media_into=Path(tmp) / "restored-media")
             self.assertEqual(drilled["result"], "ok", drilled)
-            restored = Path(drilled["state"]) / "transcript.sqlite3"
-            with sqlite3.connect(f"file:{restored}?mode=ro", uri=True) as db:
-                after = db.execute("SELECT direction, kind, disposition, draft_code, text FROM events ORDER BY id").fetchall()
-            self.assertEqual(after, before)
+            self.assertEqual(self.transcript(Path(drilled["state"]) / "transcript.sqlite3"), before)
 
 
 # Run only this module's own journeys, not the inherited HRM-04 ones (those have their own module).

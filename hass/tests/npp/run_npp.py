@@ -993,12 +993,38 @@ def public_holds(text, term):
     return bool(term) and re.search(r'(?<!\w)' + re.escape(term), text.casefold()) is not None
 
 
-def public_text(records, card_dom=()):
-    """What a visitor can read: each record's stored fields (``after``) and the card's captured DOM text.
+def public_text(records, card_dom=(), makers=None):
+    """What a visitor can read: the product's visible fields, its resolved maker panel, and the card's DOM text.
 
-    Owner transport messages (the 'Post this? Reply yes ...' line and its '(left off: ...)' bracket) and record
-    metadata (collection, key, op, before) are not public, so a required owner note never counts as a leak."""
-    return '\n'.join([json.dumps([r.get('after') for r in records], ensure_ascii=False), *card_dom])
+    Only the fields the storefront shows count: PRODUCT_PUBLIC_FIELDS / PRODUCT_OPTIONAL_PUBLIC minus ids, picture
+    path, producerKey and dates, plus the shelf label and '$' price; and MAKER_FIELDS of a visible maker. Internal
+    fields (PRODUCT_INTERNAL_FIELDS such as hold/ownerSource), record metadata (collection, key, op, before) and the
+    owner's transport message ('Post this? Reply yes ...' and its '(left off: ...)' bracket) are never public.
+    A product's maker is resolved from ``makers`` (producerKey -> record: catalog plus draft) and the records, so an
+    existing maker's story counts even when this change did not write it. A hidden maker is not shown."""
+    from hass import content_model as cm
+    written = {r.get('key'): r.get('after') or {} for r in records if r.get('collection') == 'makers'}
+    known = {**(makers or {}), **written}
+    parts = []
+
+    def maker_panel(maker):
+        if maker and not maker.get('hidden'):
+            parts.extend(str(maker[f]) for f in cm.MAKER_FIELDS if maker.get(f))
+
+    for r in records:
+        after = r.get('after') or {}
+        if r.get('collection') == 'products':
+            parts.extend(str(after[f]) for f in ('name', 'brand', 'displayBrand', 'description', 'imageAlt', 'supplier')
+                         if after.get(f))
+            if after.get('category') in cm.SHELF_LABELS:
+                parts.append(cm.SHELF_LABELS[after['category']])
+            if after.get('sellingPrice'):
+                parts.append('$' + str(after['sellingPrice']))
+            if after.get('producerKey') and after['producerKey'] not in written:
+                maker_panel(known.get(after['producerKey']))
+        elif r.get('collection') == 'makers':
+            maker_panel(after)
+    return '\n'.join([*parts, *card_dom])
 
 
 def listing_findings(want, product, makers):
@@ -1291,7 +1317,7 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
         if 'public_lacks' in want and 'public_lacks' not in newly_covered and not contradiction:
             card_dom = [m['text'] for v in versions.values() for m in captures.get(v.get('card_png_sha'), [])
                         if m.get('text')]
-            public = public_text(record.get('records', []), card_dom)
+            public = public_text(record.get('records', []), card_dom, makers)
             for term in want['public_lacks']:
                 if public_holds(public, term):
                     bad.append(f'public listing or card holds {term!r}')

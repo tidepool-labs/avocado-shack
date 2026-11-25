@@ -576,6 +576,38 @@ class GenericObserverTests(unittest.TestCase):
         self.assertTrue(run_npp.public_holds(leaked, "immune"))
         self.assertTrue(run_npp.public_holds(run_npp.public_text([], ["supports immunity"]), "support"))
 
+    def test_public_text_ignores_internal_fields_and_metadata(self):
+        # Contract: only fields a visitor sees count. Bug it catches: serializing every field name and value, so a
+        # nonpublic id 'immune-syrup' (or an internal hold/ownerSource note) failed a clean listing.
+        product = {"id": "immune-syrup", "name": "Elderberry syrup", "brand": "Hillside", "category": "pantry",
+                   "image": "assets/support-photo.jpg", "description": "A dark berry syrup.", "producerKey": "hillside",
+                   "status": "held", "hold": {"reason": "immune support claim"}, "ownerSource": "immune support",
+                   "labelSource": "support", "addedOn": "2026-11-01", "sellingPrice": "6.00"}
+        records = [{"collection": "products", "key": "immune-syrup", "op": "add", "before": {"name": "immune"},
+                    "after": product}]
+        makers = {"hillside": {"name": "Hillside Farm", "place": "Ojai, California", "story": "Berries since 1990."}}
+        public = run_npp.public_text(records, (), makers)
+        for term in ("immune", "support", "held", "claim", "2026", "collection", "add"):
+            self.assertFalse(run_npp.public_holds(public, term), term)
+        for seen in ("Elderberry syrup", "A dark berry syrup.", "Pantry", "$6.00", "Hillside Farm", "Ojai, California"):
+            self.assertIn(seen, public)
+
+    def test_public_text_includes_the_resolved_maker_panel(self):
+        # Contract: a listing's visible maker panel is public text. Bug it catches: reading only the product record, so
+        # an immune claim in an existing maker's story (referenced, not newly written) was never seen.
+        product = {"name": "Elderberry syrup", "description": "A dark berry syrup.", "producerKey": "hillside"}
+        records = [{"collection": "products", "key": "p1", "op": "add", "before": None, "after": product}]
+        catalog = {"hillside": {"name": "Hillside Farm", "place": "Ojai, California",
+                                "story": "Our elderberries boost immune health."}}
+        self.assertFalse(run_npp.public_holds(run_npp.public_text(records), "immune"))  # no maker resolved
+        self.assertTrue(run_npp.public_holds(run_npp.public_text(records, (), catalog), "immune"))
+        # A maker this change writes wins over the catalog, and a hidden maker is not shown.
+        written = records + [{"collection": "makers", "key": "hillside", "op": "edit", "before": None,
+                              "after": {"name": "Hillside Farm", "place": "Ojai, California", "story": "Berries."}}]
+        self.assertFalse(run_npp.public_holds(run_npp.public_text(written, (), catalog), "immune"))
+        hidden = {"hillside": {**catalog["hillside"], "hidden": True}}
+        self.assertFalse(run_npp.public_holds(run_npp.public_text(records, (), hidden), "immune"))
+
     def test_public_terms_match_at_a_word_start_only(self):
         self.assertTrue(run_npp.public_holds("Good for eating", "eat"))
         self.assertFalse(run_npp.public_holds("A great glue for heat", "eat"))

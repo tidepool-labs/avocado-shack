@@ -227,6 +227,33 @@ class ValidateTests(unittest.TestCase):
             with self.subTest(story=story):
                 self.assertFalse(ok(story, private))
 
+    def test_catalog_story_private_quantity_is_refused_on_record_and_card_behind_unread_number_forms(self):
+        # Contract: a catalog story may be shown with an unclear number verdict ("the point is") only when every number in
+        # it is read in full. Bug caught (review RETURN): with private quantity 1200, "twelve hundred trees" was
+        # number-unclear, values() read only "twelve", so the story passed the record and card exemptions and showed 1200.
+        # The same hole stood open for any scale or shorthand word and for numerals outside the decimal digits.
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+        big = finance('cost $3; sell $3 each; qty 1200')
+        self.assertIn(1200, big.private)
+        ctx = replace(self.ctx, private=big.private)
+
+        def verdict(story):
+            makers = {'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}
+            return validate.listing(self.writer, ctx, self.copy, self.draft, **(self.kw | dict(
+                finance=big, makers=makers, origin=origin, card_nodes=[*self.nodes, origin, story]))).problems
+        plain = verdict('We grow plums on a small hill.')
+        self.assertEqual(plain, ('existing-claims',))
+        self.assertEqual(verdict('We grow plums. The point is the fruit.'), plain)
+        for story in ('We planted twelve hundred trees.', 'We planted 12 hundred trees.', 'We planted one thousand two hundred trees.',
+                      'We planted twelve point five trees.', 'We planted a couple of trees.', 'We planted \u00bd the orchard.',
+                      'We planted \u5341\u4e8c trees.', 'We planted \u2161 trees.', 'We planted twelve\u00b2 trees.'):
+            with self.subTest(story=story):
+                self.assertFalse(validate._catalog_story_numbers_ok(story, big.private))
+                problems = verdict(story)
+                self.assertIn('public-text', problems)
+                self.assertIn('card-number', problems)
+
     def test_existing_maker_name_and_place_are_shown_only_when_they_carry_no_protected_claim(self):
         # Contract: the card-copy gate binds EVERY maker-panel fragment, not only the story. Bug caught: an existing
         # maker whose catalog name/place was "This cures cancer." was auto-allowed on the card (no contact or number in it).

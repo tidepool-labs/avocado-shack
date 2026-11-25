@@ -81,6 +81,8 @@ WORD_PX = 8  # a word under this many px high in Mike's photo is too small to ju
 WORD_HEIGHT = 24  # both word patches are compared at this height
 WORD_SEARCH = 0.6  # the search around the mapped spot, as a share of the word's size
 WORD_ZOOM = (0.85, 1.0, 1.15)  # word sizes tried around the mapped one
+WORD_ANCHORS = 2  # a shift shared by the whole word map is taken only from at least this many surely kept words
+WORD_AGREE = 0.25  # ...that all agree on it to within this share of the smallest one's height
 WORK = 200  # Mike's photo is searched on a copy this many px on its long side
 REGISTER_SPAN = 1.12  # the word map's height may differ from the coarse match by this factor (width: STRETCH range too)
 REGISTER_STEPS = 80  # at most this many one-px refinement steps for the word map, per climb
@@ -687,23 +689,58 @@ def kept_scores(original, framed, mapping, read):
     """The other way round: for each word read on Mike's photo, how well the same spot of the edited picture shows
     the same marks, or None when that cannot be judged (it is off the place ``match`` found the product, too small, or
     has no marks). A blanked or partly erased label does not look like the photo's words there any more. The search
-    reaches no further sideways than up and down: a wide one would let an erased word match the next word along."""
+    reaches no further sideways than up and down: a wide one would let an erased word match the next word along.
+    When at least WORD_ANCHORS words are surely kept and all sit off their mapped spots by the same few px
+    (``_shared_shift``), a word that did not look surely kept is searched for once more, the same distance around its
+    spot moved by that shift: the whole map was off, and a small word's search is only as wide as the word is high."""
     Image, _, _ = _pil()
     (fw, fh), (rx, ry, rw, rh), (bx0, by0, bx1, by1) = mapping
     photo = newitem_render._upright(original)[0].convert("L")
     grey = Image.open(io.BytesIO(framed)).convert("L")
     sx, sy = rw * fw / max(1, bx1 - bx0), rh * fh / max(1, by1 - by0)  # photo px per framed px
-    out = []
+    out, fits = [], []
     for word, (left, top, width, height) in read:
         mid_x, mid_y = left + width / 2, top + height / 2
         if not (rx * fw <= mid_x <= (rx + rw) * fw and ry * fh <= mid_y <= (ry + rh) * fh):
             out.append((word, None, None))
+            fits.append(None)
             continue
         at = (bx0 + (left - rx * fw) / sx, by0 + (top - ry * fh) / sy)  # the word's top-left on the edited picture
         where = (at[0], at[1], width / sx, height / sy)  # this occurrence's box on the edited picture
-        out.append((word, _spot(photo, (left, top, width, height), grey, at, (1 / sx, 1 / sy),
-                                slide=WORD_SEARCH * height / max(1, width)), where))
+        args = (photo, (left, top, width, height), grey, at, (1 / sx, 1 / sy))
+        fit = _spot_fit(*args, slide=WORD_SEARCH * height / max(1, width))
+        out.append((word, None if fit is None else fit[0], where))
+        fits.append((args, WORD_SEARCH * height / max(1, width), fit))
+    shift = _shared_shift([f[2] for f in fits if f and f[2] and f[2][0] >= WORD_SURE],
+                          [o[2][3] for o, f in zip(out, fits) if f and f[2] and f[2][0] >= WORD_SURE])
+    if shift is None:
+        return out
+    for i, (item, fit) in enumerate(zip(out, fits)):  # a small word a shared shift carried out of its own search
+        if fit is None or item[1] is None or item[1] >= WORD_SURE:
+            continue
+        (src, box, dst, at, step), slide, _ = fit
+        moved = (at[0] + shift[0], at[1] + shift[1])
+        again = _spot_fit(src, box, dst, moved, step, slide=slide)
+        if again is not None and again[0] > item[1]:
+            out[i] = (item[0], again[0], (moved[0], moved[1]) + tuple(item[2][2:]))
     return out
+
+
+def _shared_shift(fits, heights):
+    """(dx, dy) on the edited picture by which every surely kept word (at least WORD_ANCHORS of them, each found at or
+    over WORD_SURE) sits off its mapped spot, or None. The word map comes from the product's correlation and can be
+    a few px off as a whole; a big word's search covers that, a small word's (scaled to its own height) may not. The
+    shift is taken only when every such word agrees on it to within WORD_AGREE of the smallest one's height; it only
+    moves where a word is searched for, never how far or how well it must match."""
+    if len(fits) < WORD_ANCHORS:
+        return None
+    dxs, dys = sorted(f[1] for f in fits), sorted(f[2] for f in fits)
+    mid = lambda v: (v[(len(v) - 1) // 2] + v[len(v) // 2]) / 2  # noqa: E731
+    shift = (mid(dxs), mid(dys))
+    room = WORD_AGREE * min(heights)
+    if any(abs(f[1] - shift[0]) > room or abs(f[2] - shift[1]) > room for f in fits):
+        return None
+    return shift
 
 
 def _spot(src, box, dst, at, step, *, slide=WORD_SEARCH):
@@ -711,6 +748,12 @@ def _spot(src, box, dst, at, step, *, slide=WORD_SEARCH):
     search around ``at`` (the word's mapped top-left in ``dst`` px; ``step``: dst px per src px), both brought to a word
     WORD_HEIGHT px high; None when the word is under WORD_PX high on either picture or has no marks to compare. The
     search reaches WORD_SEARCH of the word's height up and down and ``slide`` of its width sideways."""
+    fit = _spot_fit(src, box, dst, at, step, slide=slide)
+    return None if fit is None else fit[0]
+
+
+def _spot_fit(src, box, dst, at, step, *, slide=WORD_SEARCH):
+    """``_spot`` as (score, dx, dy): also where in ``dst`` px, from ``at``, the best place was found."""
     Image, ImageChops, ImageStat = _pil()
     left, top, width, height = box
     (cx, cy), (sx, sy) = at, step
@@ -725,15 +768,17 @@ def _spot(src, box, dst, at, step, *, slide=WORD_SEARCH):
     area = (round(cx - pad_x), round(cy - pad_y), round(cx + width * sx + pad_x), round(cy + height * sy + pad_y))
     full = Image.new("L", tmpl.size, 255)
     ts = ImageStat.Stat(tmpl, full)
-    best = -1.0
+    best = (-1.0, 0.0, 0.0)
     for zoom in WORD_ZOOM:  # the mapping is only as exact as the match's size steps: try a little bigger and smaller
         region = dst.crop(area).resize((max(1, round((area[2] - area[0]) * k * zoom / sx)),
                                         max(1, round((area[3] - area[1]) * k * zoom / sy))), Image.Resampling.LANCZOS)
+        per_x, per_y = (area[2] - area[0]) / region.width, (area[3] - area[1]) / region.height  # dst px per region px
         for y in range(0, max(1, region.height - tmpl.height + 1)):
             for x in range(0, max(1, region.width - tmpl.width + 1), 2):
-                best = max(best, _ncc(ImageChops, ImageStat, region.crop((x, y, x + tmpl.width, y + tmpl.height)),
-                                      tmpl, full, ts))
-    return round(best, 3)
+                score = _ncc(ImageChops, ImageStat, region.crop((x, y, x + tmpl.width, y + tmpl.height)), tmpl, full, ts)
+                if score > best[0]:
+                    best = (score, area[0] + x * per_x - cx, area[1] + y * per_y - cy)
+    return (round(best[0], 3), best[1], best[2])
 
 
 def photo_words(original):

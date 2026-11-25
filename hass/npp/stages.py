@@ -150,6 +150,9 @@ class ProductionStages(Stages):
             label = None
         label_words = [word for word in reading.get('label_words', []) if not validate._contact(word)
                        and not private_numbers.problem(word, private)]
+        # Printed claims reach only the Writer's drop list and the owner's card note, never public text.
+        label_claims = [claim for claim in reading.get('visible_claims') or [] if isinstance(claim, str)
+                        and not validate._contact(claim) and not private_numbers.problem(claim, private)]
         # The durable listing is a narrow projection, not a caption, full model read, or research transcript.
         return Plan(listing={
             'name': decision.item, 'category': decision.category or 'general', 'kind': reading.get('kind') or 'non-food',
@@ -159,7 +162,7 @@ class ProductionStages(Stages):
             'makerKey': maker.key, 'newMaker': maker.state == 'new', 'town': town, 'url': url,
             'facts': [{**{k: fact[k] for k in ('id', 'slot', 'value', 'url', 'quote')}, 'verdict': 'supports'} for fact in facts],
             'photo': shas[0], 'personOrScreen': reading.get('has_person_or_screen'),
-            'size': reading.get('size_text'), 'labelWords': label_words,
+            'size': reading.get('size_text'), 'labelWords': label_words, 'labelClaims': label_claims,
         }, identified=True)
 
     def _picture(self, work, listing, private, *, local):
@@ -209,7 +212,7 @@ class ProductionStages(Stages):
         context = copy.Context(listing['kind'], listing['category'], frozen.variant, listing['name'], owner,
                                brand=brand, maker_name=name if fresh else '', town=town if fresh else '',
                                size_text=(listing['size'] or '') if sha == listing['photo'] else '', source_read=source or '',
-                               facts=facts, private=finance.private,
+                               facts=facts, private=finance.private, label_claims=tuple(listing.get('labelClaims') or ()),
                                other_descriptions=tuple(p['description'] for p in content.active_products() if p.get('description')))
         selector = None if local or self._remaining(work) < 26 else self.selector
         draft, written, origin = self._candidate(context, listing, finance, content.makers, key, fresh, url, sha, selector)
@@ -238,6 +241,8 @@ class ProductionStages(Stages):
             parts['picture_own_photo' if frozen.variant == 'raw' else 'picture_house'] = {}
         if written.basic:
             parts['basic_wording'] = {}
+        if written.dropped:
+            parts['claim_left_off'] = {'claim': ', '.join(written.dropped)}
         if fresh and 'story' not in written.text:
             parts['story_not_found'] = {}
         label = None

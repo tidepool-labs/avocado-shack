@@ -20,12 +20,12 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts/hass/npp_claim_note_reach.py"
 TRAILER = "FAIL npp_claim_note_reach"
-# C7: the unpatched baseline measured at main. Update when the stage wiring lands (live pin).
+# C7: the live pin at main once the stage wiring landed (H14 claim note): every case reaches the note.
 BASELINE = [
-    "claim organic writer_input=no writer_drop=no card_note=no",
-    "claim health writer_input=no writer_drop=no card_note=no",
+    "claim organic writer_input=yes writer_drop=yes card_note=yes",
+    "claim health writer_input=yes writer_drop=yes card_note=yes",
     "claim no_claim writer_input=yes writer_drop=yes card_note=yes",
-    "FAIL label-claims-unpassed", "FAIL writer-drop-mismatch", "FAIL claim-note-mismatch", TRAILER,
+    "PASS npp_claim_note_reach",
 ]
 
 
@@ -67,42 +67,47 @@ def _expression(text):
     return ast.parse(text, mode="eval").body
 
 
-def _carry_claims_into_plan(tree):
+def _drop_claims_from_plan(tree):
     for node in ast.walk(tree):
-        if isinstance(node, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "labelWords" for k in node.keys):
-            node.keys.append(ast.Constant("labelClaims"))
-            node.values.append(_expression("list(reading.get('visible_claims') or [])"))
+        if isinstance(node, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "labelClaims" for k in node.keys):
+            index = next(i for i, k in enumerate(node.keys) if isinstance(k, ast.Constant) and k.value == "labelClaims")
+            del node.keys[index], node.values[index]
             return
     raise AssertionError("listing projection moved")
 
 
-def _pass_claims_and_note_dropped(tree):
+def _unpass_claims_and_note(tree):
     function = tree.body[0]
     for node in ast.walk(function):
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "copy.Context":
-            node.keywords.append(ast.keyword("label_claims", _expression("tuple(listing.get('labelClaims') or ())")))
+            kept = [k for k in node.keywords if k.arg != "label_claims"]
+            if len(kept) == len(node.keywords):
+                raise AssertionError("label_claims keyword moved")
+            node.keywords = kept
             break
     else:
         raise AssertionError("Context call moved")
-    note = ast.parse("if written.dropped:\n    parts['claim_left_off'] = {'claim': ', '.join(written.dropped)}").body[0]
     for index, node in enumerate(function.body):
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "written.basic":
-            function.body.insert(index + 1, note)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "written.dropped":
+            del function.body[index]
             return
     raise AssertionError("note parts moved")
 
 
 def reference_stages(module, *, unused_tokens=False):
-    """Real ProductionStages with S2's visible_claims carried through the Plan into Context, and the Writer's
-    omission composed into claim_left_off. With unused_tokens, only a method nothing calls names the old tokens."""
+    """The production ProductionStages now carries S2's visible_claims through the Plan into Context and composes the
+    Writer's omission into claim_left_off. With unused_tokens, a copy with that wiring cut out (in memory) where only a
+    method nothing calls names the tokens: the behavioural probe must stay red on it."""
     stages = module.stages
-    if unused_tokens:
-        def unused(self, ctx, written):
-            return ctx.label_claims, written.dropped, "claim_left_off"
-        return type("Disconnected", (stages.ProductionStages,), {"_unused": unused})
-    return type("Reference", (stages.ProductionStages,), {
-        "start_plan": _rebuilt(stages, "start_plan", _carry_claims_into_plan),
-        "render_listing": _rebuilt(stages, "render_listing", _pass_claims_and_note_dropped)})
+    if not unused_tokens:
+        return stages.ProductionStages
+
+    def unused(self, ctx, written):
+        return ctx.label_claims, written.dropped, "claim_left_off"
+    return type("Disconnected", (stages.ProductionStages,), {
+        "_unused": unused,
+        "start_plan": _rebuilt(stages, "start_plan", _drop_claims_from_plan),
+        "render_listing": _rebuilt(stages, "render_listing", _unpass_claims_and_note)})
 
 
 def clear_dropped(written):
@@ -174,7 +179,7 @@ class ClaimNoteReachTests(unittest.TestCase):
         # C4: the run writes nothing under hass/ or storefront-mockup/ (e.g. a stray card PNG or .pyc).
         before = snapshot()
         result = run_script()
-        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(snapshot(), before)
 
     def test_c5_output_shape(self):
@@ -213,10 +218,10 @@ class ClaimNoteReachTests(unittest.TestCase):
                                                      ("no_claim", True, True, True)])
 
     def test_c7_live_pins(self):
-        # C7: unpatched baseline at main: both claim cases all-no, control all-yes, three findings, exit 1.
+        # C7: live pin at main: both claim cases and the control all-yes, no findings, exit 0.
         result = run_script()
-        self.assertEqual((result.returncode, result.stdout.splitlines(), result.stderr), (1, BASELINE, ""))
-        self.assertEqual(result.stdout.splitlines()[-1], TRAILER)
+        self.assertEqual((result.returncode, result.stdout.splitlines(), result.stderr), (0, BASELINE, ""))
+        self.assertEqual(result.stdout.splitlines()[-1], "PASS npp_claim_note_reach")
 
 
 if __name__ == "__main__":

@@ -125,6 +125,24 @@ class LaterTurnsKeepOrClearTests(_Journey):
         seen = self.say_then([("cost about $3", guess)])
         self.assertEqual(seen, [{"qty": 50}])
 
+    def test_a_mentioned_but_unreadable_cost_clears_the_earlier_cost_with_no_reader(self):
+        for words in ("cost about $3", "cost $2 or $3", "cost $2; cost about $3", "paid maybe five dollars"):
+            with self.subTest(words):
+                self.assertEqual(self.say_then([(words, None)]), [{"qty": 50}])
+                self.assertEqual([r["answers"] for r in self.saved()], [{"qty": 50}])
+                self.setUp()
+
+    def test_a_mentioned_but_unreadable_count_clears_only_the_count_with_no_reader(self):
+        for words in ("quantity about 7", "got 5; got about 6", "stock: 5 or 6"):
+            with self.subTest(words):
+                self.assertEqual(self.say_then([(words, None)]), [{"cost": "1.00"}])
+                self.assertEqual([r["answers"] for r in self.saved()], [{"cost": "1.00"}])
+                self.setUp()
+
+    def test_a_clear_value_in_a_later_turn_still_replaces_the_earlier_one(self):
+        self.assertEqual(self.say_then([("cost $2", None), ("got 7", None)]),
+                         [{"cost": "2.00", "qty": 50}, {"cost": "2.00", "qty": 7}])
+
     def test_nothing_ambiguous_to_save_leaves_no_record(self):
         self.caption = f"Just bought 50 of these. I will sell at ${journey.PRICE} each"  # only a count to begin with
         self.assertEqual(self.say_then([("got 5; got 6", None)]), [None])
@@ -154,6 +172,26 @@ class FinanceLabelTests(unittest.TestCase):
         counts = finance("got 5; got 6")
         self.assertTrue(counts.has_qty)
         self.assertIsNone(counts.qty)
+
+    def test_a_mentioned_figure_that_cannot_be_read_is_named_but_never_labelled(self):
+        from hass.npp.private_numbers import finance
+        for words in ("cost about $3", "cost $2 or $3", "cost $2; cost about $3"):
+            with self.subTest(words):
+                got = finance(words)
+                self.assertEqual((got.has_cost, got.cost, got.has_qty, got.qty), (True, None, False, None))
+        for words in ("quantity about 7", "got 5; got about 6", "got about 6; got 5"):
+            with self.subTest(words):
+                got = finance(words)
+                self.assertEqual((got.has_qty, got.qty, got.has_cost, got.cost), (True, None, False, None))
+
+    def test_an_unreadable_clause_in_one_field_does_not_spoil_the_other(self):
+        from hass.npp.private_numbers import finance
+        got = finance("cost $2; got about 6")
+        self.assertEqual((got.cost, got.qty, got.has_qty), ("2.00", None, True))
+        got = finance("cost about $2; got 6")
+        self.assertEqual((got.cost, got.qty, got.has_cost), (None, 6, True))
+        got = finance("lovely jam, sell $5 each")
+        self.assertEqual((got.has_cost, got.has_qty, got.cost, got.qty), (False, False, None, None))
 
     def test_a_reader_inference_is_a_safety_token_never_a_label(self):
         from hass.npp.private_numbers import finance

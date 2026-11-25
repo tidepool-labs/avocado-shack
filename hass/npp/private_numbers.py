@@ -109,6 +109,23 @@ _COST_CUE = re.compile(r'\b(?:bought|purchased|paid|costs?|wholesale)\b', re.I)
 _SPOKEN_MONEY = re.compile(r'(costs?|sell(?:ing)?)\s+([a-z -]+?)(?:\s+(each|per (?:lb|pound)))?', re.I)
 
 
+_QTY_CUE = re.compile(r'\b(?:bought|got|have|purchased|qty|quantity|stock)\b', re.I)
+_MONEY_AMOUNT = re.compile(
+    rf'[$¢€£¥]\s*\d[\d,.]*|\d[\d,.]*\s*(?:cents?|dollars?|bucks?|usd)\b|'
+    rf'\b(?:{_WORD}[ -]+)?{_WORD}\s+(?:cents?|dollars?|bucks?)\b', re.I)
+
+
+def _names_cost(part):
+    """The clause talks about what the owner paid, with an amount or a word, whether or not it can be read."""
+    return bool(_COST_CUE.search(part)) and bool(_MONEY_AMOUNT.search(part) or _MONEY.search(part) or values(part))
+
+
+def _names_qty(part):
+    """The clause talks about how many he has, whether or not the count can be read (money amounts are not counts)."""
+    rest = _MONEY_AMOUNT.sub(' ', part)
+    return bool(_QTY_CUE.search(rest) or re.search(r'\bin\s+stock\b', rest, re.I)) and bool(values(rest))
+
+
 def finance(caption, *, answer_unit=None, local_answers=None):
     """Keep private numbers local. A verified local fallback may add safety tokens, not establish a price span.
 
@@ -123,6 +140,8 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     typed_costs = {parsed['cost']} if 'cost' in parsed else set()
     typed_counts = {parsed['qty']} if 'qty' in parsed else set()
     prices, public_parts = [], []
+    cost_said = qty_said = False  # a clause named the field, whether or not it could be read
+    cost_unclear = qty_unclear = False  # a clause named the field but gave no one value for it
     for start, end, clause in intake.caption_spans(caption):
         part = clause.strip().rstrip('.!').strip()
         remainder, atoms = intake.caption_answers(part)
@@ -138,6 +157,10 @@ def finance(caption, *, answer_unit=None, local_answers=None):
             count = intake._parse_qty(quantity[1])
             if count and type(count[0]) is int and 0 <= count[0] <= 100000:
                 atoms['qty'], remainder = count[0], ''
+        names_cost, names_qty = _names_cost(part), _names_qty(part)
+        cost_said, qty_said = cost_said or names_cost or 'cost' in atoms, qty_said or names_qty or 'qty' in atoms
+        cost_unclear = cost_unclear or (names_cost and 'cost' not in atoms)
+        qty_unclear = qty_unclear or (names_qty and 'qty' not in atoms)
         if 'cost' in atoms:
             costs.add(atoms['cost'])
             typed_costs.add(atoms['cost'])
@@ -173,8 +196,9 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     price, span = prices[0] if len(prices) == 1 and not unresolved else (None, None)
     if price is None or not valid_selling_price(price) or (parsed.get('price') is not None and not price.startswith(parsed['price'] + ' ')):
         price, span = None, None
-    # Labelled only when the owner's own words give exactly one value and no reader value disagrees with it.
-    cost = next(iter(typed_costs)) if len(typed_costs) == 1 and costs == typed_costs else None
-    qty = next(iter(typed_counts)) if len(typed_counts) == 1 and counts == typed_counts else None
+    # Labelled only when the owner's own words give exactly one value, no other clause of his leaves that field
+    # unresolved, and no reader value disagrees with it.
+    cost = next(iter(typed_costs)) if len(typed_costs) == 1 and costs == typed_costs and not cost_unclear else None
+    qty = next(iter(typed_counts)) if len(typed_counts) == 1 and counts == typed_counts and not qty_unclear else None
     return Finance(intake.without_unresolved_finance(public), price, span, frozenset(private),
-                   bool(costs), bool(counts), cost=cost, qty=qty)
+                   bool(costs) or cost_said, bool(counts) or qty_said, cost=cost, qty=qty)

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -193,6 +194,57 @@ class RestoredChatViewTests(unittest.TestCase):
         code, _ = run("--state", state, "--media", media, "--page", page)
         self.assertEqual(code, 1)
         self.assertEqual(run("--state", state, "--media", media, "--page", page, "--force")[0], 0)
+
+    def test_a_link_in_any_ancestor_of_the_state_or_media_path_is_refused(self):
+        state, media = self.restored()
+        hop = self.tmp / "hop"
+        hop.symlink_to(self.tmp)
+        for args in (("--state", hop / state.name, "--media", media), ("--state", state, "--media", hop / media.name)):
+            code, output = run(*args)
+            self.assertEqual(code, 1, args)
+            self.assertTrue(output.startswith("FAIL restored_chat_view"), output)
+            self.assertQuiet(output)
+
+    @unittest.skipIf(os.getuid() == 0, "root reads any folder")
+    def test_an_unreadable_media_folder_fails_closed(self):
+        state, media = self.restored()
+        locked = media / "npp/abcd1234"
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o700)
+        code, output = run("--state", state, "--media", media)
+        self.assertEqual(code, 1)
+        self.assertIn("media-unreadable", output)
+
+    def test_a_store_of_the_wrong_shape_is_a_label_not_a_traceback(self):
+        for name, ddl in (("no-id", "CREATE TABLE events(utc TEXT, attachments TEXT)"), ("no-table", "CREATE TABLE other(a)"),
+                          ("bad-json", None)):
+            state = private_dir(self.tmp, name)
+            db = sqlite3.connect(state / transcript.NAME)
+            if ddl:
+                db.execute(ddl)
+                if name == "no-id":
+                    db.execute("INSERT INTO events VALUES ('2000-01-01', '[]')")
+            else:
+                db.executescript(transcript.SCHEMA)
+                db.execute("INSERT INTO events(utc,chat,sender,direction,kind,text,attachments,disposition)"
+                           " VALUES('u','c','s','in','text','t','not json','queued')")
+            db.commit()
+            db.close()
+            os.chmod(state / transcript.NAME, 0o600)
+            code, output = run("--state", state)
+            self.assertEqual((code, output.strip()), (1, "FAIL restored_chat_view transcript-unsafe-or-unreadable"), name)
+
+    def test_a_png_named_picture_with_other_bytes_is_never_counted_as_restored(self):
+        state, media = self.restored()
+        fake = b"not-a-picture"
+        transcript.append(self.state, **transcript.event(CHAT, "hass", "out", "photo", TEXTS[2], attachments=[sha(fake)]))
+        shutil.copyfile(self.state / transcript.NAME, state / transcript.NAME)
+        (media / "npp/abcd1234" / f"card-{sha(fake)}.png").write_bytes(fake)  # right digest, not a picture
+        code, output = run("--state", state, "--media", media, "--page", self.tmp / "p.html")
+        self.assertEqual(code, 1)
+        self.assertIn("bad-bytes", output)
+        self.assertIn("attachments-missing-1", output)
+        self.assertFalse((self.tmp / "p.html").exists())
 
     def test_no_page_is_written_when_a_check_fails(self):
         state, media = self.restored()

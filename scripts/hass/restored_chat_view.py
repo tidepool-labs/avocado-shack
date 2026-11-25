@@ -36,6 +36,7 @@ ORIGINAL = re.compile(r"originals/([0-9a-f]{2})/\1([0-9a-f]{62})\.(?:jpg|png)")
 CARD = re.compile(r"npp/[0-9a-f]{4,12}/card-([0-9a-f]{64})\.png")
 SIDECAR = re.compile(r"originals/[0-9a-f]{2}/[0-9a-f]{64}\.json")
 MAX_BYTES = 20 * 1024 * 1024  # hass/media.py MAX_BYTES
+PNG_MAGIC, JPEG_MAGIC = b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"
 
 
 class Refused(Exception):
@@ -48,8 +49,37 @@ class PrivateParser(argparse.ArgumentParser):
         self.exit(2, "restored_chat_view: invalid arguments\n")
 
 
+def plain_path(path):
+    """True when no component of the absolute path is a link (the path equals its own real path)."""
+    absolute = os.path.abspath(path)
+    return os.path.realpath(absolute) == absolute
+
+
+def read_nofollow(top, rel):
+    """Bytes of the regular file `rel` under `top`, opened component by component without following any link."""
+    parts = rel.split("/")
+    fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    finally:
+        os.close(fd)
+    with os.fdopen(leaf, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError
+        data = handle.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise OSError
+    return data
+
+
 def rows(state):
     try:
+        if not plain_path(state):
+            raise Refused("state-path-has-a-link")
         with contextlib.closing(transcript.read(state)) as db:
             db.row_factory = sqlite3.Row
             out = []
@@ -61,47 +91,55 @@ def rows(state):
                     raise Refused("bad-event")
                 out.append(doc)
             return out
-    except (OSError, ValueError, TypeError, sqlite3.Error):
+    except Refused:
+        raise
+    except Exception:  # a store of the wrong shape (missing table/column, bad JSON) is a label, never a traceback
         raise Refused("transcript-unsafe-or-unreadable") from None
 
 
 def media_index(media):
-    """{sha: restored file}. Any link, non-regular entry or mis-named/mis-hashed file is refused or counted."""
+    """({sha: relative path}, problem counts). A link, odd entry, unreadable folder or bad file is a failure."""
     problems, found = {"link": 0, "bad-name": 0, "bad-bytes": 0}, {}
     if media is None:
         return found, problems
     top = Path(media)
-    if top.is_symlink() or not top.is_dir():
+    if not plain_path(top) or not top.is_dir():
         raise Refused("media-unsafe")
     if stat.S_IMODE(top.lstat().st_mode) & 0o077:
         raise Refused("media-not-private")
-    for here, dirs, names in os.walk(top, followlinks=False):
+
+    def unreadable(_error):
+        raise Refused("media-unreadable")
+
+    for here, dirs, names in os.walk(top, followlinks=False, onerror=unreadable):
         for name in dirs + names:
             entry = Path(here, name)
             mode = entry.lstat().st_mode
-            if stat.S_ISLNK(mode):
-                problems["link"] += 1
-            elif stat.S_ISREG(mode) or stat.S_ISDIR(mode):
-                if stat.S_ISREG(mode):
-                    rel = entry.relative_to(top).as_posix()
-                    if SIDECAR.fullmatch(rel) or re.fullmatch(r"npp/[0-9a-f]{4,12}/receipt\.json", rel):
-                        continue
-                    named = CARD.fullmatch(rel) or ORIGINAL.fullmatch(rel)
-                    if not named:
-                        problems["bad-name"] += 1
-                        continue
-                    sha = named.group(1) if CARD.fullmatch(rel) else named.group(1) + named.group(2)
-                    if mode_size(entry) > MAX_BYTES or hashlib.sha256(entry.read_bytes()).hexdigest() != sha:
-                        problems["bad-bytes"] += 1
-                        continue
-                    found.setdefault(sha, entry)
-            else:
-                problems["link"] += 1  # a device, socket or fifo is as unwelcome as a link
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                problems["link"] += 1  # a link, device, socket or fifo; never followed
+                continue
+            rel = entry.relative_to(top).as_posix()
+            if SIDECAR.fullmatch(rel) or re.fullmatch(r"npp/[0-9a-f]{4,12}/receipt\.json", rel):
+                continue
+            card, original = CARD.fullmatch(rel), ORIGINAL.fullmatch(rel)
+            if not (card or original):
+                problems["bad-name"] += 1
+                continue
+            sha = card.group(1) if card else original.group(1) + original.group(2)
+            try:
+                data = read_nofollow(top, rel)
+            except OSError:
+                problems["link"] += 1  # swapped for a link or unreadable between the listing and the open
+                continue
+            # The bytes must be the picture the name says, in the kind the extension says.
+            magic = PNG_MAGIC if rel.endswith(".png") else JPEG_MAGIC
+            if hashlib.sha256(data).hexdigest() != sha or not data.startswith(magic):
+                problems["bad-bytes"] += 1
+                continue
+            found.setdefault(sha, rel)
     return found, problems
-
-
-def mode_size(path):
-    return path.lstat().st_size
 
 
 def compare(events, reference):
@@ -121,7 +159,7 @@ def compare(events, reference):
     return None if len(events) == len(ref) else min(len(events), len(ref))
 
 
-def page(events, found, out, force, source):
+def page(events, found, media, out, force, source):
     spec = importlib.util.spec_from_file_location("npp_chat_page", Path(__file__).with_name("npp_chat_page.py"))
     if spec is None or spec.loader is None:
         raise Refused("page-unavailable")
@@ -130,12 +168,14 @@ def page(events, found, out, force, source):
     staged = Path(tempfile.mkdtemp(prefix=".restored-chat-"))
     try:
         os.chmod(staged, 0o700)
-        for sha, restored in found.items():  # flat, sha-named copies: the page code refuses links and checks the digest
+        for sha, rel in found.items():  # flat, sha-named copies read without following links; the page re-checks them
             target = staged / sha
-            shutil.copyfile(restored, target)
+            target.write_bytes(read_nofollow(media, rel))
             os.chmod(target, 0o600)
         destination = chat_page.output_path(Path(out), Path(source), staged, force)
-        html, _missing, _ambiguous = chat_page.render(events, staged)
+        html, missing, _ambiguous = chat_page.render(events, staged)
+        if missing:  # a picture the page cannot show must not leave a page that looks complete
+            raise Refused("page-picture-unrenderable")
         chat_page.write_page(destination, html, force)
     except chat_page.PageError as error:
         raise Refused("page-" + ("inside-git" if "git" in str(error) else "refused")) from None
@@ -176,7 +216,7 @@ def main(argv=None):
             for root in (args.state, args.media):  # the page holds content: never inside what it was read from
                 if root is not None and os.path.commonpath((out_dir, root.resolve())) == os.fspath(root.resolve()):
                     raise Refused("page-inside-input")
-            page(events, found, args.page, args.force, args.state / transcript.NAME)
+            page(events, found, args.media, args.page, args.force, args.state / transcript.NAME)
         counts = (f"events={len(events)} attachments={len(named)} linked={len(named & found.keys())}"
                   f" reference={'none' if args.reference is None else 'matched' if first is None else 'differs'}")
         if failures:
@@ -187,7 +227,7 @@ def main(argv=None):
     except Refused as why:
         print(f"FAIL restored_chat_view {why}")
         return 1
-    except (OSError, RuntimeError, ValueError):
+    except Exception:  # last resort: a fixed label, never a traceback that could carry a path or a value
         print("FAIL restored_chat_view could-not-check")
         return 1
 

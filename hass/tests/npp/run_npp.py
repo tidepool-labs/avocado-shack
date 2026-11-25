@@ -950,7 +950,7 @@ def reply_kind(text, replies):
     from hass.ops.photos import RETAKE
     if text == job.EXPIRED:
         return "expired"
-    if text == RETAKE:
+    if text in RETAKE.values():  # RETAKE maps each defect code to its sentence; any of them is the retake reply
         return "retake"
     if text.startswith("Posted"):
         return "posted"

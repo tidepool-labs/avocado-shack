@@ -99,7 +99,7 @@ class Finance:
     private: frozenset = field(default=frozenset(), repr=False)
     has_cost: bool = False
     has_qty: bool = False
-    # The owner's one unambiguous cost and count, labelled, for his private intake record only (never public text).
+    # The owner's one unambiguous typed cost and count, labelled (has_cost/has_qty without a value = mentioned but not established), for his private intake record only (never public text).
     cost: str | None = field(default=None, repr=False)
     qty: int | None = field(default=None, repr=False)
 
@@ -119,6 +119,9 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     extra = intake.commerce_answers(local_answers)
     costs = {a['cost'] for a in (parsed, extra) if 'cost' in a}
     counts = {a['qty'] for a in (parsed, extra) if 'qty' in a}
+    # Owner-typed evidence only: the reader's `extra` values guard against leaks (they join `private`) but never label.
+    typed_costs = {parsed['cost']} if 'cost' in parsed else set()
+    typed_counts = {parsed['qty']} if 'qty' in parsed else set()
     prices, public_parts = [], []
     for start, end, clause in intake.caption_spans(caption):
         part = clause.strip().rstrip('.!').strip()
@@ -137,8 +140,10 @@ def finance(caption, *, answer_unit=None, local_answers=None):
                 atoms['qty'], remainder = count[0], ''
         if 'cost' in atoms:
             costs.add(atoms['cost'])
+            typed_costs.add(atoms['cost'])
         if 'qty' in atoms:
             counts.add(atoms['qty'])
+            typed_counts.add(atoms['qty'])
         priced = re.sub(r'\s+retail$', '', part, flags=re.I) if part.startswith('$') else part
         basis = _BASIS.search(priced)
         unit = answer_unit
@@ -152,6 +157,7 @@ def finance(caption, *, answer_unit=None, local_answers=None):
                 amount, remainder = found, ''
                 if 'qty' not in extra:
                     counts.clear()  # the entire turn is a direct answer to the price question
+                    typed_counts.clear()
         if amount and unit in {'each', 'per lb'} and 'cost' not in atoms and not intake.unresolved_finance(remainder):
             prices.append((f'{amount} {unit}', (start, end)))
         if remainder:
@@ -167,6 +173,8 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     price, span = prices[0] if len(prices) == 1 and not unresolved else (None, None)
     if price is None or not valid_selling_price(price) or (parsed.get('price') is not None and not price.startswith(parsed['price'] + ' ')):
         price, span = None, None
+    # Labelled only when the owner's own words give exactly one value and no reader value disagrees with it.
+    cost = next(iter(typed_costs)) if len(typed_costs) == 1 and costs == typed_costs else None
+    qty = next(iter(typed_counts)) if len(typed_counts) == 1 and counts == typed_counts else None
     return Finance(intake.without_unresolved_finance(public), price, span, frozenset(private),
-                   bool(costs), bool(counts), cost=next(iter(costs)) if len(costs) == 1 else None,
-                   qty=next(iter(counts)) if len(counts) == 1 else None)
+                   bool(costs), bool(counts), cost=cost, qty=qty)

@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import unittest
+from decimal import Decimal
 
 from hass.tests import test_npp_undo_journey as journey
 
@@ -82,6 +83,54 @@ class ListingPrivateIntakeTests(_Journey):
                          [("saved", self.publish_code), ("undone", self.publish_code)])
 
 
+class LaterTurnsKeepOrClearTests(_Journey):
+    """Contract: a later turn that names a cost or count replaces it only with ONE owner-typed value; if what he named is
+    ambiguous the earlier value must not survive to be saved as his exact figure (bug: approval saved the stale $1).
+    A field he did not mention keeps its earlier value."""
+
+    def turn(self, text, local=None):
+        from hass.npp.private_numbers import finance
+        job = self.conv.db.execute("SELECT job_id FROM npp_jobs").fetchone()[0]
+        jobs = type("Jobs", (), {"active": staticmethod(lambda chat, asker: {"job_id": job})})
+        msg = type("Msg", (), {"chat": "c"})
+        self.conv._npp_keep_private(jobs, msg, finance(text, local_answers=local), self.now)
+        return self.pending().get("npp:" + job, {}).get("answers")
+
+    def say_then(self, steps):
+        original, seen = self.say, []
+
+        def stop_before_yes(text, *, photos=0):
+            if text.startswith("yes ") and not seen:
+                seen.extend(self.turn(t, local) for t, local in steps)
+            return original(text, photos=photos)
+
+        self.say = stop_before_yes
+        self.publish()
+        return seen
+
+    def test_a_later_conflicting_cost_clears_the_earlier_cost_and_keeps_the_count(self):
+        seen = self.say_then([("cost $1", None), ("cost $2; cost $3", None)])
+        self.assertEqual(seen, [{"cost": "1.00", "qty": 50}, {"qty": 50}])
+        self.assertEqual([r["answers"] for r in self.saved()], [{"qty": 50}])
+
+    def test_a_later_conflicting_count_clears_only_the_count(self):
+        seen = self.say_then([("got 5; got 6", None)])
+        self.assertEqual(seen, [{"cost": "1.00"}])
+
+    def test_a_later_turn_naming_neither_keeps_both(self):
+        self.assertEqual(self.say_then([("lovely jam", None)]), [{"cost": "1.00", "qty": 50}])
+
+    def test_a_reader_guess_at_the_cost_is_not_saved_and_clears_the_earlier_one(self):
+        guess = {"price_cents": None, "cost_cents": 300, "quantity": None}
+        seen = self.say_then([("cost about $3", guess)])
+        self.assertEqual(seen, [{"qty": 50}])
+
+    def test_nothing_ambiguous_to_save_leaves_no_record(self):
+        self.caption = f"Just bought 50 of these. I will sell at ${journey.PRICE} each"  # only a count to begin with
+        self.assertEqual(self.say_then([("got 5; got 6", None)]), [None])
+        self.assertEqual(self.saved(), [])
+
+
 class ListingWithoutPrivateNumbersTests(_Journey):
     caption = f"sell ${journey.PRICE}"
 
@@ -102,6 +151,21 @@ class FinanceLabelTests(unittest.TestCase):
         both = finance("cost $1; cost $2; sell $5 each")
         self.assertTrue(both.has_cost)
         self.assertIsNone(both.cost)  # two different costs: kept private, never guessed into a record
+        counts = finance("got 5; got 6")
+        self.assertTrue(counts.has_qty)
+        self.assertIsNone(counts.qty)
+
+    def test_a_reader_inference_is_a_safety_token_never_a_label(self):
+        from hass.npp.private_numbers import finance
+        guess = {"price_cents": None, "cost_cents": 300, "quantity": 7}
+        got = finance("cost about $3", local_answers=guess)
+        self.assertEqual((got.has_cost, got.cost, got.has_qty, got.qty), (True, None, True, None))
+        self.assertIn(Decimal("3.00"), got.private)  # still guarded from public text
+        # the reader agreeing with the owner's typed words changes nothing; disagreeing makes it ambiguous
+        agree = finance("cost $3", local_answers={"price_cents": None, "cost_cents": 300, "quantity": None})
+        self.assertEqual(agree.cost, "3.00")
+        clash = finance("cost $3", local_answers={"price_cents": None, "cost_cents": 400, "quantity": None})
+        self.assertIsNone(clash.cost)
 
 
 if __name__ == "__main__":

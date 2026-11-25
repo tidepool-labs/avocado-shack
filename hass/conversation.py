@@ -2428,9 +2428,10 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
     def _npp_keep_private(self, jobs, msg, finance, now):
         """HASS-INTAKE-2 for listing jobs: the owner's labelled cost and count wait in the conversation's private state
         beside the job (never in its texts, slots or card), and become his private intake record only when the approved
-        draft is applied. A turn naming neither keeps the earlier values; a turn naming one replaces only that one."""
-        given = {k: v for k, v in (("cost", finance.cost), ("qty", finance.qty)) if v is not None}
-        job = jobs.active(msg.chat, self._asker) if given else None
+        draft is applied. A turn naming neither keeps the earlier values; a turn naming one replaces only that one, and a named value that
+        is ambiguous (conflicting, or only a reader inference) clears that one rather than leaving the earlier value."""
+        named = {k: v for k, v, said in (("cost", finance.cost, finance.has_cost), ("qty", finance.qty, finance.has_qty)) if said}
+        job = jobs.active(msg.chat, self._asker) if named else None
         if job is None:
             return
         key = NPP_PRIVATE + job["job_id"]
@@ -2439,7 +2440,12 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
             found = self.db.execute("SELECT record_json FROM intake_pending WHERE code = ?", (key,)).fetchone()
             rec = json.loads(found[0]) if found else {"schema": 1, "kind": "item.intake", "status": "saved", "draft": None,
                                                       "product": None, "answers": {}, "skipped": []}
-            rec["answers"] = {**rec.get("answers", {}), **given}
+            answers = {k: v for k, v in rec.get("answers", {}).items() if k not in named}  # a named field is replaced or cleared
+            answers.update({k: v for k, v in named.items() if v is not None})
+            if not answers:  # everything he named was ambiguous and nothing else waits: no record at all
+                self.db.execute("DELETE FROM intake_pending WHERE code = ?", (key,))
+                return
+            rec["answers"] = answers
             rec["drafted_at"] = now.isoformat()
             item_intake.keep_pending(self.db, key, rec, now)
         except (sqlite3.Error, ValueError, TypeError, AttributeError):

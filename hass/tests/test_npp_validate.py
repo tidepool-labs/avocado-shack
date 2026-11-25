@@ -143,6 +143,25 @@ class ValidateTests(unittest.TestCase):
         self.assertNotIn('card-copy', card('We grow plums on a small hill.').problems)
         self.assertIn('card-copy', card('This cures cancer.').problems)
 
+    def test_existing_maker_story_year_is_shown_but_private_numbers_and_other_fragments_still_fail(self):
+        # Contract: an existing maker's published catalog story may carry a founded year on the card, exactly as the
+        # record check already allows. Bug caught (private live replay, golden cases): every card for a known maker whose
+        # story said "in 1976" failed as 'card-number', so Hass only said "I couldn't draw the card yet".
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+
+        def card(story, extra=()):
+            return self.verdict(makers={'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}, origin=origin,
+                                card_nodes=[*self.nodes, origin, story, *extra])
+        story = 'It started as a roadside stand in 1976.'
+        clean = card(story).problems
+        self.assertNotIn('card-number', clean)
+        self.assertNotIn('card-copy', clean)
+        # The exemption is the exact catalog fragment, not the value: the same year elsewhere is still a leak.
+        self.assertIn('card-number', card(story, extra=['Picked in 1976.']).problems)
+        # A private number (the owner's qty 12) inside the story is never exempt.
+        self.assertIn('card-number', card('It started as a roadside stand 12 years ago.').problems)
+
     def test_existing_maker_name_and_place_are_shown_only_when_they_carry_no_protected_claim(self):
         # Contract: the card-copy gate binds EVERY maker-panel fragment, not only the story. Bug caught: an existing
         # maker whose catalog name/place was "This cures cancer." was auto-allowed on the card (no contact or number in it).

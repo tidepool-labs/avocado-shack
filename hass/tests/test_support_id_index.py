@@ -174,10 +174,25 @@ class SupportIdIndexTests(unittest.TestCase):
                 "    problems.append(_problem(check='kw'))\n"            # keyword only
                 "    problems.append(_problem())\n"                      # no arguments
                 "    problems.append(_problem(7, 'd'))\n"                # not a string
-                "    problems.append(_problem('has space', 'e'))\n"      # not an id
             )
             self.build(health_source(sites, DYNAMIC_LOOP), docs)
-            self.assert_findings(self.run_cli(), ["ids code 0", "ids doc 2", "FAIL unresolved-dynamic 9"])
+            self.assert_findings(self.run_cli(), ["ids code 0", "ids doc 2", "FAIL unresolved-dynamic 8"])
+        with self.subTest("odd string literal is a known id, still reported"):
+            # Believable bug: filtering a literal like 'has space' into the unresolved
+            # count, so it is never reported undocumented and stale-doc is suppressed.
+            odd = call("has space") + call("line\nbreak") + call("")
+            self.build(health_source(odd), support_source("retired"))
+            self.assert_findings(self.run_cli(), [
+                "ids code 3", "ids doc 1",
+                "FAIL undocumented ''", "FAIL undocumented has space",
+                "FAIL undocumented 'line\\nbreak'", "FAIL stale-doc retired",
+            ])
+            self.build(health_source(odd, DYNAMIC_LOOP), docs)
+            self.assert_findings(self.run_cli(), [
+                "ids code 3", "ids doc 2",
+                "FAIL undocumented ''", "FAIL undocumented has space",
+                "FAIL undocumented 'line\\nbreak'", "FAIL unresolved-dynamic 1",
+            ])
         with self.subTest("other callables are not _problem call sites"):
             other = ("    problems.append(helper._problem(name, 'a'))\n"
                      "    problems.append(other_problem(name, 'b'))\n")

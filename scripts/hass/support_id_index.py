@@ -15,8 +15,7 @@ import sys
 HEALTH = "hass/health.py"
 SUPPORT = "docs/hass/SUPPORT.md"
 TRAILER = "support_id_index"
-ID = r"[A-Za-z0-9][A-Za-z0-9_.-]*"  # also keeps odd text off the output lines
-ID_ONLY = re.compile(ID)
+ID = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
 HEADING = re.compile(rf"### `({ID})`[ \t]*")
 
 
@@ -36,12 +35,18 @@ def code_ids(tree):
                 and node.func.id == "_problem"):
             continue
         first = node.args[0] if node.args else None
-        if (isinstance(first, ast.Constant) and isinstance(first.value, str)
-                and ID_ONLY.fullmatch(first.value)):
-            ids.add(first.value)
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            ids.add(first.value)  # any string literal is a known id (C7)
         else:  # a variable, expression, f-string, starred or keyword-only id
             unresolved += 1
     return ids, unresolved
+
+
+def printable(name):
+    """Keep one finding on one ASCII line: odd literals print as an escaped repr."""
+    if name and name.isascii() and name.isprintable() and name == name.strip():
+        return name
+    return ascii(name)
 
 
 def doc_ids(text):
@@ -63,7 +68,7 @@ def check(repo):
     known, unresolved = code_ids(tree)
     documented = doc_ids(support.decode("utf-8", errors="replace"))
     info = [f"ids code {len(known)}", f"ids doc {len(documented)}"]
-    findings = [f"FAIL undocumented {name}" for name in sorted(known - documented)]
+    findings = [f"FAIL undocumented {printable(name)}" for name in sorted(known - documented)]
     if not unresolved:  # with unresolved calls, absence cannot be established
         findings += [f"FAIL stale-doc {name}" for name in sorted(documented - known)]
     else:

@@ -130,6 +130,9 @@ def propose(*, site_ops, till_draft, link, sender, chat, journal, engine, site, 
                 if engine is None: raise d.DraftRefused("Till unavailable.")
                 code, _ = engine.offer(_first(till), sender=sender, chat=chat)
             except d.DraftRefused: till = None
+            if till is None and preview is not None:
+                # The supplied text describes this till change; showing it would promise what yes cannot do.
+                raise d.DraftRefused("The till refused this change, so nothing was proposed.")
         ops, link = tuple(site_ops), link if till else None
         lines = ("On the website: " + ", ".join(o["op"] for o in ops), "The website shows no prices",
                  "On the till: " + "\n".join(x for x in till.lines if x != "Nothing goes on the website.")

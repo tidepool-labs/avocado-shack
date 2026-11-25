@@ -164,6 +164,18 @@ class BindingTests(NoNetwork):
             self.propose()
         self.assertEqual(self.writes(), [])
 
+    def test_c3b_refused_till_never_shows_the_till_preview(self):
+        # C3b: a preview that promises a till change is never shown when the engine refuses that draft. Bug caught:
+        # dropping the till but still returning the supplied text, so one yes runs a website-only change.
+        with mock.patch.object(self.engine, "offer", side_effect=d.DraftRefused("no")):
+            with self.assertRaisesRegex(d.DraftRefused, "nothing was proposed"):
+                self.propose()
+            self.assertEqual((self.journal.open_rows(), self.site.drafts, self.site.calls), ([], {}, []))
+            code, text = self.propose(preview=None)  # no supplied promise: the honest website-only text stays
+            self.assertIn("I can't add it to the till yet", text)
+            self.assertNotIn("Blue mug to the till", text)
+            self.assertIsNone(self.journal.get(code)["bundle"]["till"])
+
     def test_c4_dry_run_state(self):
         # C4: a rehearsal result is its own final state, not a failure. Bug caught: reading the engine's
         # "dry-run" status as uncertain, or preparing/applying the website or writing the link anyway.

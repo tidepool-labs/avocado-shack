@@ -179,6 +179,50 @@ class VersionGalleryTests(unittest.TestCase):
         self.assertEqual(cells(rows, 10)[0][1]['reason'], 'not-a-png')
         self.assertTrue(gallery.refused(rows))
 
+    def test_signature_only_or_garbage_png_with_a_confirmed_row_is_refused(self):
+        # Review t_5ad8caa3: a confirmed, digest-matching file that is only the PNG signature (or signature plus
+        # garbage) must be refused with exit 1, never copied or drawn as delivered.
+        b = self.bundle
+        sig_only, sig_garbage = gallery.PNG_MAGIC, gallery.PNG_MAGIC + b'garbage, not chunks'
+        b.deliver(12, 1, sig_only)
+        b.deliver(12, 2, sig_garbage)
+        b.reference('12', gallery.PNG_MAGIC + b'\x00' * 40)
+        code, result = b.run()
+        self.assertEqual((code, result['status']), (1, 'refused'))
+        rows = json.loads((b.root / 'page' / 'receipt.json').read_text())['rows']
+        versions, ref = cells(rows, 12)
+        self.assertEqual([versions[n]['reason'] for n in (1, 2)], ['not-a-png'] * 2)
+        self.assertEqual((ref['status'], ref['reason']), ('refused', 'not-a-png'))
+        self.assertFalse(list((b.root / 'page').glob('*.png')))
+
+    def test_png_structure_is_checked_chunk_by_chunk(self):
+        good = png('structure')
+        self.assertIsNone(gallery.png_problem(good))
+        iend = good.rindex(b'IEND') - 4
+        ihdr_end = len(gallery.PNG_MAGIC) + 8 + 13 + 4
+        flipped = bytearray(good)
+        flipped[ihdr_end - 5] ^= 0x01  # one IHDR data byte: its CRC no longer matches
+        idat = good.index(b'IDAT') - 4
+        idat_len = int.from_bytes(good[idat:idat + 4], 'big')
+
+        def chunk(kind, data):
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+        bad_stream = good[:idat] + chunk(b'IDAT', b'\x78\x9c not deflate') + good[idat + 12 + idat_len:]
+        no_idat = good[:idat] + good[idat + 12 + idat_len:]
+        cases = {
+            'signature': b'\x89PNX\r\n\x1a\n' + good[8:],
+            'truncated-chunk': good[:-3],
+            'no-iend': good[:iend],
+            'bytes-after-iend': good + b'\x00',
+            'bad-crc': bytes(flipped),
+            'no-idat': no_idat,
+            'bad-image-data': bad_stream,
+            'no-ihdr': gallery.PNG_MAGIC + good[ihdr_end:],
+        }
+        for reason, data in cases.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(gallery.png_problem(data), reason)
+
     def test_variants_are_kept_apart_and_reference_only_on_the_base_case(self):
         b = self.bundle
         b.deliver(11, 1, png('eleven'))

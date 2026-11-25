@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+import zlib
 from html import escape
 from pathlib import Path
 
@@ -100,14 +101,60 @@ def confirmed(row):
     return None
 
 
+def png_problem(data):
+    """None if `data` is a structurally complete PNG, else why not. The eight-byte signature alone proves nothing:
+    walk every chunk (4-byte length, 4-letter type, data, CRC-32 over type+data), require IHDR first with a non-zero
+    size, at least one IDAT whose joined data is one complete zlib stream, and IEND last with no bytes after it."""
+    if not data.startswith(PNG_MAGIC):
+        return 'signature'
+    pos, chunks, idat = len(PNG_MAGIC), [], []
+    while pos < len(data):
+        if len(data) - pos < 12:
+            return 'truncated-chunk'
+        length = int.from_bytes(data[pos:pos + 4], 'big')
+        kind = data[pos + 4:pos + 8]
+        end = pos + 8 + length
+        if length > 0x7fffffff or end + 4 > len(data):
+            return 'truncated-chunk'
+        if not (kind.isascii() and kind.isalpha()):
+            return 'bad-chunk-type'
+        body = data[pos + 8:end]
+        if int.from_bytes(data[end:end + 4], 'big') != zlib.crc32(kind + body) & 0xffffffff:
+            return 'bad-crc'
+        chunks.append(kind)
+        if kind == b'IHDR':
+            if len(body) != 13 or not int.from_bytes(body[:4], 'big') or not int.from_bytes(body[4:8], 'big'):
+                return 'bad-ihdr'
+        elif kind == b'IDAT':
+            idat.append(body)
+        pos = end + 4
+        if kind == b'IEND':
+            break
+    if not chunks or chunks[0] != b'IHDR' or chunks.count(b'IHDR') != 1:
+        return 'no-ihdr'
+    if not idat:
+        return 'no-idat'
+    if chunks[-1] != b'IEND' or pos != len(data):
+        return 'no-iend' if chunks[-1] != b'IEND' else 'bytes-after-iend'
+    stream = zlib.decompressobj()
+    try:
+        stream.decompress(b''.join(idat))
+    except zlib.error:
+        return 'bad-image-data'
+    if not stream.eof or stream.unused_data:
+        return 'bad-image-data'
+    return None
+
+
 def read_png(path):
-    """(bytes, None) for a regular non-link PNG file; (None, reason) otherwise; (None, None) if absent."""
+    """(bytes, None) for a regular non-link, structurally complete PNG file; (None, reason) otherwise; (None, None)
+    if absent."""
     if not os.path.lexists(path):
         return None, None
     if path.is_symlink() or not path.is_file():
         return None, 'not-a-regular-file'
     data = path.read_bytes()
-    if not data.startswith(PNG_MAGIC):
+    if png_problem(data):
         return None, 'not-a-png'
     return data, None
 

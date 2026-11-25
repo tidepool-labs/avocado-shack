@@ -76,12 +76,26 @@ def read_nofollow(top, rel):
     return data
 
 
+def columns(db):
+    return [(name, kind.upper(), bool(notnull), bool(pk))
+            for _cid, name, kind, notnull, _default, pk in db.execute("PRAGMA table_info(events)")]
+
+
+def expected_columns():
+    """The column list hass.transcript itself creates, read from its own SCHEMA."""
+    with contextlib.closing(sqlite3.connect(":memory:")) as db:
+        db.executescript(transcript.SCHEMA)
+        return columns(db)
+
+
 def rows(state):
     try:
         if not plain_path(state):
             raise Refused("state-path-has-a-link")
         with contextlib.closing(transcript.read(state)) as db:
             db.row_factory = sqlite3.Row
+            if columns(db) != expected_columns():  # the shape is checked on its own, so an empty or partial table fails
+                raise Refused("transcript-unsafe-or-unreadable")
             out = []
             for row in db.execute("SELECT * FROM events ORDER BY rowid"):
                 doc = dict(row)

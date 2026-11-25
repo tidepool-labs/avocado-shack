@@ -216,7 +216,9 @@ class RestoredChatViewTests(unittest.TestCase):
         self.assertIn("media-unreadable", output)
 
     def test_a_store_of_the_wrong_shape_is_a_label_not_a_traceback(self):
+        partial = "CREATE TABLE events(id INTEGER PRIMARY KEY, attachments TEXT NOT NULL)"
         for name, ddl in (("no-id", "CREATE TABLE events(utc TEXT, attachments TEXT)"), ("no-table", "CREATE TABLE other(a)"),
+                          ("empty-no-columns-needed", "CREATE TABLE events(a)"), ("empty-id-attachments-only", partial),
                           ("bad-json", None)):
             state = private_dir(self.tmp, name)
             db = sqlite3.connect(state / transcript.NAME)

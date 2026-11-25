@@ -4,7 +4,7 @@ Fixtures only: synthetic rows in throwaway sqlite stores under the test's temp d
 (sockets are patched through NoNetwork; the test fails if one is touched).
 """
 
-import contextlib, fcntl, hashlib, io, json, os, sqlite3  # noqa: E401
+import contextlib, fcntl, hashlib, io, json, os, shutil, sqlite3, threading  # noqa: E401
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -111,6 +111,54 @@ class TillWriteStateBackupTests(NoNetwork, BackupTestCase):
             code, out = self.cli("create", "--state", self.repo.state, "--out", self.bk)
         self.assertEqual((code, out), (1, {"result": "busy", "problems": [f"till store in use: {BUNDLES}"]}))
         self.assertEqual(os.listdir(self.bk), [])
+
+    # Contract C1 (stray sidecar vs writer in flight): a till writer holds the store's flock for its whole transaction,
+    # and sqlite's rollback journal (<store>-journal) exists only during it. Bug caught: the scan refuses that sidecar
+    # before the flock is tried, so a write in flight answers `refused` instead of `busy`, or a finished write is lost.
+    def test_c1_journal_sidecar_is_judged_under_the_store_lock(self):
+        self.make_till()
+        state = self.repo.state
+        for store in (JOURNAL, BUNDLES):
+            sidecar, lock = state / (store + "-journal"), state / (store[:-len("sqlite3")] + "lock")
+            with self.subTest(store=store, case="writer holds the lock past LOCK_WAIT"):
+                sidecar.write_bytes(b"hot")
+                fd = os.open(lock, os.O_RDWR)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    with mock.patch.object(statebackup, "LOCK_WAIT", 0.1):
+                        code, out = self.cli("create", "--state", state, "--out", self.bk)
+                finally: os.close(fd)
+                self.assertEqual((code, out), (1, {"result": "busy", "problems": [f"till store in use: {store}"]}))
+                self.assertEqual(os.listdir(self.bk), [])
+            with self.subTest(store=store, case="writer finishes inside LOCK_WAIT"):
+                fd = os.open(lock, os.O_RDWR)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                def finish(fd=fd, sidecar=sidecar):
+                    sidecar.unlink()  # a committed write deletes its journal, then releases the lock
+                    os.close(fd)
+                timer = threading.Timer(0.3, finish)
+                timer.start()
+                code, out = self.cli("create", "--state", state, "--out", self.bk)
+                timer.join()
+                self.assertEqual((code, out["result"]), (0, "ok"), out)
+                self.assertFalse([rel for rel in self.files(Path(out["backup"])) if rel.endswith("-journal")])
+                self.assert_till_copy(Path(out["backup"]))
+            with self.subTest(store=store, case="no writer: the sidecar is a stray"):
+                sidecar.write_bytes(b"hot")
+                self.assertEqual(self.cli("create", "--state", state, "--out", self.bk),
+                                 (1, {"result": "refused", "problems": [f"unknown entry: clover/{sidecar.name}"]}))
+                sidecar.unlink()
+            shutil.rmtree(self.bk); self.bk.mkdir(mode=0o700)  # noqa: E702 - one backup per stamp
+
+    # Contract C1 (a stray with no store to coordinate with): a sidecar whose store is absent has no writer to wait for.
+    # Bug caught: the lock coordination also swallows it (or creates the lock file for a till that never wrote).
+    def test_c1_journal_sidecar_without_its_store_is_refused(self):
+        self.make_till(locks=False)
+        (self.repo.state / BUNDLES).unlink()
+        (self.repo.state / "clover/bundles.sqlite3-journal").write_bytes(b"x")
+        self.assertEqual(self.cli("create", "--state", self.repo.state, "--out", self.bk),
+                         (1, {"result": "refused", "problems": ["unknown entry: clover/bundles.sqlite3-journal"]}))
+        self.assertFalse((self.repo.state / "clover/bundles.lock").exists())
 
     # Contract C1 (own flock, private modes): a lock file that is not a private regular file is the writer's own refusal
     # too. Bug caught: create locks and trusts a world-writable lock file another user could hold forever.

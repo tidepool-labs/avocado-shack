@@ -47,6 +47,7 @@ RECEIPT_DIR = "clover/receipts"  # private inventory receipts <YYYY-MM-DD>-<code
 RECEIPT = RECEIPT_DIR + r"/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{8}\.json"
 STORES = (DB, INBOX, TRANSCRIPT, CLOVER, JOURNAL, BUNDLES)  # sqlite stores: online snapshot, then integrity check on verify
 LOCKS = {JOURNAL: "clover/journal.lock", BUNDLES: "clover/bundles.lock"}  # each till store's own flock; skipped, never copied
+JOURNAL_SUFFIX = "-journal"  # sqlite's rollback journal beside a store, present only while a write is in flight (or after a crash)
 LOCK_WAIT = 5.0  # seconds create waits for a till store's flock (a write in flight) before answering `busy`
 BUNDLE = "content.bundle"  # FAV-07: git bundle of the writer worktree's HEAD == contentCommit
 DIRS = ("drafts", "changes", "screenshots", "audit")  # AVB-10: audit/ is the one audit log (ids only), kept with the state
@@ -191,6 +192,19 @@ def _scan(sdir: Path):
         elif not (entry.is_file(follow_symlinks=False) and entry.name == LOCK): bad.append(f"unknown entry: {entry.name}")
     return files, bad
 
+def _settle_sidecars(sdir: Path, files, bad) -> list:
+    """`bad` without the till stores' rollback-journal names that a writer is only using right now. The writer holds
+    the store's flock for its whole transaction, so the sidecar is judged under that flock (waiting LOCK_WAIT, then
+    _StoreBusy): gone once the lock is ours means the write finished; still there with the lock free means nobody is
+    writing and it is a stray (a hot journal from a crash), which stays refused. A sidecar of a store that is not there,
+    a link or a folder never reaches this: only a name `_scan` called unknown, beside a store it is carrying."""
+    for rel in LOCKS:
+        name = f"unknown entry: {rel + JOURNAL_SUFFIX}"
+        if rel in files and name in bad:
+            with _store_lock(sdir, rel):
+                if not os.path.lexists(sdir / (rel + JOURNAL_SUFFIX)): bad = [p for p in bad if p != name]
+    return bad
+
 def _media_root(raw, roots) -> Path:  # create --media: the H10 photo store (hass/media.py)
     if os.path.islink(raw) or not os.path.isdir(raw): raise UnsafeState("media dir must be an existing dir, no symlink")
     if (st := os.lstat(raw)).st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
@@ -250,6 +264,8 @@ def create(state, out, now=None, media=None) -> dict:
         if (journal := sdir / "journal").is_dir() and not journal.is_symlink() and any(journal.iterdir()):
             return {"result": "unsettled", "problems": ["an interrupted write is pending; run editor.py recover first"]}
         files, bad = _scan(sdir)
+        try: bad = _settle_sidecars(sdir, files, bad)
+        except _StoreBusy as busy: return {"result": "busy", "problems": [f"till store in use: {busy.args[0]}"]}  # a write is in flight; retry
         mfiles, mbad, unsettled = _scan_media(mroot) if mroot else ([], [], [])
         if nroot and nroot != mroot:
             # The configured NPP root's jobs and the originals they name travel together; an explicit originals root can
@@ -289,6 +305,8 @@ def create(state, out, now=None, media=None) -> dict:
                 continue
             try:
                 with _store_lock(sdir, rel) if rel in LOCKS else contextlib.nullcontext():
+                    if rel in LOCKS and os.path.lexists(sdir / (rel + JOURNAL_SUFFIX)):  # appeared after the scan, no writer holds the lock
+                        return {"result": "refused", "problems": [f"unknown entry: {rel + JOURNAL_SUFFIX}"]}
                     (_snapshot if rel in STORES else _copy)(src, dest / rel)
             except _StoreBusy: return {"result": "busy", "problems": [f"till store in use: {rel}"]}  # a write is in flight; retry
             hashes[rel] = hashlib.sha256(_read(dest / rel)).hexdigest()

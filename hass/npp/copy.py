@@ -86,8 +86,10 @@ def words(text):
 
 
 def plain(value, maximum=12):
+    # Words joined by one space, apostrophe, hyphen or '&', or by a spaced ' & ' as printed on
+    # labels ("Half & Half", "Smith & Sons"); nothing else, so no markup or punctuation runs.
     return (isinstance(value, str) and value and len(value) <= 120 and len(words(value)) <= maximum
-            and re.fullmatch(r"[^\W_][^\W_ '’&\-]*(?:[ '’&\-][^\W_]+)*", value) is not None)
+            and re.fullmatch(r"[^\W_][^\W_ '’&\-]*(?:(?: & |[ '’&\-])[^\W_]+)*", value) is not None)
 
 
 def eligible(row, ctx):

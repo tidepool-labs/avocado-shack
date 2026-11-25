@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from hass.clover import drafts
-from hass.clover.links import reserved
+from hass.clover.links import holders, reserved
 from hass.clover.mapper import MapError, norm_name, parse_selling_price, parse_site_product
 
 MODES = ("count", "set", "add")
@@ -105,9 +105,11 @@ def _label(item):
     return f"{item.name} (SKU {item.sku})" if item.sku else item.name
 
 
-def _linked_item(product_id, link, items):
-    held = reserved(items, {product_id: link})   # the link's cloverId, else its one SKU: exactly as the rest of the till code resolves it
-    return next((i for i in items if i.id in held), None)
+def _linked_item(product_id, links, items):
+    """The till item this product's own link holds, or None. Resolved against EVERY product's link, in the order mapper.match uses, so an
+    item another product's link already holds is never this product's (a second link to it is a broken claim, not a second owner)."""
+    item_id = holders(items, links).get(product_id)
+    return next((i for i in items if i.id == item_id), None)
 
 
 def _till_unit(item):
@@ -178,10 +180,10 @@ def plan(intent, site_products, links, items, categories, config, *, policy=Poli
     site = parse_site_product(record)
     link = links.get(site.id)
     if isinstance(link, dict) and link:
-        item = _linked_item(site.id, link, items)
+        item = _linked_item(site.id, links, items)
         if item is None:
-            raise drafts.DraftRefused(f"The link for {site.name} points at an item the till no longer has, so I do not know which one to count. "
-                                      "Nothing was changed. Fix the link first.")
+            raise drafts.DraftRefused(f"The link for {site.name} points at an item the till no longer has, or one that another product's link "
+                                      "already holds, so I do not know which one to count. Nothing was changed. Fix the link first.")
         return _plan_existing(intent, record, site, item, None, config, policy)
     taken = reserved(items, links)   # till items another product's link already holds are never offered or linked again
     same = sorted((i for i in items if norm_name(i.name) == norm_name(site.name) and i.id not in taken), key=lambda i: (_label(i), i.id))

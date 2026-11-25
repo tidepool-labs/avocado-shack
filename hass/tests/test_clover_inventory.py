@@ -179,6 +179,24 @@ class ExistingItemTests(PlanCase):
         with self.assertRaisesRegex(drafts.DraftRefused, "not counting"):
             self.plan(say("blue mug", mode="add"), self.products, [raw(MUG, "Blue mug", MUG_SKU)], links)
 
+    def test_c3_conflicting_claim_is_refused(self):
+        # C3: a till item is planned only for the product whose link really holds it, resolved against ALL links as mapper.match does.
+        # Bug caught: resolving only the named product's link, so a second product linked to the same till item got a stock change for
+        # an item the first product already owns.
+        products = [prod("p-a", "Blue mug"), prod("p-b", "Tea", price="14.35 each")]
+        both = {"p-a": link_of(), "p-b": link_of()}
+        site = [mapper.parse_site_product(r) for r in products]
+        self.assertEqual(mapper.match(site, self.till, both).broken_links, ("p-b",))   # the rest of the till code calls p-b's link broken
+        with self.assertRaisesRegex(drafts.DraftRefused, "already holds"):
+            self.plan(say("tea", qty=30, mode="set"), products, [self.mug], both)
+        owner = self.plan(say("blue mug", qty=30, mode="set"), products, [self.mug], both)   # the first holder still plans normally
+        self.assertEqual((owner.draft.item_id, owner.draft.after["stock"]), (MUG, "30"))
+        # the same claim by SKU only (a recreated item under a new id) is refused the same way
+        recreated = raw("FAKEITEM00009", "Blue mug", MUG_SKU, stock=12)
+        by_sku = {"p-a": link_of(), "p-b": {"cloverId": "GONE", "sku": MUG_SKU}}
+        with self.assertRaisesRegex(drafts.DraftRefused, "already holds"):
+            self.plan(say("tea", qty=30, mode="set"), products, [recreated], by_sku)
+
     def test_c3_unlinked_same_name(self):
         # C3: one unlinked visible exact-name till item -> the same change plus link {product_id, sku}; two, or a hidden one, ask.
         # Bug caught: linking a hidden or duplicated item, or taking an item another product's link already holds.

@@ -33,10 +33,11 @@ def _labels(products, items):
     return out
 
 
-def reserved(items, links):
-    """Till item ids that existing links already hold, resolved as mapper.match resolves them (stored cloverId first, else the one till item
-    with the link's SKU), so a recreated till item (new id, same SKU) stays held by its old link and is never offered or linked again."""
-    by_id, by_sku, held = {i.id for i in items}, {}, set()
+def holders(items, links):
+    """{product id: till item id} for every link that resolves to an item, resolved as mapper.match resolves them: products in id order,
+    the stored cloverId first, else the one till item with the link's SKU, and an item already held by an earlier link is never held
+    twice. A product whose link is missing from the result holds nothing (its item is gone, or another product's link got there first)."""
+    by_id, by_sku, held, out = {i.id for i in items}, {}, set(), {}
     for i in items:
         if i.sku:
             by_sku.setdefault(i.sku.casefold(), []).append(i.id)
@@ -46,10 +47,16 @@ def reserved(items, links):
             continue
         same = by_sku.get(str(v.get("sku", "")).casefold(), [])
         if v.get("cloverId") in by_id and v["cloverId"] not in held:
-            held.add(v["cloverId"])
+            held.add(v["cloverId"]); out[pid] = v["cloverId"]
         elif len(same) == 1 and same[0] not in held:
-            held.add(same[0])
-    return held
+            held.add(same[0]); out[pid] = same[0]
+    return out
+
+
+def reserved(items, links):
+    """Till item ids that existing links already hold (see holders), so a recreated till item (new id, same SKU) stays held by its old
+    link and is never offered or linked again."""
+    return set(holders(items, links).values())
 
 
 def _checked(content, links):

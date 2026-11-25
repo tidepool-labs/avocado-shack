@@ -35,6 +35,10 @@ SHA = re.compile(r"[0-9a-f]{64}")
 ORIGINAL = re.compile(r"originals/([0-9a-f]{2})/\1([0-9a-f]{62})\.(?:jpg|png)")
 CARD = re.compile(r"npp/[0-9a-f]{4,12}/card-([0-9a-f]{64})\.png")
 SIDECAR = re.compile(r"originals/[0-9a-f]{2}/[0-9a-f]{64}\.json")
+# Copies the running service makes beside the originals once an install is resumed (hass/media.py web_copy and the
+# HASS-IMAGE-1 polish files). Their bytes differ from the original, so they never link a message picture.
+WEB_COPY = re.compile(r"web/([0-9a-f]{2})/\1[0-9a-f]{62}\.(?:jpg|png)")
+POLISH_COPY = re.compile(r"polish/([0-9a-f]{2})/\1[0-9a-f]{62}\.(?:jpg|json)")
 MAX_BYTES = 20 * 1024 * 1024  # hass/media.py MAX_BYTES
 PNG_MAGIC, JPEG_MAGIC = b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"
 
@@ -136,6 +140,16 @@ def media_index(media):
                 continue
             rel = entry.relative_to(top).as_posix()
             if SIDECAR.fullmatch(rel) or re.fullmatch(r"npp/[0-9a-f]{4,12}/receipt\.json", rel):
+                continue
+            if WEB_COPY.fullmatch(rel) or POLISH_COPY.fullmatch(rel):
+                if not rel.endswith(".json"):  # a derived picture must still be the kind its extension says
+                    try:
+                        head = read_nofollow(top, rel)[:8]
+                    except OSError:
+                        problems["link"] += 1
+                        continue
+                    if not head.startswith(PNG_MAGIC if rel.endswith(".png") else JPEG_MAGIC):
+                        problems["bad-bytes"] += 1
                 continue
             card, original = CARD.fullmatch(rel), ORIGINAL.fullmatch(rel)
             if not (card or original):

@@ -75,6 +75,8 @@ TEXT_TOKEN = re.compile(r"[A-Z0-9]{3,}")
 WORD_MIN = 0.35  # each label word on the edited picture must correlate this well with the same spot of Mike's photo
 WORD_SURE = 0.45  # ...and a 4+ letter word under this must also be among the words read on Mike's photo (if any read)
 KNOWN_RATIO = 0.6  # difflib similarity that counts as the same word read twice (OCR slips: HONE!/HONEY, ROAS/ROAST)
+SPOT_HEIGHT = 32  # a photo word the whole-edit read missed is read again at its own spot, enlarged to about this high
+SPOT_READS = 12  # at most this many spots are read again per edit; any further unvouched word counts as gone
 WORD_PX = 8  # a word under this many px high in Mike's photo is too small to judge
 WORD_HEIGHT = 24  # both word patches are compared at this height
 WORD_SEARCH = 0.6  # the search around the mapped spot, as a share of the word's size
@@ -376,7 +378,7 @@ def gate(original, edited) -> dict:
         kept = kept_scores(original, made["jpeg"], mapping, read)
         m["kept"] = [(w, s) for w, s, _where in kept]
         m["text_changed"] = text_changed(m["words"], set(m["photo_words"]))
-        m["text_removed"] = text_removed(kept, found)
+        m["text_removed"] = text_removed(kept, found, reread=lambda where: spot_words(made["jpeg"], where))
     colour_off = (m["hue_shift"] is not None and m["hue_shift"] > HUE_SHIFT_MAX) or m["chroma"] > CHROMA_MAX
     code = ("match" if m["match"] < MATCH_MIN else "colour" if colour_off else "ocr" if m.get("ocr")
             else "text" if m["text_changed"] or m["text_removed"] else "ok")
@@ -781,15 +783,69 @@ def _near(where, box) -> bool:
     return abs((t1 + h1 / 2) - (t2 + h2 / 2)) <= h1 and abs((l1 + w1 / 2) - (l2 + w2 / 2)) <= w1 / 2 + h1
 
 
-def text_removed(kept, edit_found) -> bool:
+def _same_spot(a, b) -> bool:
+    """Do two word boxes (left, top, width, height) on the edited picture cover the same printed word? Centres within
+    half the smaller height up or down and half the smaller width sideways."""
+    (l1, t1, w1, h1), (l2, t2, w2, h2) = a, b
+    return (abs((t1 + h1 / 2) - (t2 + h2 / 2)) <= min(h1, h2) / 2
+            and abs((l1 + w1 / 2) - (l2 + w2 / 2)) <= min(w1, w2) / 2)
+
+
+def _same_word(read, word) -> bool:
+    """Is ``read`` (a spot read again) the photo word ``word``? Stricter than ``_known``: the whole word, at most one
+    letter different for a word of five letters or more (an OCR slip), exactly for shorter ones; never a fragment."""
+    if abs(len(read) - len(word)) > 1:
+        return False
+    row = list(range(len(word) + 1))
+    for i, a in enumerate(read, 1):
+        prev, row[0] = row[0], i
+        for j, b in enumerate(word, 1):
+            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (a != b))
+    return row[-1] <= (1 if len(word) >= 5 else 0)
+
+
+def spot_words(framed, where):
+    """[(word, (left, top, width, height))] tesseract reads on the edited picture around one photo word occurrence's
+    mapped spot ``where`` (same form): the spot padded by one word height on every side, enlarged so the word is about
+    SPOT_HEIGHT px high, read by ``words`` (same rules and confidence); boxes in the edited picture's own px. Small
+    label print the whole-picture read misses is legible here. None when it cannot be read (``words`` gives None, or
+    the spot is off the picture or has no size): never evidence that a word is kept."""
+    Image, _, _ = _pil()
+    left, top, width, height = where
+    if not (width > 0 and height > 0):
+        return None
+    im = Image.open(io.BytesIO(framed)).convert("L")
+    box = (max(0, math.floor(left - height)), max(0, math.floor(top - height)),
+           min(im.width, math.ceil(left + width + height)), min(im.height, math.ceil(top + 2 * height)))
+    if box[2] - box[0] < 2 or box[3] - box[1] < 2:
+        return None
+    buf = io.BytesIO()
+    im.crop(box).save(buf, "PNG")
+    found = words(buf.getvalue(), scale=max(2, min(8, math.ceil(SPOT_HEIGHT / height))))
+    if found is None:
+        return None
+    return [(w, (l + box[0], t + box[1], wd, ht)) for w, (l, t, wd, ht) in found]
+
+
+def text_removed(kept, edit_found, reread=None) -> bool:
     """True when a word occurrence Mike's photo shows is gone from the edit. Each occurrence is checked at its own
     spot (``kept``: (word, score, where) from ``kept_scores``; ``edit_found``: [(word, box)] read on the edit).
     A spot that is clearly blank (under WORD_MIN; flat paper there scores -1) is gone, whatever else the edit reads:
     the same word elsewhere on the label never vouches for it. Otherwise a 4+ letter word that only looks a little
     like its spot (under WORD_SURE) or cannot be judged there is kept only if the edit reads the same word at that
     occurrence's place (each edit word vouches for one occurrence); when that is not established it counts as gone
-    and the fallback is used (a word on the room behind the product costs only the polish)."""
+    and the fallback is used (a word on the room behind the product costs only the polish).
+    ``reread(where)`` ([(word, box)] or None, ``spot_words``): when the whole-edit read has no such word there, the
+    spot is read again on its own, enlarged (small print the whole read misses); the same whole word read there
+    (``_same_word``: one OCR slip at most, never a fragment), at
+    ``where`` and not on print that already belongs to another occurrence (one that vouched for it, or one already
+    kept by its likeness at its own spot), vouches for it. Spots are read
+    again only after every whole-read twin is assigned; more than SPOT_READS unvouched words, a spot off the product
+    or a failed read counts as gone."""
     unused = list(edit_found) if edit_found else []
+    used = []  # edit boxes that already vouched for an occurrence
+    pending = []  # occurrences the whole-edit read does not vouch for, in order
+    accepted = []  # spots of occurrences already kept by likeness (or too short to judge): their print is not for hire
     for item in kept:
         word, s = item[0], item[1]
         where = item[2] if len(item) > 2 else None
@@ -798,10 +854,26 @@ def text_removed(kept, edit_found) -> bool:
         if s is not None and s < WORD_MIN:
             return True
         if len(word) < 4 or (s is not None and s >= WORD_SURE):
+            if where is not None:
+                accepted.append(where)
             continue
         twin = next((i for i, (w, box) in enumerate(unused) if where is not None and _known(w, {word})
                      and _near(where, box)), None)
         if twin is None:
+            pending.append((word, where))
+        else:
+            used.append(unused.pop(twin)[1])
+    if not pending:
+        return False
+    if reread is None or len(pending) > SPOT_READS:
+        return True
+    for word, where in pending:  # only after every whole-read twin is spoken for: a reread never takes one
+        if where is None:
             return True
-        unused.pop(twin)
+        taken = used + accepted + [box for w, box in unused if _known(w, {word})]
+        hit = next((box for w, box in reread(where) or [] if _same_word(w, word) and _near(where, box)
+                    and not any(_same_spot(box, t) for t in taken)), None)
+        if hit is None:
+            return True
+        used.append(hit)
     return False

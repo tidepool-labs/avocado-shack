@@ -51,6 +51,7 @@ from hass.chat.reports_pack import (  # noqa: E402,F401
 
 PRIVATE_PREFIXES = ("alias.", "cost.", "design.")  # AV1222-10: memory keys the interpreter never sees
 PAUSED_LINE = "Changes are paused, so nothing will be saved yet. Say " + q("resume changes") + " first, then yes."
+NPP_PRIVATE = "npp:"  # intake_pending key prefix: a listing job's labelled private cost/count before its approved draft exists
 ATTACHMENT_REPLY = ("I can't read photos, voice notes or files yet, so nothing changed. "
                     "Could you type the change instead?")
 NOT_READ_REPLY = ("I only notice new messages, so I missed that tap or edit and nothing changed. "
@@ -1559,6 +1560,7 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
                                        active["job_id"]) is not None
             finance, replace_price = self._npp_words(text, basis, answering_price)
             disposition = jobs.input(msg, self._asker, accepted or now, now, finance, replace_price=replace_price)
+            self._npp_keep_private(jobs, msg, finance, now)
         if disposition is not None:
             self._record(msg, disposition)
             return disposition, None
@@ -1629,6 +1631,7 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
                 failure = "not_ready"
             else:
                 row = self._propose(draft, msg.sender, now)
+                self._npp_bind_private(job, row, draft, now)
                 cur = self.db.execute(
                     "INSERT INTO approvals(sender,chat,provider_id,change_id,draft_hash,base,expires_at,approved_at) VALUES (?,?,?,?,?,?,?,?)",
                     (msg.sender, msg.chat, msg.provider_id, version["change_id"], version["draft_hash"], version["base"],
@@ -2418,7 +2421,46 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
             return self._reply(jobs.replies["guards"]["render_failed"]) or "npp-unavailable"
         finance, replace_price = self._npp_words(msg.text.replace("\ufffc", ""), photo=True)
         accepted = npp_instant(self._forwarded) or now
-        return jobs.input(msg, self._asker, min(accepted, now), now, finance, shas, replace_price=replace_price)
+        disposition = jobs.input(msg, self._asker, min(accepted, now), now, finance, shas, replace_price=replace_price)
+        self._npp_keep_private(jobs, msg, finance, now)
+        return disposition
+
+    def _npp_keep_private(self, jobs, msg, finance, now):
+        """HASS-INTAKE-2 for listing jobs: the owner's labelled cost and count wait in the conversation's private state
+        beside the job (never in its texts, slots or card), and become his private intake record only when the approved
+        draft is applied. A turn naming neither keeps the earlier values; a turn naming one replaces only that one."""
+        given = {k: v for k, v in (("cost", finance.cost), ("qty", finance.qty)) if v is not None}
+        job = jobs.active(msg.chat, self._asker) if given else None
+        if job is None:
+            return
+        key = NPP_PRIVATE + job["job_id"]
+        try:
+            self.db.execute(item_intake.PENDING)
+            found = self.db.execute("SELECT record_json FROM intake_pending WHERE code = ?", (key,)).fetchone()
+            rec = json.loads(found[0]) if found else {"schema": 1, "kind": "item.intake", "status": "saved", "draft": None,
+                                                      "product": None, "answers": {}, "skipped": []}
+            rec["answers"] = {**rec.get("answers", {}), **given}
+            rec["drafted_at"] = now.isoformat()
+            item_intake.keep_pending(self.db, key, rec, now)
+        except (sqlite3.Error, ValueError, TypeError, AttributeError):
+            return  # best effort, as for the item interview: never a reason to lose the listing
+
+    def _npp_bind_private(self, job, row, draft, now):
+        """The approved draft row now exists: the job's waiting private record moves to that row's code, so the ordinary
+        apply step saves it (and an applied undo marks it undone). Best effort."""
+        key = NPP_PRIVATE + job["job_id"]
+        try:
+            self.db.execute(item_intake.PENDING)
+            found = self.db.execute("SELECT record_json FROM intake_pending WHERE code = ?", (key,)).fetchone()
+            if found is None:
+                return
+            rec = json.loads(found[0])
+            products = [r.get("key") for r in draft.get("records") or [] if r.get("collection") == "products"]
+            rec.update(draft=row["code"], product=products[0] if len(products) == 1 else None)
+            item_intake.keep_pending(self.db, row["code"], rec, now)
+            self.db.execute("DELETE FROM intake_pending WHERE code = ?", (key,))
+        except (sqlite3.Error, ValueError, TypeError, AttributeError):
+            return
 
     def _photo_question(self, code, sha):
         self._reply(PHOTO_QUESTION)
@@ -2549,13 +2591,16 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
         if result in ("applied", "already-applied"):
             self._move(row, "applied", commit=out.get("commit"))
             self._audit("undone" if _is_undo(row) else "applied", row, commit=out.get("commit"))  # AVB-10
-            if self.dispatch is not None and not _is_undo(row): self.dispatch.intake_applied(row["code"], now)  # HASS-INTAKE-2: his private intake record is saved now, not before his yes
+            if not _is_undo(row):  # HASS-INTAKE-2: his private intake record is saved now, not before his yes
+                if self.dispatch is not None: self.dispatch.intake_applied(row["code"], now)
+                elif self.npp is not None: item_intake.save_applied(self.db, self.sdir, row["code"], now)  # listing jobs run without skills
             for call in json.loads(row["ops_json"]):  # an applied undo closes the draft it reverted
                 if call.get("op") == "history.revert":
                     for orig in self._drafts("change_id = ? AND state IN ('applied', 'verified')",
                                              call["args"].get("changeId")):
                         self._move(orig, "reverted", reason=f"undone by {row['code']}")
                         if self.dispatch is not None: self.dispatch.intake_undone(orig["code"], now)  # HASS-INTAKE-2
+                        elif self.npp is not None: item_intake.mark_undone(self.sdir, orig["code"], now)
             if self.previewer is None or self._row_live_site(row):
                 self._reply(self._with_question(answers.applied_text(row["code"], row["summary"], live_site=self._row_live_site(row))))
             # with a previewer the reply waits for verify(): nothing says it worked before it is checked

@@ -99,6 +99,9 @@ class Finance:
     private: frozenset = field(default=frozenset(), repr=False)
     has_cost: bool = False
     has_qty: bool = False
+    # The owner's one unambiguous cost and count, labelled, for his private intake record only (never public text).
+    cost: str | None = field(default=None, repr=False)
+    qty: int | None = field(default=None, repr=False)
 
 
 _BASIS = re.compile(r'(?:(?:/\s*|\s+(?:per|a)\s+)([a-z]+)|\s+(each|apiece|items?|lbs?|pounds?|baskets?))$', re.I)
@@ -165,4 +168,5 @@ def finance(caption, *, answer_unit=None, local_answers=None):
     if price is None or not valid_selling_price(price) or (parsed.get('price') is not None and not price.startswith(parsed['price'] + ' ')):
         price, span = None, None
     return Finance(intake.without_unresolved_finance(public), price, span, frozenset(private),
-                   bool(costs), bool(counts))
+                   bool(costs), bool(counts), cost=next(iter(costs)) if len(costs) == 1 else None,
+                   qty=next(iter(counts)) if len(counts) == 1 else None)

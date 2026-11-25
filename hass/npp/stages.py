@@ -1,7 +1,9 @@
 """Production NPP composition. Workers build evidence; only Jobs may retain a draft."""
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 import hashlib
+import json
 from pathlib import Path
 import re
 import time
@@ -110,6 +112,27 @@ class ProductionStages(Stages):
         self.missing = missing.MissingInfo(pinned)
         self.writer = copy.Writer(pinned)
         self.selector = copy.codex_selector()
+        self._choices = {}  # job_id -> {selector input digest: answer}; same question in one job, same answer
+
+    def _job_selector(self, job_id, *, remote):
+        """The copy selector for one job. An identical selector input (pins and public IDs) is answered once per job:
+        a later version (a price-only edit, a retry) reuses that answer instead of asking again, so wording the owner
+        did not ask to change does not drift between v1 and v2. Without remote time, only a held answer is used."""
+        if self.selector is None:
+            return None
+        held = self._choices.pop(job_id, {})
+        self._choices[job_id] = held  # most recent job last; only the oldest jobs are dropped
+        while len(self._choices) > 64:
+            self._choices.pop(next(iter(self._choices)))
+
+        def select(step, prompt, schema, options):
+            digest = hashlib.sha256(json.dumps([step, prompt, schema, options], sort_keys=True).encode()).hexdigest()
+            if digest not in held:
+                if not remote:
+                    return None
+                held[digest] = self.selector(step, prompt, schema, options)
+            return deepcopy(held[digest])
+        return select
 
     def catalog(self):
         return load_content(editor._load(str(self.c.sdir))[2] / 'hass' / 'content')
@@ -257,7 +280,7 @@ class ProductionStages(Stages):
                                size_text=(listing['size'] or '') if sha == listing['photo'] else '', source_read=source or '',
                                facts=facts, private=finance.private, label_claims=tuple(listing.get('labelClaims') or ()),
                                other_descriptions=tuple(p['description'] for p in content.active_products() if p.get('description')))
-        selector = None if local or self._remaining(work) < 26 else self.selector
+        selector = self._job_selector(work.job_id, remote=not (local or self._remaining(work) < 26))
         draft, written, origin = self._candidate(context, listing, finance, content.makers, key, fresh, url, sha, selector)
         if draft is None or written is None or not frozen.matches_draft(draft):
             return None

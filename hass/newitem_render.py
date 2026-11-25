@@ -51,6 +51,7 @@ JPEG_QUALITIES = (90, 85, 80, 74)
 SHADOW = {"colour": (70, 55, 40), "alpha": 0.055, "blur": 11, "width": 0.8, "height": 0.055, "lift": 0.012}  # tuned to the measured shadow_depth
 MAX_UPSCALE = 2.5
 NOISY = 12  # border variation (levels) above which the background is called busy
+PLANE_MATCH = 10  # levels: an enclosed pocket pixel this close to the background plane is photo background, not product
 STRAIGHTEN = (3.0, 20.0, 1.4)  # tilt range in degrees corrected, and the elongation a subject needs before its axis means anything
 
 
@@ -177,8 +178,21 @@ def _coarse(img):
     for _size, cells in keep:
         for i in cells: flat[i] = 255
     m = Image.frombytes("L", (w, h), bytes(flat)).filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))  # close pin-holes
+    before = m.getdata()
     m = _fill_holes(m)
     data = list(m.getdata())
+    # The filled pockets are kept as product. Those the photo shows on the background plane itself (the counter seen
+    # through a handle) are the only place photo background can survive inside a cut-out; a pale label differs from it.
+    tol = max(PLANE_MATCH, 1.6 * mad)
+    on_plane = bytearray(w * h)
+    for i, (a, b) in enumerate(zip(before, data)):
+        if b and not a and max(abs(px[i][k] - refs[i][k]) for k in range(3)) <= tol:
+            on_plane[i] = 1
+    # a lone anti-aliased letter edge can pass through the counter colour; photo background is a patch
+    patch = round(hs.MIN_PATCH * (w * h) / (hs.WORK * hs.WORK))
+    background = sum(size for size, _cells in _components(on_plane, w, h) if size >= patch)
+    filled = sum(1 for a, b in zip(before, data) if b and not a)
+    report.update(enclosed=round(filled / (w * h), 4), enclosed_background=round(background / (w * h), 4))
     area = sum(1 for v in data if v) / (w * h)
     sides = ([data[x] for x in range(w)], [data[(h - 1) * w + x] for x in range(w)], [data[y * w] for y in range(h)], [data[y * w + w - 1] for y in range(h)])
     touching = sum(sum(1 for v in side if v) / len(side) > .6 for side in sides)
@@ -374,7 +388,9 @@ def render(data: bytes, spec=None) -> dict:
         jpeg = buf.getvalue()
         report["jpeg_quality"] = quality
         if len(jpeg) <= stats["bytes"]["p95"] * 1.3: break
-    check = hs.check_image(jpeg, spec)
+    # only our own cut-out knows which enclosed pockets were background in the photo; a supplied alpha or a fallback does not
+    known = report.get("enclosed_background") if alpha is None and mask is not None else None
+    check = hs.check_image(jpeg, spec, enclosed_background=known)
     if not check["pass"]: review.append("The picture does not pass the house-style check: " + ", ".join(check["hard_failures"] or ["score %d" % check["score"]]))
     report["review"] = review
     return {"jpeg": jpeg, "report": report, "check": check}

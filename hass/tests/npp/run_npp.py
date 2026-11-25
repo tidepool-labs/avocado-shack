@@ -847,6 +847,9 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                 posted = fx.conv.npp_posted(version['change_id']) if outcome == 'approved' and version and version['change_id'] else None
                 observed.append(dict(turn=index, result=outcome, before=before, posted=posted, polish_ready=polish_ready,
                                      snapshot=snapshot))
+                if 'private_intake_saved' in view['expect']:
+                    # Turn-zero truth: the open request (and its slot) is gone once the job closes.
+                    observed[-1]['private'] = private_intake_snapshot(fx.conv.db, fx.conv.sdir)
 
             clock.at(spec['at_s'], 0, play)
             # Pump between turns, including while polish is in flight. A restart invalidates queued work.
@@ -873,6 +876,8 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             'commits': int(git(fx.repo.wt, 'rev-list', '--count', f'{fx.base}..HEAD')),
             'cards': len(fx.transport.cards),
         }
+        if 'private_intake_saved' in view['expect']:
+            state['private_intake'] = private_intake_snapshot(db, fx.conv.sdir)
         card_rows = list(fx.transport.cards.items())
         turn_by_reply = {r['reply_outbox_id']: r['provider_id'] for r in db.execute(
             'SELECT reply_outbox_id, provider_id FROM npp_turns WHERE reply_outbox_id IS NOT NULL')}
@@ -1240,6 +1245,10 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
             same('conflicting maker is absent from public fields and card', term.casefold() in public.casefold(), False)
 
     newly_covered = set()
+    if 'private_intake_saved' in want:
+        bad.extend(private_intake_findings(want['private_intake_saved'], [o.get('private') for o in observed],
+                                           state.get('private_intake'), view['terminal']))
+        newly_covered.add('private_intake_saved')
     if 'polish_late_logged' in want:
         same('polish late logged', late.get('logged'), want['polish_late_logged'])
         same('late polish left the write-once decision unchanged', late.get('dropped'), True)
@@ -1368,6 +1377,87 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
     if unsupported := want.keys() - covered:
         gaps.append('unobserved expectations: ' + ', '.join(sorted(unsupported)))
     return bad
+
+
+# ---------------------------------------------------------------- private intake observer
+
+
+def private_intake_snapshot(db, sdir):
+    """Read-only view of the owner's private intake store at one instant (H1 part 2).
+
+    Three places can hold it: the open request's intake slot (deleted after the request closes, so it is taken after
+    each turn, starting at turn zero), the waiting record beside a draft (``intake_pending``) and the applied store
+    (``item-intake.jsonl`` in the state folder). Only labelled answers count as saved; an unlabelled private-number
+    screen is reported by size so its absence of labels is visible, never mistaken for a record."""
+    def has(name):
+        return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+    def loads(text):
+        try:
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    slot = None
+    if has('open_requests'):
+        row = db.execute('SELECT state, slots_json FROM open_requests ORDER BY request_id DESC LIMIT 1').fetchone()
+        if row is not None:
+            intake = (loads(row[1]) or {}).get('intake')
+            intake = intake if isinstance(intake, dict) else {}
+            slot = {'state': row[0], 'labelled': {k: intake[k] for k in ('cost', 'qty') if intake.get(k) is not None},
+                    'unlabelled': len(intake.get('private') or ())}
+    pending = []
+    if has('intake_pending'):
+        for code, text in db.execute('SELECT code, record_json FROM intake_pending ORDER BY created_at, code'):
+            record = loads(text) or {}
+            pending.append({'draft': code, 'answers': record.get('answers') if isinstance(record.get('answers'), dict) else {}})
+    saved = []
+    path = Path(sdir) / 'item-intake.jsonl' if sdir else None
+    if path is not None and path.is_file() and not path.is_symlink():
+        for line in path.read_text(encoding='utf-8').splitlines():
+            record = loads(line) if line.strip() else None
+            if record is not None:
+                saved.append({'draft': record.get('draft'), 'status': record.get('status'),
+                              'answers': record.get('answers') if isinstance(record.get('answers'), dict) else {}})
+    return {'slot': slot, 'pending': pending, 'saved': saved}
+
+
+def private_intake_findings(want, snapshots, final, terminal):
+    """``private_intake_saved`` passes only when a labelled private record holds exactly the expected cost and
+    quantity: for a published case the applied store row (status saved, not undone), otherwise a waiting record or an
+    applied row. ``snapshots`` are the per-turn views (turn zero first); a missing or unreadable view is not a pass."""
+    from decimal import Decimal, InvalidOperation
+
+    def number(value):
+        try:
+            return Decimal(str(value)) if value is not None and not isinstance(value, bool) else None
+        except InvalidOperation:
+            return None
+
+    expected = {'cost': number(want.get('cost')), 'qty': number(want.get('quantity'))}
+    if None in expected.values() or set(want) - {'cost', 'quantity'}:
+        return ['private_intake_saved: the fixture must name exactly a numeric cost and quantity']
+    if not isinstance(final, dict) or not snapshots or not isinstance(snapshots[0], dict):
+        return ['private_intake_saved: the private intake store was not observed (turn zero or final view missing)']
+
+    def holds(answers):
+        return all(number(answers.get(key)) == value for key, value in expected.items())
+
+    undone = {row['draft'] for row in final['saved'] if row.get('status') == 'undone'}
+    applied = [row for row in final['saved'] if row.get('status') == 'saved' and row.get('draft') not in undone
+               and holds(row['answers'])]
+    waiting = [row for view in [*snapshots, final] if isinstance(view, dict) for row in view['pending']
+               if holds(row['answers'])]
+    if applied or (terminal != 'published' and waiting):
+        return []
+    zero = snapshots[0]['slot']
+    shape = ('no open request' if zero is None else
+             f"open request {zero['state']}, labelled {sorted(zero['labelled']) or 'none'}, "
+             f"unlabelled private values {zero['unlabelled']}")
+    return [f"private_intake_saved: no {'applied' if terminal == 'published' else 'waiting or applied'} private record "
+            f"holds cost {want['cost']} and quantity {want['quantity']} (turn 0: {shape}; matching waiting records "
+            f"{len(waiting)}; applied rows {sum(r.get('status') == 'saved' for r in final['saved'])})"]
 
 
 # ---------------------------------------------------------------- case driver

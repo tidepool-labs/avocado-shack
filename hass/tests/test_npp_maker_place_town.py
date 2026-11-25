@@ -8,9 +8,12 @@ test catches is named in its comment.
 import contextlib
 import importlib.util
 import io
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -133,6 +136,21 @@ class NppMakerPlaceTownTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], PASS)
         self.assertEqual(before, after)
+
+    def test_c4_1_no_bytecode_without_dash_B(self):
+        # A plain `python3 script` run (no -B, no PYTHONDONTWRITEBYTECODE) must not leave
+        # hass/__pycache__ behind. Runs a tmp copy so a pre-existing cache cannot mask it.
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            for rel in ("hass/__init__.py", "hass/itemstd.py", "hass/voice.py", "hass/style/item-standard.json", "scripts/hass/npp_maker_place_town.py"):
+                (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / rel, tmp / rel)
+            result = subprocess.run([sys.executable, str(tmp / "scripts/hass/npp_maker_place_town.py")],
+                                    cwd=tmp, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines()[-1], PASS)
+            self.assertEqual(sorted(str(p.relative_to(tmp)) for p in tmp.rglob("__pycache__")), [])
 
     def test_c5_output_shape(self):
         # Only case lines, the named FAIL forms and the trailer may appear; stderr stays empty.

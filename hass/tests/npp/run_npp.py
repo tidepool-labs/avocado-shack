@@ -895,7 +895,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         state = {
             'state': row['state'] if row else None,
             'draft_rows': db.execute('SELECT count(*) FROM drafts').fetchone()[0],
-            'version_rows': sum(v['state'] != 'building' for v in versions),
+            'version_rows': frozen_version_rows(versions),
             'approvals': db.execute('SELECT count(*) FROM approvals').fetchone()[0],
             'commits': int(git(fx.repo.wt, 'rev-list', '--count', f'{fx.base}..HEAD')),
             'cards': len(fx.transport.cards),
@@ -943,6 +943,20 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         return failures, {'observed': observed, 'state': state, 'calls': dict(calls), 'missing': sorted(set(missing)), 'gaps': gaps}
     finally:
         fx.doCleanups()
+
+
+UNQUEUED = ('card_png_sha', 'outbox_id', 'queued_at', 'delivered_at')
+
+
+def frozen_version_rows(versions):
+    """Count the npp_versions rows that became a draft card for the owner.
+
+    A row still `building` is not one. Jobs.finish also marks a building row `superseded` when the stage answers with
+    a question, a retake or a render failure instead of a card; such a row was never queued (no card PNG, chat row,
+    queued or delivered time) and never reached the owner. A superseded row that was queued or delivered still counts.
+    """
+    return sum(not (v['state'] == 'building' or (v['state'] == 'superseded' and all(v[k] is None for k in UNQUEUED)))
+               for v in versions)
 
 
 def reply_kind(text, replies):

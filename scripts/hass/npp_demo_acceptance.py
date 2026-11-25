@@ -6,8 +6,9 @@ JSON receipt: checkout, replay_sha256 (the report's raw bytes), deliveries
 [{id, variant, n, state, png_sha256, attachment_sha256}], and reference_cards
 [{id, png_sha256}]. IDs and versions come from the versioned cases; gallery
 IDs are strings. The producer must hash the actual PNG and chat attachment
-bytes. This checker compares receipts; it does not render or trust them as
-proof of attendance, install/rollback, or approval. Run from the replay pin.
+bytes. A gallery render counts only as a reference, never as a confirmed
+chat delivery. This checker does not prove attendance, install/rollback,
+or approval. Run from the replay pin.
 """
 
 import argparse
@@ -56,7 +57,8 @@ def expected():
             rows[key] = (view['path'], view['terminal'], layers)
             deliveries.update((*key, row['n']) for row in view['expect'].get('versions', [])
                               if row.get('delivered') is True)
-    if {key[0] for key in rows} != set(range(1, 39)) or len(rows) != 49 or len(set(CASE_IDS)) != 12:
+    if ({key[0] for key in rows} != set(range(1, 39)) or len(rows) != 49
+            or len(deliveries) != 78 or len(set(CASE_IDS)) != 12):
         raise ValueError('unexpected versioned corpus')
     return rows, deliveries
 

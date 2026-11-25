@@ -7,8 +7,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hass.tests.npp import run_npp
+from scripts.hass import npp_demo_acceptance
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKOUT, RECORDING, PNG = 'a' * 40, 'b' * 64, 'c' * 64
@@ -114,6 +116,22 @@ class DemoAcceptanceTests(unittest.TestCase):
         report, evidence = synthetic_receipts()
         evidence['reference_cards'][-1]['id'] = '01'
         self.assertEqual(self.assert_hold(report, evidence, 'reference-coverage')['reference_cards'], 11)
+
+    def test_fixed_delivery_total_cannot_shrink_with_corpus(self):
+        # An accidental fixture edit must not lower the release target even if the report
+        # and bundle agree with the newly shortened expectation and all 12 references exist.
+        report, evidence = synthetic_receipts()
+        dropped = evidence['deliveries'].pop(0)
+        cases = run_npp.load_cases()
+        self.assertIsNone(dropped['variant'])
+        version = next(row for row in cases[dropped['id']]['expect']['versions'] if row['n'] == dropped['n'])
+        version['delivered'] = False
+        replay = json.dumps(report).encode()
+        evidence['replay_sha256'] = hashlib.sha256(replay).hexdigest()
+        with patch.object(run_npp, 'load_cases', return_value=cases):
+            with self.assertRaisesRegex(ValueError, 'unexpected versioned corpus'):
+                npp_demo_acceptance.check(replay, json.dumps(evidence).encode(),
+                                         checkout=CHECKOUT, recording_sha256=RECORDING)
 
     def test_fixture_only_or_other_run_evidence_holds(self):
         # Prevent a fixture-only green result, an old bundle, or a different recording/checkout being reused.

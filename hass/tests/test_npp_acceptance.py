@@ -631,5 +631,103 @@ class GenericObserverTests(unittest.TestCase):
         self.assertEqual(run_npp.word_distance("Alle-Pia Calabrese salamini", "Calabrese salamini"), 1)
 
 
+class PrivateIntakeObserverTests(unittest.TestCase):
+    """H1 part 2: private_intake_saved is observed from turn zero; absence is a failure, never a gap or a pass."""
+
+    WANT = {"cost": "1.00", "quantity": "50"}
+
+    def store(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        db.execute("CREATE TABLE open_requests(request_id INTEGER PRIMARY KEY, state TEXT, slots_json TEXT)")
+        db.execute("CREATE TABLE intake_pending(code TEXT PRIMARY KEY, record_json TEXT, created_at TEXT)")
+        holder = tempfile.TemporaryDirectory(prefix="npp-intake-")
+        self.addCleanup(holder.cleanup)
+        sdir = Path(holder.name)
+        return db, sdir
+
+    def view(self, db, sdir):
+        return run_npp.private_intake_snapshot(db, sdir)
+
+    def test_the_npp_unlabelled_screen_alone_is_not_a_saved_record(self):
+        # Contract: cost and quantity are kept as labelled private answers. Bug it catches: the NPP job keeps only an
+        # unlabelled set of private digits ("1", "100", "50") in the open request, which closes and is deleted.
+        db, sdir = self.store()
+        db.execute("INSERT INTO open_requests VALUES (1, 'open', ?)", (json.dumps(
+            {"intake": {"private": ["1", "100", "50"], "has_cost": True, "has_qty": True}}),))
+        zero = self.view(db, sdir)
+        self.assertEqual(zero["slot"], {"state": "open", "labelled": {}, "unlabelled": 3})
+        db.execute("DELETE FROM open_requests")
+        found = run_npp.private_intake_findings(self.WANT, [zero], self.view(db, sdir), "published")
+        self.assertEqual(len(found), 1)
+        self.assertIn("labelled none, unlabelled private values 3", found[0])
+        self.assertIn("applied rows 0", found[0])
+
+    def test_an_applied_labelled_record_passes_and_every_near_miss_fails(self):
+        db, sdir = self.store()
+        zero = self.view(db, sdir)
+
+        def applied(*rows):
+            (sdir / "item-intake.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+            return self.view(db, sdir)
+
+        good = {"draft": "ABCD", "status": "saved", "answers": {"cost": "1.00", "qty": 50}}
+        self.assertEqual(run_npp.private_intake_findings(self.WANT, [zero], applied(good), "published"), [])
+        for label, rows in [
+                ("wrong cost", [{**good, "answers": {"cost": "2.00", "qty": 50}}]),
+                ("wrong quantity", [{**good, "answers": {"cost": "1.00", "qty": 5}}]),
+                ("quantity missing", [{**good, "answers": {"cost": "1.00"}}]),
+                ("boolean is not a number", [{**good, "answers": {"cost": "1.00", "qty": True}}]),
+                ("undone afterwards", [good, {"draft": "ABCD", "status": "undone"}]),
+                ("not saved", [{**good, "status": "draft"}])]:
+            with self.subTest(label):
+                self.assertEqual(len(run_npp.private_intake_findings(self.WANT, [zero], applied(*rows), "published")), 1)
+
+    def test_a_waiting_record_counts_only_before_publication(self):
+        db, sdir = self.store()
+        db.execute("INSERT INTO intake_pending VALUES ('ABCD', ?, 't')",
+                   (json.dumps({"answers": {"cost": "1", "qty": 50}}),))
+        zero = self.view(db, sdir)
+        self.assertEqual(run_npp.private_intake_findings(self.WANT, [zero], zero, "previewed"), [])
+        found = run_npp.private_intake_findings(self.WANT, [zero], zero, "published")
+        self.assertIn("matching waiting records 2", found[0])
+
+    def test_an_unobserved_store_or_a_malformed_expectation_fails(self):
+        db, sdir = self.store()
+        final = self.view(db, sdir)
+        for snapshots, last in [([], final), ([None], final), ([final], None)]:
+            self.assertIn("not observed", run_npp.private_intake_findings(self.WANT, snapshots, last, "published")[0])
+        for want in ({"cost": "1.00"}, {"cost": "one", "quantity": "50"}, {**self.WANT, "price": "3"}):
+            self.assertIn("must name", run_npp.private_intake_findings(want, [final], final, "published")[0])
+
+    def test_a_non_object_or_non_finite_expectation_is_a_case_failure_not_a_crash_or_a_pass(self):
+        # Contract: a malformed private_intake_saved fixture is reported as a case finding. Bugs it catches: a
+        # null/list/string expectation raising AttributeError and aborting the replay, and "Infinity" parsing as a
+        # Decimal that equals a saved row holding the same non-finite value, so a bad fixture passes.
+        db, sdir = self.store()
+        (sdir / "item-intake.jsonl").write_text(json.dumps(
+            {"draft": "ABCD", "status": "saved", "answers": {"cost": "Infinity", "qty": "NaN"}}) + "\n")
+        final = self.view(db, sdir)
+        for want in (None, [], ["cost", "quantity"], "cost", 5, True, {},
+                     {"cost": "Infinity", "quantity": "NaN"}, {"cost": "Infinity", "quantity": "50"},
+                     {"cost": "-Infinity", "quantity": "50"}, {"cost": "1.00", "quantity": "NaN"},
+                     {"cost": float("inf"), "quantity": 50}, {"cost": [1], "quantity": {"a": 1}}):
+            with self.subTest(want=want):
+                found = run_npp.private_intake_findings(want, [final], final, "published")
+                self.assertEqual(len(found), 1)
+                self.assertIn("must name", found[0])
+
+    def test_the_store_reader_ignores_a_symlinked_file_and_bad_json(self):
+        db, sdir = self.store()
+        db.execute("INSERT INTO intake_pending VALUES ('X', 'not json', 't')")
+        target = sdir / "elsewhere.jsonl"
+        target.write_text(json.dumps({"draft": "X", "status": "saved", "answers": {"cost": "1.00", "qty": 50}}) + "\n")
+        (sdir / "item-intake.jsonl").symlink_to(target)
+        seen = self.view(db, sdir)
+        self.assertEqual((seen["pending"], seen["saved"]), ([{"draft": "X", "answers": {}}], []))
+        self.assertEqual(seen["slot"], None)
+
+
 if __name__ == "__main__":
     unittest.main()

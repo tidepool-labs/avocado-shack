@@ -501,6 +501,19 @@ def card_image_findings(alt_lacks, versions, delivered, shots, alts):
     return bad, missing
 
 
+def identify_body(photos):
+    """What the caption can put into an S2 identify request: nothing. ``Identifier.read`` takes photo bytes only and the
+    prompt is pinned (hass/tests/test_npp_stages.py proves both with a recording sink). The photo count is not owner
+    text: serialising it as a bare ``1`` made case 13 report its private cost of $1 as a cloud leak."""
+    return json.dumps({'stage': 'identify', 'photos': ['<photo>'] * len(photos)})
+
+
+def stub_body(stage, *payload):
+    """The owner-variable input a taped edit-map stub received (his finance-free remainder and the card fields), scanned
+    like any cloud body. The copy selector's input is pinned template/phrase IDs only, so it has no owner part."""
+    return json.dumps({'stage': stage, 'input': payload}, default=str)
+
+
 def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
     """Real stages, Conversation and writer, with fixture-only I/O in replay."""
     from unittest.mock import patch
@@ -547,7 +560,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         photos = tuple(photos)
         digest = sha256(photos[0]) if len(photos) == 1 else sha256(b''.join(hashlib.sha256(p).digest() for p in photos))
         calls['identify'] += 1
-        bodies.append(json.dumps({'images': len(photos)}))
+        bodies.append(identify_body(photos))
         if 'identify' in stubs:
             return SimpleNamespace(evidence=stubs['identify'])
         create = (lambda: recorder.identify(pinned, photos)) if recorder else None
@@ -632,7 +645,12 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             fx.conv.npp.stages = port
             port.identifier.read = identify
             port.selector = (lambda *_a, **_k: stubs['copy']) if 'copy' in stubs else None
-            port.mapper = (lambda *_a, **_k: stubs['edit_map']) if 'edit_map' in stubs else deny
+
+            def mapped(_prompt, _schema, text, fields):
+                bodies.append(stub_body('edit_map', text, fields))
+                return stubs['edit_map']
+
+            port.mapper = mapped if 'edit_map' in stubs else deny
 
         def launch(root, sha, *, log=None, **_kwargs):
             calls['image_edit'] += 1

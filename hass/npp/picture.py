@@ -92,6 +92,24 @@ def choose(settings, sha, *, has_person_or_screen, private_numbers_clear,
     return FrozenPicture(selected.variant, selected.path, hashlib.sha256(selected.data).hexdigest())
 
 
+def unidentified_retake(data, has_person_or_screen) -> photos.Retake | None:
+    """The retake for a priced item S2 could not identify when the photo itself is the problem, else None.
+
+    The same raw conditions ``choose`` refuses: a person or screen in frame (S2 says exactly True) or a photo under
+    the sharpness floor. Anything else, or a photo that cannot be read, stays an identity question for the caller.
+    """
+    if has_person_or_screen is True:
+        return photos.Retake(photos.RETAKE["style"], ("style",))
+    try:
+        img, alpha, _ = newitem_render._upright(data)
+        sharp = photos._sharpness(img, alpha)
+    except (media.Refused, newitem_render.Refused, house_style.PillowMissing, OSError, MemoryError):
+        return None
+    if sharp is not None and sharp < photos.SHARP_MIN:
+        return photos.Retake(photos.RETAKE["blurry"], ("blurry",))
+    return None
+
+
 def _raw_problem(data, has_person_or_screen, private_numbers_clear, label_words, source_label_words, ocr):
     if has_person_or_screen is not False:
         return "style"

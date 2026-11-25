@@ -3,10 +3,13 @@
 import contextlib
 import importlib.util
 import io
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -142,6 +145,24 @@ class IntakeCommerceTextTests(unittest.TestCase):
         result = self.run_subprocess()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(snapshot(), before)
+
+    def test_c4_1_plain_run_leaves_no_bytecode(self):
+        # The tool must be read-only when run plainly (no -B, no PYTHONDONTWRITEBYTECODE) on a writable checkout:
+        # importing hass.skills.item_intake must not create __pycache__. A copy is used so a warm cache in the real
+        # tree cannot hide the write; dropping sys.dont_write_bytecode from the script makes this fail.
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp)
+            shutil.copytree(ROOT / "hass", copy / "hass",
+                            ignore=shutil.ignore_patterns("__pycache__", "tests", "*.pyc"))
+            (copy / "scripts/hass").mkdir(parents=True)
+            shutil.copy(SCRIPT, copy / "scripts/hass" / SCRIPT.name)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "PYTHONPATH")}
+            result = subprocess.run([sys.executable, str(copy / "scripts/hass" / SCRIPT.name)], cwd=copy, env=env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+            self.assertEqual(result.stdout.splitlines()[-1], TRAILER_PASS)
+            self.assertEqual(sorted(str(p.relative_to(copy)) for p in copy.rglob("__pycache__")), [])
 
     def test_c5_output_shape(self):
         # Stray prints (exception text, tracebacks, extra notes) must not appear on stdout or stderr.

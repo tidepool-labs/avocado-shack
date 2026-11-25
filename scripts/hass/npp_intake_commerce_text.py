@@ -9,6 +9,8 @@ import argparse
 import os
 import sys
 
+sys.dont_write_bytecode = True  # a plain run (no -B) must leave no __pycache__ inside the repository
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

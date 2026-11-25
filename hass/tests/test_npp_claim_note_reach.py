@@ -163,7 +163,8 @@ class ClaimNoteReachTests(unittest.TestCase):
 
     def test_c3_usage_exit_2(self):
         # C3: argparse's exit 2 and an empty stdout for any argument.
-        for args in (("extra",), ("--unknown",)):
+        # --help and -h must not print help and exit 0 (a bug if argparse's automatic help is left on).
+        for args in (("extra",), ("--unknown",), ("--help",), ("-h",)):
             with self.subTest(args=args):
                 result = run_script(*args)
                 self.assertEqual((result.returncode, result.stdout), (2, ""))

@@ -145,7 +145,8 @@ def report(results):
 
 
 def main(argv=None, *, stages_class=None, tamper=None):
-    argparse.ArgumentParser(description=__doc__).parse_args(argv)
+    # add_help=False: every argument, -h/--help included, is a usage error (exit 2, empty stdout).
+    argparse.ArgumentParser(description=__doc__, add_help=False).parse_args(argv)
     try:
         lines, code = report(probe(stages_class, tamper))
     except Exception:  # noqa: BLE001 - report only the fixed finding, never exception text

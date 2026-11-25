@@ -536,6 +536,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
     copy_asset = pinned[0]['assets']['hass-listing-copy/SKILL.md']
     calls, ordinals = Counter(), Counter()
     failures, missing, observed, bodies = [], [], [], []
+    reads = []  # every S2 identify call: (virtual seconds, original photo shas in the order the stage sent them)
     live_images = {}  # out png path -> card_observer.cjs observation of the live browser
     inputs = view.get('inputs', {})
     stubs, polish = inputs.get('stubs', {}), inputs.get('polish', {})
@@ -566,6 +567,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         photos = tuple(photos)
         digest = sha256(photos[0]) if len(photos) == 1 else sha256(b''.join(hashlib.sha256(p).digest() for p in photos))
         calls['identify'] += 1
+        reads.append((clock.monotonic(), [sha256(p) for p in photos]))
         bodies.append(identify_body(photos))
         if 'identify' in stubs:
             return SimpleNamespace(evidence=stubs['identify'])
@@ -937,7 +939,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                 failures.append('polish did not settle before the price answer')
             decision = photo_polish.decision(fx.root, row['photo_sha']) if row and row['photo_sha'] else None
             failures += check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures,
-                                   delivered, missing)
+                                   delivered, missing, reads=reads)
         return failures, {'observed': observed, 'state': state, 'calls': dict(calls), 'missing': sorted(set(missing)), 'gaps': gaps}
     finally:
         fx.doCleanups()
@@ -1130,11 +1132,67 @@ def listing_findings(want, product, makers):
     return bad, unknown
 
 
+def photo_role_findings(want, versions, job_photos, reads, ref_sha, product_keys):
+    """Observe what each owner photo became: the picture, the label reading, and how many listings were shown.
+
+    ``versions`` are npp_versions rows (dicts); only a version with ``delivered_at`` counts, because the owner saw it.
+    ``job_photos`` maps each job id to its stored picture photo sha, ``reads`` lists the S2 identify calls as
+    (seconds, [photo shas]) and
+    ``product_keys`` maps (job id, version n) -> the product record keys of its frozen draft or committed change.
+    ``ref_sha`` turns a fixture photo reference into its original sha.
+
+    * picture_source: the stored picture photo of each delivered version's own job, and that version's frozen listing
+      photo, are the named photo (a later job with no delivered version is not consulted).
+    * label_words_from: every identify reading read exactly the named photos in order, and one of them happened at or
+      before the first delivered version.
+    * listings: the number of distinct product records across delivered versions.
+
+    Returns (failures, covered keys). A key whose event never happened (no delivered version, no reading) is not
+    covered, so the run reports a gap instead of a pass."""
+    bad, covered = [], set()
+    shown = sorted((v for v in versions if v.get('delivered_at')), key=lambda v: v['n'])
+    if 'picture_source' in want and shown:
+        expected = ref_sha(want['picture_source'])
+        for job_id in sorted({v.get('job_id') for v in shown}, key=str):
+            if job_photos.get(job_id) != expected:
+                bad.append(f"picture_source: job {job_id} photo is not {want['picture_source']}")
+        for v in shown:
+            photo = json.loads(v.get('listing_json') or '{}').get('photo')
+            if photo != expected:
+                bad.append(f"picture_source: v{v['n']} pictures {'another photo' if photo else 'no photo'}, "
+                           f"not {want['picture_source']}")
+        covered.add('picture_source')
+    if 'label_words_from' in want and shown and reads:
+        expected = [ref_sha(ref) for ref in want['label_words_from']]
+        for seconds, photos in reads:
+            if list(photos) != expected:
+                bad.append(f'label_words_from: a reading at {seconds:g}s read {len(photos)} photo(s), not the named '
+                           f'{len(expected)} in order')
+        first = min(datetime.fromisoformat(v['delivered_at']) for v in shown)
+        if not any(_T0() + timedelta(seconds=seconds) <= first for seconds, _ in reads):
+            bad.append('label_words_from: no reading before the first delivered card')
+        covered.add('label_words_from')
+    if 'listings' in want and shown:
+        keys = {key for v in shown for key in product_keys.get((v.get('job_id'), v['n']), ())}
+        if any(not product_keys.get((v.get('job_id'), v['n'])) for v in shown):
+            bad.append('listings: a delivered version has no product record')
+        if len(keys) != want['listings']:
+            bad.append(f"listings: want {want['listings']}, got {len(keys)}")
+        covered.add('listings')
+    return bad, covered
+
+
+def _T0():
+    from hass.tests.test_conversation import T0
+    return T0
+
+
 def check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures, delivered=None,
-               missing=None):
+               missing=None, reads=None):
     """Bind delivery and publish claims to stored versions and actual committed bytes."""
     want, bad = view['expect'], []
     db = fx.conv.db
+    rows = [dict(v) for v in versions]
     versions = {v['n']: v for v in versions}
     latest = versions[max(versions)] if versions else {}
     approved = [v for v in versions.values() if v['state'] == 'approved']
@@ -1380,6 +1438,16 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
         if 'description_equals' in want and 'description_equals' not in newly_covered:
             same('description_equals', seen.get('description'), want['description_equals'])
             newly_covered.add('description_equals')
+
+    # What each owner photo became (case 17's front picture and back label), bound to delivered versions only.
+    if want.keys() & {'picture_source', 'label_words_from', 'listings'}:
+        job_photos = {r[0]: r[1] for r in db.execute('SELECT job_id, photo_sha FROM npp_jobs')}
+        keys = {(v.get('job_id'), v['n']): [r['key'] for r in version_record(v).get('records', [])
+                                            if r.get('collection') == 'products' and r.get('key')] for v in rows}
+        found, observed_keys = photo_role_findings(want, rows, job_photos, reads or [],
+                                                   lambda ref: sha256(photo_bytes(ref)), keys)
+        bad.extend(found)
+        newly_covered.update(observed_keys)
 
     # Never report a fixture green when its declared contract has no observer.
     covered = {'state', 'replies', 'total_replies', 'draft_rows', 'approval_rows', 'commits', 'calls',

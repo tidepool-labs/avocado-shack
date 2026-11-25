@@ -9,11 +9,14 @@ repo, 127.0.0.1, no Clover, no live site, no browser.
 
 import functools
 import hashlib
+import html.parser
 import http.server
 import json
+import re
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from hass.tests import test_npp_undo_journey as journey
@@ -26,8 +29,48 @@ SHOWN = ("name", "description", "sellingPrice", "imageAlt")
 CATALOG_URL, MARKET_URL = "/catalog-products.js", "/index.html"
 
 
+PRIVATE_RE = re.compile(r"\b(" + "|".join(PRIVATE_WORDS) + r")(?:s|es)?\b")
+SCRIPT_TYPES = {"", "text/javascript", "application/javascript", "module"}
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def private_words_in(value):
+    """Private words found anywhere in a served record: its field names and every string inside its field values."""
+    found = set()
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            found |= {word for word in PRIVATE_WORDS if str(key).lower().startswith(word)}
+            found |= private_words_in(inner)
+    elif isinstance(value, (list, tuple)):
+        for inner in value:
+            found |= private_words_in(inner)
+    elif isinstance(value, str):
+        found |= {match.group(1) for match in PRIVATE_RE.finditer(value.lower())}
+    return found
+
+
+class _ScriptSources(html.parser.HTMLParser):
+    """The `src` of every real script element that a browser would run (comments, text and other types are skipped)."""
+
+    def __init__(self):
+        super().__init__()
+        self.sources = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = {name: value for name, value in attrs}
+        if tag == "script" and attrs.get("src") and (attrs.get("type") or "").strip().lower() in SCRIPT_TYPES:
+            self.sources.append(attrs["src"])
+
+
+def page_loads_catalog(page):
+    """True only when the page has a script element whose src is the catalog script (any query string is ignored)."""
+    parser = _ScriptSources()
+    parser.feed(page.decode("utf-8", "replace"))
+    parser.close()
+    return any(urllib.parse.urlparse(src).path.rsplit("/", 1)[-1] == CATALOG_URL.lstrip("/") for src in parser.sources)
 
 
 class Site:
@@ -76,7 +119,7 @@ def served_card(site, pid):
     """What a visitor gets for item `pid`: (record or None, photo SHA-256 or None, catalog bytes, problems about the page)."""
     problems = []
     page = site.get(MARKET_URL)
-    if page is None or b"catalog-products.js" not in page:
+    if page is None or not page_loads_catalog(page):
         problems.append("the served Market page does not load the catalog script")
     script = site.get(CATALOG_URL)
     if script is None:
@@ -104,8 +147,8 @@ def mismatches(approved, served):
         out.append("the served photo is not the approved photo")
     if not set(record) <= PUBLIC_KEYS:
         out.append("the served record has a non-public field")
-    lowered = json.dumps(record).lower()
-    out.extend(f"the served record mentions {word}" for word in PRIVATE_WORDS if f'"{word}' in lowered)
+    found = private_words_in(record)
+    out.extend(f"the served record mentions {word}" for word in PRIVATE_WORDS if word in found)
     out.extend(f"the served catalog carries {secret_name}" for secret_name, secret in (("a chat id", CHAT), ("a sender id", OWNER))
                if secret.encode() in script)
     return out
@@ -205,6 +248,48 @@ class HiddenListingServedProjectionTests(journey.NppUndoJourneyTests):
         self.web.stale.clear()
         self.web.stale[MARKET_URL] = b"<html>no script here</html>"
         self.assertEqual(mismatches(approved, self.served()), ["the served Market page does not load the catalog script"])
+
+    def test_s5b_private_words_inside_an_approved_public_field_still_fail(self):
+        # Contract: the privacy observer reads the words INSIDE every served value, not only a quote before a word.
+        # Bug it catches: a descriptor like "Quince jelly, wholesale supplier cost $2" passing because no value
+        # starts with a private word. The owner approved that text here, so only the privacy check can object.
+        self.publish()
+        approved = self.approved_card()
+        record, _photo, script, _problems = self.served()
+        self.assertEqual(mismatches(approved, self.served()), [])  # control: the real card is clean
+        for text, words in (("Quince jelly, wholesale supplier cost $2", ("wholesale", "supplier", "cost")),
+                            ("Only 3 in stock, margin is high", ("stock", "margin")),
+                            ("Jars (qty 12)", ("qty",)),
+                            ("Wholesale only", ("wholesale",))):
+            leaked = dict(record, description=text)
+            self.web.stale[CATALOG_URL] = script.replace(json.dumps(record).encode(), json.dumps(leaked).encode())
+            self.assertNotEqual(script, self.web.stale[CATALOG_URL])
+            found = mismatches(dict(approved, description=text), self.served())  # the approval matches the page
+            self.assertEqual(found, [f"the served record mentions {word}" for word in PRIVATE_WORDS if word in words])
+        self.web.stale[CATALOG_URL] = script.replace(json.dumps(record).encode(), json.dumps(dict(record, description="A discounted country jar")).encode())
+        self.assertEqual(mismatches(dict(approved, description="A discounted country jar"), self.served()), [])  # whole words only
+
+    def test_s5c_a_comment_or_text_or_wrong_script_does_not_count_as_loading_the_catalog(self):
+        # Contract: the served Market page must reference the catalog in a real <script src>. Bug it catches: an HTML
+        # comment, visible text, an inline script or a non-script element naming catalog-products.js passing the check.
+        self.publish()
+        approved = self.approved_card()
+        loads = ["the served Market page does not load the catalog script"]
+        for page, expect in ((b'<html><script src="catalog-products.js"></script></html>', []),
+                             (b'<script src="/catalog-products.js?v=3"></script>', []),
+                             (b"<SCRIPT SRC='./catalog-products.js' ></SCRIPT>", []),
+                             (b'<html><!-- <script src="catalog-products.js"></script> --></html>', loads),
+                             (b"<p>we load catalog-products.js later</p>", loads),
+                             (b'<script>var u = "catalog-products.js";</script>', loads),
+                             (b'<link rel="preload" href="catalog-products.js">', loads),
+                             (b'<script src="catalog-products.js.bak"></script>', loads),
+                             (b'<script src="other/not-catalog-products.js"></script>', loads),
+                             (b'<script type="text/plain" src="catalog-products.js"></script>', loads),
+                             (b"<script src=\"x.js\"></script>", loads)):
+            self.web.stale[MARKET_URL] = page
+            self.assertEqual(mismatches(approved, self.served()), expect, page)
+        self.web.stale.clear()
+        self.assertEqual(mismatches(approved, self.served()), [])  # the real served Market page loads it
 
     def test_s6_a_chat_id_in_the_served_catalog_fails(self):
         self.publish()

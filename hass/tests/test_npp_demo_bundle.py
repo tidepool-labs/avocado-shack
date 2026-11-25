@@ -200,6 +200,41 @@ class ProducerConsumerJoinTests(unittest.TestCase):
         with self.assertRaisesRegex(bundle.Refused, 'checkout-changed'):
             self.produce(report, heads=(HEAD, 'b' * 40))
 
+    def test_recording_changing_during_replay_or_gallery_writes_nothing(self):
+        # Contract: the bundle is bound to the recording digest taken at the start; a change at ANY point of
+        # production (replay, or the later gallery render) is refused. Bug: checking only right after replay
+        # let a recording edited during references() be accepted with the stale digest.
+        report, _ = synthetic_receipts()
+        for stage in ('replay', 'gallery'):
+            with self.subTest(stage=stage):
+                folder = tempfile.TemporaryDirectory()
+                self.addCleanup(folder.cleanup)
+                recording = Path(folder.name) / 'recording.json'
+                recording.write_bytes(b'{"synthetic": true}')
+                report['summary']['fingerprint']['recorded_sha256'] = sha(recording.read_bytes())
+                run = synthetic_run(report)
+
+                def changing_run(argv, environ=None):
+                    code = run(argv, environ)
+                    if stage == 'replay':
+                        recording.write_bytes(b'{"synthetic": "edited"}')
+                    return code
+
+                def changing_references(gallery_dir, node=None):
+                    if stage == 'gallery':
+                        recording.write_bytes(b'{"synthetic": "edited"}')
+                    return [{'id': f'{i:02}', 'png_sha256': 'c' * 64} for i in range(1, 13)]
+
+                out = Path(folder.name) / 'out'
+                with patch.object(run_npp, 'main', changing_run), \
+                        patch.object(run_npp, 'check_card', lambda *a, **k: []), \
+                        patch.object(bundle, 'checkout', return_value=HEAD), \
+                        patch.object(bundle, 'references', changing_references):
+                    with self.assertRaisesRegex(bundle.Refused, 'recording-changed'):
+                        bundle.produce(recording, out)
+                self.assertFalse((out / 'replay.json').exists())
+                self.assertFalse((out / 'evidence.json').exists())
+
     def test_output_inside_git_is_refused_before_running(self):
         with patch.object(run_npp, 'main', side_effect=AssertionError('ran')):
             with self.assertRaisesRegex(ValueError, 'inside a git worktree'):

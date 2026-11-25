@@ -148,8 +148,11 @@ def produce(recording, out, *, node=None, root=ROOT):
     if sha256(recording.read_bytes()) != recorded:
         raise Refused('recording-changed')
     cards = references(out / 'gallery', node)
+    # Recheck everything at the very end: the gallery render can also change the checkout or the recording.
     if checkout(root) != head:
         raise Refused('checkout-changed')
+    if sha256(recording.read_bytes()) != recorded:
+        raise Refused('recording-changed')
     evidence = json.dumps({'checkout': head, 'replay_sha256': sha256(raw), 'deliveries': deliveries.rows,
                            'reference_cards': cards}, sort_keys=True).encode('utf-8')
     write_private(out / 'replay.json', raw)

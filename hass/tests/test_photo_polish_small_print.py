@@ -97,6 +97,23 @@ class TextRemovedTests(unittest.TestCase):
         far_apart = [("TASTE", None, (100, 200, 30, 8)), ("TASTE", None, (140, 200, 30, 8))]
         self.assertFalse(photo_polish.text_removed(far_apart, [], reread=both))
 
+    def test_print_of_a_kept_occurrence_never_vouches_for_a_missed_one(self):
+        """A small TASTE is erased; a TASTE just below it survives and already counts as kept by its likeness (0.9).
+        A reread of the erased spot also sees the survivor (it fits the padded crop and is near); that print belongs
+        to the kept occurrence and must not vouch a second time, whichever occurrence comes first."""
+        erased, survivor = (100, 200, 30, 8), (100, 208, 30, 8)
+        for kept in ([("TASTE", None, erased), ("TASTE", 0.9, survivor)],
+                     [("TASTE", 0.9, survivor), ("TASTE", None, erased)]):
+            with self.subTest(kept=kept):
+                self.assertTrue(photo_polish.text_removed(kept, [], reread=Reread([("TASTE", survivor)])))
+        # a kept word too short to judge holds its spot the same way
+        self.assertTrue(photo_polish.text_removed([("TASTE", None, erased), ("TAS", None, survivor)], [],
+                                                  reread=Reread([("TASTE", survivor)])))
+        # the missed occurrence's own print read at its spot still vouches for it, next to the kept neighbour
+        both = Reread([("TASTE", erased), ("TASTE", survivor)])
+        self.assertFalse(photo_polish.text_removed([("TASTE", None, erased), ("TASTE", 0.9, survivor)], [],
+                                                   reread=both))
+
     def test_too_many_unvouched_words_are_gone_without_reading(self):
         again = Reread([("TASTE", NEAR)])
         kept = [("TASTE", None, H)] * (photo_polish.SPOT_READS + 1)

@@ -838,12 +838,14 @@ def text_removed(kept, edit_found, reread=None) -> bool:
     ``reread(where)`` ([(word, box)] or None, ``spot_words``): when the whole-edit read has no such word there, the
     spot is read again on its own, enlarged (small print the whole read misses); the same whole word read there
     (``_same_word``: one OCR slip at most, never a fragment), at
-    ``where`` and not on a printed word that already vouched for another occurrence, vouches for it. Spots are read
+    ``where`` and not on print that already belongs to another occurrence (one that vouched for it, or one already
+    kept by its likeness at its own spot), vouches for it. Spots are read
     again only after every whole-read twin is assigned; more than SPOT_READS unvouched words, a spot off the product
     or a failed read counts as gone."""
     unused = list(edit_found) if edit_found else []
     used = []  # edit boxes that already vouched for an occurrence
     pending = []  # occurrences the whole-edit read does not vouch for, in order
+    accepted = []  # spots of occurrences already kept by likeness (or too short to judge): their print is not for hire
     for item in kept:
         word, s = item[0], item[1]
         where = item[2] if len(item) > 2 else None
@@ -852,6 +854,8 @@ def text_removed(kept, edit_found, reread=None) -> bool:
         if s is not None and s < WORD_MIN:
             return True
         if len(word) < 4 or (s is not None and s >= WORD_SURE):
+            if where is not None:
+                accepted.append(where)
             continue
         twin = next((i for i, (w, box) in enumerate(unused) if where is not None and _known(w, {word})
                      and _near(where, box)), None)
@@ -866,7 +870,7 @@ def text_removed(kept, edit_found, reread=None) -> bool:
     for word, where in pending:  # only after every whole-read twin is spoken for: a reread never takes one
         if where is None:
             return True
-        taken = used + [box for w, box in unused if _known(w, {word})]
+        taken = used + accepted + [box for w, box in unused if _known(w, {word})]
         hit = next((box for w, box in reread(where) or [] if _same_word(w, word) and _near(where, box)
                     and not any(_same_spot(box, t) for t in taken)), None)
         if hit is None:

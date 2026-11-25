@@ -131,6 +131,50 @@ class RestoredChatViewTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("bad-name", output)
 
+    def test_copies_the_service_makes_after_a_resume_do_not_fail_a_restore(self):
+        # media.web_copy and the HASS-IMAGE-1 polish files appear once a restored install runs again; they are not pictures
+        # a message can link, but they are not strangers either.
+        state, media = self.restored()
+        key = sha(JPEG)
+        web, polish = private_dir(media, f"web/{key[:2]}"), private_dir(media, f"polish/{key[:2]}")
+        (web / f"{key}.jpg").write_bytes(JPEG + b"-web")
+        (polish / f"{key}.jpg").write_bytes(JPEG + b"-polished")
+        (polish / f"{key}.json").write_text("{}")
+        code, output = run("--state", state, "--media", media, "--reference", self.export)
+        self.assertEqual((code, output.strip()), (0, "PASS restored_chat_view events=3 attachments=2 linked=2 reference=matched"))
+
+    def test_a_strange_or_untrue_copy_under_web_or_polish_is_still_refused(self):
+        key = sha(JPEG)
+        for label, rel, data, word in (
+                ("web json", f"web/{key[:2]}/{key}.json", b"{}", "bad-name"),
+                ("polish png", f"polish/{key[:2]}/{key}.png", PNG, "bad-name"),
+                ("wrong prefix folder", f"web/00/{key}.jpg" if key[:2] != "00" else f"web/01/{key}.jpg", JPEG, "bad-name"),
+                ("stray name", f"web/{key[:2]}/notes.txt", b"x", "bad-name"),
+                ("other folder", f"cache/{key[:2]}/{key}.jpg", JPEG, "bad-name"),
+                ("jpg that is not a jpeg", f"web/{key[:2]}/{key}.jpg", b"not a picture", "bad-bytes"),
+                ("png that is not a png", f"web/{key[:2]}/{key}.png", JPEG, "bad-bytes")):
+            with self.subTest(label):
+                state, media = self.restored()
+                target = media / rel
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target.write_bytes(data)
+                code, output = run("--state", state, "--media", media)
+                self.assertEqual(code, 1)
+                self.assertIn(word, output)
+                shutil.rmtree(media, True)
+                shutil.rmtree(state, True)
+
+    def test_a_link_under_web_is_refused_and_never_followed(self):
+        state, media = self.restored()
+        key = sha(JPEG)
+        web = private_dir(media, f"web/{key[:2]}")
+        outside = self.tmp / "outside.jpg"
+        outside.write_bytes(JPEG)
+        (web / f"{key}.jpg").symlink_to(outside)
+        code, output = run("--state", state, "--media", media)
+        self.assertEqual(code, 1)
+        self.assertIn("link", output)
+
     def test_a_link_inside_the_media_tree_is_refused_even_to_a_matching_file(self):
         state, media = self.restored()
         outside = self.tmp / "outside-copy.png"

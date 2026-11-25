@@ -279,6 +279,44 @@ class StageTests(unittest.TestCase):
         self.assertNotRegex(args['description'], r'14|12|fourteen|twelve')
         self.case.assert_unpublished()
 
+    def test_private_cost_and_quantity_never_reach_a_cloud_request_body(self):
+        # Case 13 (section 1.9): cost and count stay private. Run the production
+        # S2 identifier and S7 copy selector request builders into recording
+        # sinks (no provider call) with synthetic marker numbers that no pinned
+        # prompt holds, then prove the ordinary selling price still drafts.
+        sent = []
+        # The pinned, schema-valid glue read (case 13's photo); the reply is parsed by the real normaliser.
+        reading = next(row['output'] for row in json.loads(assets()[1]['hass-product-identify/examples.json'])['examples']
+                       if row['photo'] == 'chaos/glue.jpg')
+
+        def runner(request):
+            sent.append(('identify', request))
+            return {'ok': True, 'text': json.dumps(reading)}
+
+        def selector_transport(_url, body, _headers, _timeout):
+            sent.append(('copy_select', json.loads(body)))
+            return 503, b''
+
+        identifier = self.port.identifier
+        identifier.runner = runner
+        identifier.read = type(identifier).read.__get__(identifier)
+        self.port.selector = stages.copy.codex_selector(transport=selector_transport)
+        self.start_render('Just bought 8642 of these for $7391. I will sell at $9')
+        self.case.work()
+        self.assertEqual(sorted({kind for kind, _ in sent}), ['copy_select', 'identify'])
+        for kind, request in sent:
+            if kind == 'identify':
+                self.assertTrue(request['images'] and all(uri.startswith('data:image/') for uri in request['images']))
+                request = {**request, 'images': len(request['images'])}  # photo bytes, not owner text
+            body = json.dumps(request)
+            self.assertNotRegex(body, r'8642|7391', kind)
+            self.assertNotIn('Just bought', body, kind)
+        [draft] = self.saved
+        args = draft['ops'][-1]['args']
+        self.assertEqual(args['sellingPrice'], '9.00 each')
+        self.assertNotRegex(json.dumps(args), r'8642|7391')
+        self.case.assert_unpublished()
+
     def test_picture_retake_never_becomes_a_candidate(self):
         self.reading['has_person_or_screen'] = True
         self.start_render()

@@ -973,6 +973,84 @@ def check_conversation(expect, observed, state, calls, bodies, replies):
     return bad
 
 
+LISTING_DOC_KEYS = {'note'}
+
+
+def word_distance(a, b):
+    """Word-level edit distance (casefolded) for name_close_to / name_tolerance_words."""
+    x, y = re.findall(r"[^\W_]+(?:['’-][^\W_]+)*", a.casefold()), re.findall(r"[^\W_]+(?:['’-][^\W_]+)*", b.casefold())
+    row = list(range(len(y) + 1))
+    for i, word in enumerate(x, 1):
+        prev, row[0] = row[0], i
+        for j, other in enumerate(y, 1):
+            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (word != other))
+    return row[-1]
+
+
+def public_holds(text, term):
+    """A public_lacks term is found at a word start (casefold): 'eat' finds 'eating', not 'great' or 'heat'."""
+    term = term.strip().casefold()
+    return bool(term) and re.search(r'(?<!\w)' + re.escape(term), text.casefold()) is not None
+
+
+def listing_findings(want, product, makers):
+    """Compare expect.listing with the product a person would see (committed if approved, else the delivered draft).
+
+    Returns (failures, unobserved keys). ``makers`` maps producerKey -> maker record (catalog plus draft)."""
+    from hass import claims
+    from hass.npp import validate
+    bad, unknown = [], set()
+    maker = (makers.get(product.get('producerKey')) or {}) if product.get('producerKey') else {}
+    description = product.get('description') or ''
+    brand = product.get('brand')
+    shown_brand = product.get('displayBrand') or ('From the market' if brand == claims.PLACEHOLDER else brand)
+    supplier, place = product.get('supplier'), maker.get('place')
+    origin = f'From {supplier}' if supplier else f'Based in {place}' if place else validate.ORIGIN_UNKNOWN
+
+    def same(key, actual, expected):
+        if actual != expected:
+            bad.append(f'listing.{key}: want {expected!r}, got {actual!r}')
+
+    for key, value in want.items():
+        if key == 'price':
+            match = re.fullmatch(r'\$(\d+\.\d\d)( per lb)?', value)
+            if match is None:
+                unknown.add(key)
+                continue
+            amount, lb = match.groups()
+            same(key, product.get('sellingPrice'), f"{amount} {'per lb' if lb else 'each'}")
+        elif key == 'category':
+            same(key, product.get('category'), value)
+        elif key == 'brand':
+            same(key, shown_brand, value)
+        elif key == 'origin':
+            same(key, origin, value)
+        elif key == 'maker_panel':
+            same(key, bool(product.get('producerKey')), value)
+        elif key in ('maker_name', 'maker_place', 'maker_url'):
+            same(key, maker.get(key.removeprefix('maker_')), value)
+        elif key == 'name_close_to':
+            tolerance = want.get('name_tolerance_words', 0)
+            distance = word_distance(product.get('name') or '', value)
+            if distance > tolerance:
+                bad.append(f'listing.name: {product.get("name")!r} is {distance} words from {value!r} (tolerance {tolerance})')
+        elif key == 'name_tolerance_words':
+            continue  # read with name_close_to
+        elif key == 'name_has':
+            same(key, value.casefold() in (product.get('name') or '').casefold(), True)
+        elif key == 'description_sentences':
+            low, high = value
+            count = len(re.findall(r'[.!?](?=\s|$)', description.strip()))
+            if not low <= count <= high:
+                bad.append(f'listing.description_sentences: want {low}-{high}, got {count}')
+        elif key == 'description_max_chars':
+            if len(description) > value:
+                bad.append(f'listing.description_max_chars: want <= {value}, got {len(description)}')
+        elif key not in LISTING_DOC_KEYS:
+            unknown.add(key)
+    return bad, unknown
+
+
 def check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures, delivered=None,
                missing=None):
     """Bind delivery and publish claims to stored versions and actual committed bytes."""
@@ -1066,7 +1144,11 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
         pid = next((r['key'] for r in record.get('records', []) if r['collection'] == 'products'), None)
         return fx.repo.product(pid) if pid else {}
 
-    if follows_edit and 'edit_keeps' in want and not bad:
+    def product_record(version):
+        return next((r['after'] for r in version_record(version).get('records', []) if r['collection'] == 'products'), {})
+
+    edit_pair = 'edit_keeps' in want and not follows_edit and all(product_record(versions.get(n, {})) for n in (1, 2))
+    if 'edit_keeps' in want and (follows_edit and not bad or edit_pair):
         drafts = [version_record(versions.get(n, {})) for n in (1, 2)]
         def frozen_fields(draft, version):
             records = draft.get('records', [])
@@ -1183,6 +1265,39 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
                 same(f'fabricated claim in public listing or card: {term}', term.casefold() in public.casefold(), False)
             newly_covered.update({'description_equals', 'preview_description_equals_applied', 'public_lacks'})
 
+    # Generic observers for every case: the listing a person would see (the committed product once approved,
+    # otherwise the latest delivered draft), its public text and maker story. A key with no observer stays a gap.
+    shown = approved[0] if len(approved) == 1 else next(
+        (versions[n] for n in sorted(versions, reverse=True) if versions[n].get('delivered_at')), None)
+    record = version_record(shown) if shown is not None else {}
+    seen = (committed_product(shown) if len(approved) == 1 else product_record(shown)) if shown is not None else {}
+    if seen:
+        catalog = json.loads((fx.repo.wt / 'hass' / 'content' / 'makers.json').read_text()).get('makers', {})
+        makers = {**catalog, **{r['key']: r['after'] for r in record.get('records', []) if r['collection'] == 'makers'}}
+        story = (makers.get(seen.get('producerKey')) or {}).get('story') if seen.get('producerKey') else None
+        if 'listing' in want and not (contradiction or view['id'] == 32):
+            found, unknown = listing_findings(want['listing'], seen, makers)
+            bad.extend(found)
+            if not unknown:
+                newly_covered.add('listing')
+        if 'public_lacks' in want and 'public_lacks' not in newly_covered and not contradiction:
+            cards = [re.sub(r'(?<=yes )[A-Z0-9]{4,12}(?=-\d+)', '<code>', row[0], flags=re.I)
+                     for row in fx.transport.cards.values()]
+            public = json.dumps(record.get('records', []), ensure_ascii=False) + '\n' + '\n'.join(cards)
+            for term in want['public_lacks']:
+                if public_holds(public, term):
+                    bad.append(f'public listing or card holds {term!r}')
+            newly_covered.add('public_lacks')
+        if 'story' in want and want['story'] is None:
+            same('story', story, None)
+            newly_covered.add('story')
+        if 'story_equals' in want:
+            same('story_equals', story, want['story_equals'])
+            newly_covered.add('story_equals')
+        if 'description_equals' in want and 'description_equals' not in newly_covered:
+            same('description_equals', seen.get('description'), want['description_equals'])
+            newly_covered.add('description_equals')
+
     # Never report a fixture green when its declared contract has no observer.
     covered = {'state', 'replies', 'total_replies', 'draft_rows', 'approval_rows', 'commits', 'calls',
                'checks', 'cards_sent', 'variant', 'versions', 'undo', 'polish_decision', 'approved_version',
@@ -1192,7 +1307,7 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
     covered.update(newly_covered)
     if 'segment2_started_at_s' in want and want.get('segment_cap_measured_from') == 'answer':
         covered.update({'polish_settled_before_answer', 'segment2_started_at_s', 'segment_cap_measured_from'})
-    if follows_edit:
+    if follows_edit or edit_pair:
         covered.add('edit_keeps')
     if view['id'] == 32 and len(approved) == 1:
         covered.update({'listing', 'private_in_public', 'same_result_for_spoken_and_digit_forms'})

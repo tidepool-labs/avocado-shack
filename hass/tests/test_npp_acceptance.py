@@ -539,5 +539,39 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual([r["job_id"] for r in metrics.load_receipts(tmp)], ["abcd1234"])
 
 
+class GenericObserverTests(unittest.TestCase):
+    """H1: listing, public text and edit pairs are observed for every case; unknown keys stay a gap."""
+
+    def test_generic_listing_observer_reads_the_product_a_person_sees(self):
+        makers = {"Taco Works": {"name": "Taco Works", "place": "San Luis Obispo, California", "url": "https://t.example/"}}
+        product = {"name": "Montaña de Oro Sea Salt chips", "brand": "Taco Works", "category": "vegetables",
+                   "sellingPrice": "6.00 each", "producerKey": "Taco Works",
+                   "description": "Chips with sea salt. Open the bag when the guacamole is ready."}
+        want = {"name_close_to": "Montaña de Oro Sea Salt tortilla chips", "name_tolerance_words": 1, "brand": "Taco Works",
+                "origin": "Based in San Luis Obispo, California", "category": "vegetables", "price": "$6.00",
+                "maker_panel": True, "description_sentences": [2, 3], "description_max_chars": 200,
+                "maker_name": "Taco Works", "maker_url": "https://t.example/", "note": "documentation only"}
+        self.assertEqual(run_npp.listing_findings(want, product, makers), ([], set()))
+        unknown_maker = {**product, "producerKey": None, "brand": "Producer not identified", "sellingPrice": "4.50 per lb"}
+        bad, unknown = run_npp.listing_findings(
+            {"brand": "From the market", "maker_panel": False, "price": "$4.50 per lb",
+             "origin": "Ask us about the source in store.", "label_size_kept": "2 fl oz"}, unknown_maker, makers)
+        self.assertEqual((bad, unknown), ([], {"label_size_kept"}))
+        bad, _ = run_npp.listing_findings({**want, "price": "$7.00", "name_tolerance_words": 0, "maker_panel": False,
+                                           "description_sentences": [3, 3]}, product, makers)
+        self.assertEqual([b.split(":")[0] for b in bad],
+                         ["listing.name", "listing.price", "listing.maker_panel", "listing.description_sentences"])
+
+    def test_public_terms_match_at_a_word_start_only(self):
+        self.assertTrue(run_npp.public_holds("Good for eating", "eat"))
+        self.assertFalse(run_npp.public_holds("A great glue for heat", "eat"))
+        self.assertTrue(run_npp.public_holds("Pack of 50 tubes", "50 "))
+        self.assertFalse(run_npp.public_holds("Reply yes <code>-2", "50 "))
+        self.assertTrue(run_npp.public_holds("cost $1.00", "$1.00"))
+        self.assertEqual(run_npp.word_distance("Wood glue", "wood glue"), 0)
+        self.assertEqual(run_npp.word_distance("Super Grip wood glue", "wood glue"), 2)
+        self.assertEqual(run_npp.word_distance("Alle-Pia Calabrese salamini", "Calabrese salamini"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

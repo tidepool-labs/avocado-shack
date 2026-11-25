@@ -67,16 +67,21 @@ def _near(value):
 def _owner_maker(texts, item):
     # Intake supplies the finance-free clauses. A possessive only counts when
     # its suffix is the identified product; a supplier ('from') never counts.
-    name = None
+    # An explicit "made by" names the maker as typed and outranks a possessive
+    # read anywhere in the turn ("made by Brian's, Brian's sourdough bread" is
+    # Brian's, not "Brian"); among the same form the latest clause wins.
+    found = {}
     for text in texts:
         for clause in re.split(r"[;\n,]", text):
-            match = re.search(r"\bmade by\s+(.+?)\s*$", clause, re.I)
+            form, match = "made_by", re.search(r"\bmade by\s+(.+?)\s*$", clause, re.I)
             if not match and item:
+                form = "possessive"
                 match = re.fullmatch(r"\s*(?:(?:add|new)\s+)?(.+?)['’]s\s+" + re.escape(item) + r"\s*[.!]?\s*", clause, re.I)
             if match:
                 value = match[1].strip().rstrip(".!")
-                name = (None if re.search(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|but)\b|\?", value, re.I)
-                        else label_reader.identity_text("brand", value))
+                found[form] = (None if re.search(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|but)\b|\?", value, re.I)
+                               else label_reader.identity_text("brand", value))
+    name = found["made_by"] if "made_by" in found else found.get("possessive")
     lines = "\n".join(claims.fold(line) for text in texts for line in text.splitlines())
     return name if name and live_policy._owner_said(name, lines) else None
 

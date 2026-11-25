@@ -263,9 +263,9 @@ class CheckPublish(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
-        cls.base_repo = Path(cls._tmp.name) / "repo"
+        cls.base_repo = Path(cls._tmp.name).resolve() / "repo"
         cls._fixture_repo(cls.base_repo)
-        cls.base = Path(cls._tmp.name) / "base"
+        cls.base = Path(cls._tmp.name).resolve() / "base"
         content = load_and_validate(cls.base_repo / "hass" / "content", cls.base_repo / "storefront-mockup")
         with contextlib.redirect_stdout(io.StringIO()):
             cls.files = sorted(sitegen.publish(content, cls.base_repo, cls.base))
@@ -283,7 +283,7 @@ class CheckPublish(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name)
+        self.tmp = Path(tmp.name).resolve()
         self.repo, self.site, self.outside = self.tmp / "repo", self.tmp / "site", self.tmp / "outside"
         self._fixture_repo(self.repo)
         shutil.copytree(self.base, self.site, symlinks=True)

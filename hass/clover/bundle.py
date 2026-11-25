@@ -16,11 +16,13 @@ from hass import release_journal as releases
 from hass.clover import drafts as d
 from hass.clover.cache import _private_dir, _private_file
 from hass.clover.chat import SITE_NOT_YET
+from hass.clover.dryrun import DryRunEngine
 from hass.clover.mapper import parse_item
 from hass.conversation import sender_key
 
 STATES = ("proposed", "till-intent", "till-applied", "till-uncertain", "link-written",
-          "site-intent", "site-live", "done", "split", "partial", "failed", "undone")
+          "site-intent", "site-live", "done", "split", "partial", "failed", "undone", "dry-run")
+DRY_RUN_TEXT = "Dry run: nothing was sent to the till or the website."
 LinkWriter = Callable[[str, str, str], None]
 
 @dataclass(frozen=True)
@@ -31,9 +33,22 @@ class Bundle:
     link: dict | None
     lines: tuple[str, ...]
     bundle_hash: str
-def _hash(code, ops, till, link):
-    return hashlib.sha256(json.dumps([code, ops, till.draft_hash if till else None, link],
-                                    sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    preview_hash: str | None = None  # sha256 of the exact text the owner read; None for a bundle proposed without one
+def _hash(code, ops, till, link, preview_hash=None):
+    # A bundle with no preview hashes exactly as before, so rows stored by older code still verify.
+    parts = [code, ops, till.draft_hash if till else None, link] + ([preview_hash] if preview_hash is not None else [])
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+def _dry(engine):
+    return isinstance(engine, DryRunEngine)
+def _offered(engine, code, till):
+    """True when the engine will apply exactly the first-step draft this bundle stored."""
+    with engine.journal.locked() as db:
+        row = db.execute("SELECT draft FROM changes WHERE code=?", (code,)).fetchone()
+    try:
+        entry = json.loads(row[0])
+        return d.Draft(**{k: entry[k] for k in d.Draft.__dataclass_fields__}).draft_hash == _first(till).draft_hash
+    except (TypeError, ValueError, KeyError):
+        return False
 def _first(till):
     if till.kind != "create_item": return till
     return replace(till, after={k: v for k, v in till.after.items() if k != "stock"},
@@ -103,7 +118,9 @@ def _out(journal, code, state, text, **facts):
                     for who in ("owner", "operator")}, **facts)
     return state, text
 
-def propose(*, site_ops, till_draft, link, sender, chat, journal, engine, site):
+def propose(*, site_ops, till_draft, link, sender, chat, journal, engine, site, preview=None):
+    if preview is not None and not isinstance(preview, str): raise TypeError("preview must be text")
+    preview_hash = hashlib.sha256(preview.encode()).hexdigest() if preview is not None else None
     with journal.locked():
         _owner(sender, chat, engine, site)
         if _paused(engine, site): raise d.DraftRefused("Changes are paused.")
@@ -113,20 +130,24 @@ def propose(*, site_ops, till_draft, link, sender, chat, journal, engine, site):
                 if engine is None: raise d.DraftRefused("Till unavailable.")
                 code, _ = engine.offer(_first(till), sender=sender, chat=chat)
             except d.DraftRefused: till = None
+            if till is None and preview is not None:
+                # The supplied text describes this till change; showing it would promise what yes cannot do.
+                raise d.DraftRefused("The till refused this change, so nothing was proposed.")
         ops, link = tuple(site_ops), link if till else None
         lines = ("On the website: " + ", ".join(o["op"] for o in ops), "The website shows no prices",
                  "On the till: " + "\n".join(x for x in till.lines if x != "Nothing goes on the website.")
                  if till else "I can't add it to the till yet")
-        bundle = Bundle(code, ops, till, link, lines, _hash(code, ops, till, link))
+        bundle = Bundle(code, ops, till, link, lines, _hash(code, ops, till, link, preview_hash), preview_hash)
         journal.put(bundle, sender=sender, chat=chat, expires=(engine.clock() if engine else time.time()) + 600)
-        if ops:
+        if ops and not _dry(engine):  # A rehearsal never prepares a website change.
             prepared = site.prepare(list(ops))
             if prepared.get("result") != "ok":
                 _out(journal, code, "failed", "The website draft was refused.")
                 raise d.DraftRefused("The website draft was refused.")
             draft = prepared["draft"]
             journal.advance(code, "proposed", change_id=draft["change_id"], draft_hash=draft["draft_hash"])
-        return code, "\n".join((*lines, f"Reply yes {code} to apply the prepared change."))
+        # With a preview, the owner is shown exactly the bound text; the caller adds the code line.
+        return code, preview if preview is not None else "\n".join((*lines, f"Reply yes {code} to apply the prepared change."))
 
 def _result(engine, code):
     with engine.journal.locked() as db:
@@ -137,6 +158,8 @@ def _till(code, row, journal, engine, sender, chat):
     journal.advance(code, "till-intent", till="intent")
     try: status = engine.handle("yes " + code, sender=sender, chat=chat)
     except d.DraftRefused: status = "failed"
+    if status == "dry-run":  # Recorded by a DryRunEngine: success of the rehearsal, not a failed till write.
+        return _out(journal, code, "dry-run", DRY_RUN_TEXT, till="dry-run", site="omitted")
     result = _result(engine, code) if status == "applied" else None
     if not result:
         return _out(journal, code, "failed" if status == "failed" else "till-uncertain",
@@ -168,11 +191,14 @@ def apply(code, *, sender, chat, journal, engine, site, link_writer, now):
         if _paused(engine, site): raise d.DraftRefused("Changes are paused.")
         if row["state"] not in ("proposed", "split"): return row["state"], row.get("reply", "Reconcile before continuing.")
         if row["state"] == "proposed":
-            if now >= row["expires"] or (row["bundle"]["site_ops"] and "change_id" not in row):
+            if now >= row["expires"] or (row["bundle"]["site_ops"] and "change_id" not in row and not _dry(engine)):
                 raise d.DraftRefused("Expired or incomplete bundle.")
             b = row["bundle"]
-            till = d.Draft(**b["till"]) if b["till"] else None
-            if b["bundle_hash"] != _hash(code, b["site_ops"], till, b["link"]): raise d.DraftRefused("Changed bundle.")
+            try: till = d.Draft(**b["till"]) if b["till"] else None
+            except (TypeError, ValueError): raise d.DraftRefused("Changed bundle.") from None
+            if b["bundle_hash"] != _hash(code, b["site_ops"], till, b["link"], b.get("preview_hash")): raise d.DraftRefused("Changed bundle.")
+            if till and not _offered(engine, code, till): raise d.DraftRefused("Changed bundle.")
+            if _dry(engine) and not till: return _out(journal, code, "dry-run", DRY_RUN_TEXT, till="omitted", site="omitted")
             if till and (outcome := _till(code, row, journal, engine, sender, chat)): return outcome
         row = journal.get(code)
         if row["till"] not in ("applied", "omitted"): return row["state"], "Check the till before continuing."
@@ -210,7 +236,7 @@ def reconcile(*, journal, engine, site, now):
     with journal.locked():
         for row in journal.open_rows():
             code, state = row["bundle"]["code"], row["state"]
-            if state == "proposed": continue
+            if state in ("proposed", "dry-run"): continue
             if state in ("till-intent", "till-uncertain"):
                 active = row.get("stock_code", code)
                 status, _ = engine.reconcile(active, sender=row["sender"], chat=row["chat"])

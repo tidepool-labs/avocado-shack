@@ -29,7 +29,9 @@ class ReleaseCase(unittest.TestCase):
         self.addCleanup(self.repo.cleanup)
         self.tmp = tempfile.TemporaryDirectory(prefix='hass-release-')
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # The release engine refuses a site checkout under any symlinked folder (LiveEditor.tree), so the fixture root must be
+        # the real path: a TMPDIR that is itself a link (a /dev/shm scratch link, say) must not turn into a baseline alert.
+        self.root = Path(self.tmp.name).resolve()
         self.hostdir = self.root / 'host'
         self.hostdir.mkdir(mode=0o700)
         self.site = self.root / 'site'

@@ -175,13 +175,13 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check --no-input --only-binary=:all: --target "$dir" "Pillow==$PILLOW_VERSION"
           echo "PYTHONPATH=$dir" >> "$GITHUB_ENV"
 
-      # Each shard is one plain unittest run (verbosity 2) of its planned module list, printed as it runs,
-      # so the "=====" rule stays directly above every FAIL:/ERROR: header that bin/mergegate.py parses.
+      # Two timing-packed unittest processes share the existing hosted job, not additional runner slots.
+      # Replay complete worker logs so FAIL:/ERROR: headers stay with their unittest separators.
       - name: Hass tests
         env:
           HASS_PLAN: ${{ needs.quick.outputs.plan }}
           SHARD: ${{ matrix.shard }}
-        run: python3 -u hass/tests/ci_shards.py run --shard "$SHARD" --record-dir "$RUNNER_TEMP/hass-records"
+        run: python3 -u hass/tests/ci_shards.py run --shard "$SHARD" --workers 2 --record-dir "$RUNNER_TEMP/hass-records"
 
       - uses: actions/upload-artifact@v4
         if: always()

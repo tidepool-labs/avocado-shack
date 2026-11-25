@@ -3,6 +3,10 @@ changed-files -> test-modules map with its FULL fallbacks, and the aggregate ver
 import contextlib
 import io
 import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +72,48 @@ class PartitionTest(unittest.TestCase):
         self.assertIn("missing: c", text)
         self.assertIn("extra: d", text)
         self.assertIn("duplicated: b", text)
+
+
+class ParallelRunTest(unittest.TestCase):
+    def test_all_workers_must_run_and_a_failed_worker_fails_the_shard(self):
+        # A dropped lane, shared temporary root, or ignored unittest failure must not pass.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests = root / "hass" / "tests"
+            tests.mkdir(parents=True)
+            (tests / "__init__.py").touch()
+            (tests.parent / "__init__.py").touch()
+            runner = tests / "ci_shards.py"
+            shutil.copyfile(cs.__file__, runner)
+            names = ["test_a", "test_b"]
+            for name in names:
+                (tests / f"{name}.py").write_text(
+                    "import os, tempfile, unittest\n"
+                    "from pathlib import Path\n"
+                    "class Work(unittest.TestCase):\n"
+                    "    def test_one(self):\n"
+                    "        root = Path(os.environ['CI20_TEST_ROOT'])\n"
+                    "        (root / __name__).write_text(tempfile.gettempdir())\n"
+                    "        self.assertFalse((root / 'fail').exists() and __name__.endswith('test_b'))\n",
+                    encoding="utf-8",
+                )
+            for should_fail in (False, True):
+                with self.subTest(should_fail=should_fail):
+                    if should_fail:
+                        (root / "fail").touch()
+                    rec = root / f"record-{should_fail}"
+                    run = subprocess.run([sys.executable, "-B", str(runner), "run", "--shard", "0",
+                                          "--workers", "2", "--record-dir", str(rec)],
+                                         cwd=root, capture_output=True, text=True, timeout=20,
+                                         env={**os.environ, "CI20_TEST_ROOT": tmp,
+                                              "HASS_PLAN": json.dumps({"tier": "full", "shards": [names]})})
+                    self.assertEqual(run.returncode, int(should_fail), run.stdout + run.stderr)
+                    result = json.loads((rec / "0.json").read_text())
+                    self.assertEqual((result["modules"], result["tests_run"]), (names, 2))
+                    self.assertEqual((result["ok"], result["failures"]), (not should_fail, int(should_fail)))
+                    self.assertNotEqual(*(root.joinpath(f"hass.tests.{name}").read_text() for name in names))
+                    if should_fail:
+                        self.assertIn("=" * 70 + "\nFAIL: test_one (hass.tests.test_b", (rec / "0.log").read_text())
 
 
 class InventoryTest(unittest.TestCase):

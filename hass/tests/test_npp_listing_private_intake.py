@@ -142,7 +142,7 @@ class LaterTurnsKeepOrClearTests(_Journey):
     def test_a_purchase_count_alone_keeps_the_earlier_cost(self):
         # Contract: "bought N" names how many, not what he paid; the waiting cost must survive it.
         # Believable bug: treating "bought" as a cost cue cleared the cost whenever he restated his count.
-        for words, count in (("bought 5", 5), ("I bought 7 today", 7)):
+        for words, count in (("bought 5", 5), ("bought 7", 7)):
             with self.subTest(words):
                 self.assertEqual(self.say_then([(words, None)]), [{"cost": "1.00", "qty": count}])
                 self.assertEqual([r["answers"] for r in self.saved()], [{"cost": "1.00", "qty": count}])

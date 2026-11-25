@@ -8,6 +8,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hass.tests.npp import run_npp
 from scripts.hass import npp_merge_recordings as merge_tool
@@ -146,6 +147,52 @@ class MergeRecordingsTests(unittest.TestCase):
     def test_the_same_file_twice_or_a_missing_input_is_refused(self):
         self.assertEqual(self.run_tool(self.dir / 'o1.json', self.base, self.base)[0], 2)
         self.assertEqual(self.run_tool(self.dir / 'o2.json', self.base, self.dir / 'absent.json')[0], 2)
+        self.assertEqual(self.run_tool(self.dir / 'o3.json', self.base, self.dir)[0], 2)
+
+    def test_a_repeated_json_key_is_refused_before_it_can_drop_a_row(self):
+        row, entry = key('c' * 64), '{"output": 1}'
+        texts = {
+            'row': '{"copy": {"entries": {"%s": %s, "%s": {"output": 2}}, "kind": "copy", "source": "attended recording"}}'
+                   % (row, entry, row),
+            'kind': '{"copy": {"entries": {"%s": %s}, "kind": "copy", "source": "attended recording"}, '
+                    '"copy": {"entries": {"%s": %s}, "kind": "copy", "source": "attended recording"}}'
+                    % (row, entry, key('d' * 64), entry),
+            'field': '{"copy": {"entries": {"%s": {"output": 1, "output": 2}}, "kind": "copy", "source": "a", "source": "b"}}'
+                     % row,
+        }
+        for name, text in texts.items():
+            with self.subTest(name):
+                path = self.dir / f'dup-{name}.json'
+                path.write_text(text)
+                code, report = self.run_tool(self.dir / f'out-dup-{name}.json', self.base, path)
+                self.assertEqual(code, 2)
+                self.assertIn('repeats a key', report['refused'])
+                self.assertFalse((self.dir / f'out-dup-{name}.json').exists())
+
+    def test_the_checked_digest_and_the_merged_rows_come_from_the_same_bytes(self):
+        topup = recording(self.dir / 'topup.json', {'copy': {key('e' * 64): {'output': None}}})
+        original = self.base.read_bytes()
+        base_sha = hashlib.sha256(original).hexdigest()
+        swapped = json.dumps({'s2': {'kind': 's2', 'source': 'attended recording',
+                                     'entries': {key('f' * 64): {'output': 'replaced'}}}}, sort_keys=True).encode()
+        real_read, reads = Path.read_bytes, []
+
+        def read_then_replace(path):
+            data = real_read(path)
+            if path == self.base:
+                reads.append(path)
+                path.write_bytes(swapped)  # a concurrent replacement after the first read
+            return data
+
+        out = self.dir / 'joined.json'
+        with patch.object(Path, 'read_bytes', read_then_replace):
+            code, report = self.run_tool(out, self.base, topup, '--base-sha256', base_sha)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(report['inputs'][0]['sha256'], base_sha)
+        joined = json.loads(out.read_text())
+        self.assertEqual(set(joined['s2']['entries']), {key('1' * 64)})
+        self.assertNotIn('replaced', out.read_text())
 
 
 if __name__ == '__main__':

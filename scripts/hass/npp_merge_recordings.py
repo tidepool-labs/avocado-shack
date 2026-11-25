@@ -30,22 +30,32 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def load(path):
-    """Parse one recording, refusing anything that is not the recorder's exact shape."""
+def _unique(pairs):
+    """object_pairs_hook: a JSON object that names a key twice would silently drop a row, so refuse it."""
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise Refused('a JSON object repeats a key; rows are never dropped or overwritten')
+    return dict(pairs)
+
+
+def load(name, raw):
+    """Parse one recording from the exact bytes that were hashed, refusing anything not the recorder's shape."""
     try:
-        data = json.loads(Path(path).read_bytes())
-    except (OSError, ValueError) as error:
-        raise Refused(f'{Path(path).name}: unreadable recording ({type(error).__name__})') from None
+        data = json.loads(raw, object_pairs_hook=_unique)
+    except Refused as error:
+        raise Refused(f'{name}: {error}') from None
+    except ValueError as error:
+        raise Refused(f'{name}: unreadable recording ({type(error).__name__})') from None
     if not isinstance(data, dict) or not data:
-        raise Refused(f'{Path(path).name}: not a recording (expected a non-empty object of operation kinds)')
+        raise Refused(f'{name}: not a recording (expected a non-empty object of operation kinds)')
     for kind, block in data.items():
         if not isinstance(block, dict) or set(block) != {'kind', 'source', 'entries'} or block['kind'] != kind:
-            raise Refused(f'{Path(path).name}: kind {kind!r} is not a recorder block')
+            raise Refused(f'{name}: kind {kind!r} is not a recorder block')
         if not isinstance(block['source'], str) or not isinstance(block['entries'], dict) or not block['entries']:
-            raise Refused(f'{Path(path).name}: kind {kind!r} has no source label or no rows')
+            raise Refused(f'{name}: kind {kind!r} has no source label or no rows')
         for key, entry in block['entries'].items():
             if not KEY.fullmatch(key) or not isinstance(entry, dict) or set(entry) != {'output'}:
-                raise Refused(f'{Path(path).name}: kind {kind!r} holds a row that is not pin:input:ordinal -> output')
+                raise Refused(f'{name}: kind {kind!r} holds a row that is not pin:input:ordinal -> output')
     return data
 
 
@@ -96,13 +106,17 @@ def main(argv=None, versioned=None):
         inputs = [args.base, *args.topups]
         if len({path.resolve() for path in inputs}) != len(inputs):
             raise Refused('the same recording was given twice')
-        digests = [sha256(path.read_bytes()) if path.is_file() else None for path in inputs]
-        if None in digests:
-            raise Refused('every input must be an existing recording file')
+        raws = []
+        for path in inputs:
+            try:
+                raws.append(path.read_bytes())  # read once: the digest checked and the rows parsed are the same bytes
+            except OSError:
+                raise Refused('every input must be an existing, readable recording file') from None
+        digests = [sha256(raw) for raw in raws]
         want = (args.base_sha256 or '').lower()
         if args.base_sha256 is not None and digests[0] != want:
-            raise Refused(f'BASE digest {str(digests[0])[:8]} is not the expected {want[:8]}')
-        loaded = [(path.name, load(path)) for path in inputs]
+            raise Refused(f'BASE digest {digests[0][:8]} is not the expected {want[:8]}')
+        loaded = [(path.name, load(path.name, raw)) for path, raw in zip(inputs, raws)]
         joined = merge(loaded, versioned_keys() if versioned is None else versioned)
         out_sha = write_new(args.out, joined)
     except Refused as error:

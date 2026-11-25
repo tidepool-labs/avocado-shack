@@ -551,5 +551,85 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual([r["job_id"] for r in metrics.load_receipts(tmp)], ["abcd1234"])
 
 
+class GenericObserverTests(unittest.TestCase):
+    """H1: listing, public text and edit pairs are observed for every case; unknown keys stay a gap."""
+
+    def test_generic_listing_observer_reads_the_product_a_person_sees(self):
+        makers = {"Taco Works": {"name": "Taco Works", "place": "San Luis Obispo, California", "url": "https://t.example/"}}
+        product = {"name": "Montaña de Oro Sea Salt chips", "brand": "Taco Works", "category": "vegetables",
+                   "sellingPrice": "6.00 each", "producerKey": "Taco Works",
+                   "description": "Chips with sea salt. Open the bag when the guacamole is ready."}
+        want = {"name_close_to": "Montaña de Oro Sea Salt tortilla chips", "name_tolerance_words": 1, "brand": "Taco Works",
+                "origin": "Based in San Luis Obispo, California", "category": "vegetables", "price": "$6.00",
+                "maker_panel": True, "description_sentences": [2, 3], "description_max_chars": 200,
+                "maker_name": "Taco Works", "maker_url": "https://t.example/", "note": "documentation only"}
+        self.assertEqual(run_npp.listing_findings(want, product, makers), ([], set()))
+        unknown_maker = {**product, "producerKey": None, "brand": "Producer not identified", "sellingPrice": "4.50 per lb"}
+        bad, unknown = run_npp.listing_findings(
+            {"brand": "From the market", "maker_panel": False, "price": "$4.50 per lb",
+             "origin": "Ask us about the source in store.", "label_size_kept": "2 fl oz"}, unknown_maker, makers)
+        self.assertEqual((bad, unknown), ([], {"label_size_kept"}))
+        bad, _ = run_npp.listing_findings({**want, "price": "$7.00", "name_tolerance_words": 0, "maker_panel": False,
+                                           "description_sentences": [3, 3]}, product, makers)
+        self.assertEqual([b.split(":")[0] for b in bad],
+                         ["listing.name", "listing.price", "listing.maker_panel", "listing.description_sentences"])
+
+    def test_public_text_is_the_listing_and_card_not_the_owner_note(self):
+        # Contract: public_lacks inspects what a visitor reads. Bug it catches: scanning the owner's
+        # 'Post this? ... (left off: immune support)' message, which case 15 requires, as a public leak.
+        records = [{"collection": "products", "key": "immune-support", "op": "add", "before": None,
+                    "after": {"name": "Elderberry syrup", "description": "A dark berry syrup."}}]
+        owner_card = "Post this? Reply yes ABCD-1, or tell me what to change. (left off: immune support)"
+        public = run_npp.public_text(records, ["Elderberry syrup A dark berry syrup."])
+        self.assertNotIn(owner_card, public)
+        for term in ("immune", "support", "Reply yes"):
+            self.assertFalse(run_npp.public_holds(public, term), term)
+        leaked = run_npp.public_text([{**records[0], "after": {"description": "Boosts immune health."}}])
+        self.assertTrue(run_npp.public_holds(leaked, "immune"))
+        self.assertTrue(run_npp.public_holds(run_npp.public_text([], ["supports immunity"]), "support"))
+
+    def test_public_text_ignores_internal_fields_and_metadata(self):
+        # Contract: only fields a visitor sees count. Bug it catches: serializing every field name and value, so a
+        # nonpublic id 'immune-syrup' (or an internal hold/ownerSource note) failed a clean listing.
+        product = {"id": "immune-syrup", "name": "Elderberry syrup", "brand": "Hillside", "category": "pantry",
+                   "image": "assets/support-photo.jpg", "description": "A dark berry syrup.", "producerKey": "hillside",
+                   "status": "held", "hold": {"reason": "immune support claim"}, "ownerSource": "immune support",
+                   "labelSource": "support", "addedOn": "2026-11-01", "sellingPrice": "6.00"}
+        records = [{"collection": "products", "key": "immune-syrup", "op": "add", "before": {"name": "immune"},
+                    "after": product}]
+        makers = {"hillside": {"name": "Hillside Farm", "place": "Ojai, California", "story": "Berries since 1990."}}
+        public = run_npp.public_text(records, (), makers)
+        for term in ("immune", "support", "held", "claim", "2026", "collection", "add"):
+            self.assertFalse(run_npp.public_holds(public, term), term)
+        for seen in ("Elderberry syrup", "A dark berry syrup.", "Pantry", "$6.00", "Hillside Farm", "Ojai, California"):
+            self.assertIn(seen, public)
+
+    def test_public_text_includes_the_resolved_maker_panel(self):
+        # Contract: a listing's visible maker panel is public text. Bug it catches: reading only the product record, so
+        # an immune claim in an existing maker's story (referenced, not newly written) was never seen.
+        product = {"name": "Elderberry syrup", "description": "A dark berry syrup.", "producerKey": "hillside"}
+        records = [{"collection": "products", "key": "p1", "op": "add", "before": None, "after": product}]
+        catalog = {"hillside": {"name": "Hillside Farm", "place": "Ojai, California",
+                                "story": "Our elderberries boost immune health."}}
+        self.assertFalse(run_npp.public_holds(run_npp.public_text(records), "immune"))  # no maker resolved
+        self.assertTrue(run_npp.public_holds(run_npp.public_text(records, (), catalog), "immune"))
+        # A maker this change writes wins over the catalog, and a hidden maker is not shown.
+        written = records + [{"collection": "makers", "key": "hillside", "op": "edit", "before": None,
+                              "after": {"name": "Hillside Farm", "place": "Ojai, California", "story": "Berries."}}]
+        self.assertFalse(run_npp.public_holds(run_npp.public_text(written, (), catalog), "immune"))
+        hidden = {"hillside": {**catalog["hillside"], "hidden": True}}
+        self.assertFalse(run_npp.public_holds(run_npp.public_text(records, (), hidden), "immune"))
+
+    def test_public_terms_match_at_a_word_start_only(self):
+        self.assertTrue(run_npp.public_holds("Good for eating", "eat"))
+        self.assertFalse(run_npp.public_holds("A great glue for heat", "eat"))
+        self.assertTrue(run_npp.public_holds("Pack of 50 tubes", "50 "))
+        self.assertFalse(run_npp.public_holds("Reply yes <code>-2", "50 "))
+        self.assertTrue(run_npp.public_holds("cost $1.00", "$1.00"))
+        self.assertEqual(run_npp.word_distance("Wood glue", "wood glue"), 0)
+        self.assertEqual(run_npp.word_distance("Super Grip wood glue", "wood glue"), 2)
+        self.assertEqual(run_npp.word_distance("Alle-Pia Calabrese salamini", "Calabrese salamini"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

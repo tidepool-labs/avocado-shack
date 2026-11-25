@@ -162,6 +162,98 @@ class ValidateTests(unittest.TestCase):
         # A private number (the owner's qty 12) inside the story is never exempt.
         self.assertIn('card-number', card('It started as a roadside stand 12 years ago.').problems)
 
+    def test_existing_maker_catalog_story_may_narrate_origin_but_no_other_claim(self):
+        # Contract: an existing maker's unchanged catalog story is the text every other card of that maker already shows.
+        # Origin narration in it ("a family farm", "organic orchard", "raw and unfiltered") is not a new claim by this draft.
+        # Bug caught (private replay, golden cases 5/6/11): 17 of 26 real catalog stories tripped the origin/organic class,
+        # so no new product from those makers could ever be drawn ("I couldn't draw the card yet").
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+
+        def card(story, extra=()):
+            return self.verdict(makers={'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}, origin=origin,
+                                card_nodes=[*self.nodes, origin, story, *extra]).problems
+        narration = 'A small family farm in Oakdale; an organic orchard. The honey is raw and unfiltered.'
+        self.assertFalse(validate._panel_clean(narration))  # the old rule refused it
+        plain = card('We grow plums on a small hill.')  # this fixture's owner never names the maker: existing-claims only
+        self.assertEqual(plain, ('existing-claims',))
+        self.assertEqual(card(narration), plain)
+        # Any other claim kind still keeps the story off the card, even next to origin narration.
+        for story in ('An organic orchard in Oakdale. This cures cancer.', 'A family farm in Oakdale. Award-winning jam.',
+                      'The best farm in Oakdale.'):
+            with self.subTest(story=story):
+                self.assertIn('card-copy', card(story))
+        # The exemption is the exact catalog fragment: the same narration typed as another card line is still refused.
+        self.assertIn('card-copy', card(narration, extra=['An organic orchard.']))
+        # RETURN t_bf22eb69 item 2: the exact catalog fragment repeated as a second card line is refused too.
+        self.assertIn('card-copy', card(narration, extra=[narration]))
+        self.assertIn('card-copy', card(narration, extra=['  ' + narration.replace(' ', '\n', 1)]))
+
+    def test_existing_maker_catalog_story_number_words_are_fine_but_private_and_money_are_not(self):
+        # Contract: published catalog text may use a number-like word ("The point is the fruit") or a founded year.
+        # Bug caught (private replay, golden case 11): "point" read as a spoken decimal made the story 'number-unclear',
+        # failing both the record check (public-text) and the card scan (card-number).
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+
+        def card(story):
+            return self.verdict(makers={'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}, origin=origin,
+                                card_nodes=[*self.nodes, origin, story]).problems
+        plain = card('We grow plums on a small hill.')
+        self.assertEqual(plain, ('existing-claims',))  # this fixture's owner never names the maker
+        self.assertEqual(card('We grow plums. The point is the fruit.'), plain)
+        self.assertEqual(card('We grow plums, since 1976.'), plain)
+        # Fail closed: "point" next to any number reading could be a decimal, so that story stays off.
+        self.assertIn('public-text', card('We grow plums. The point is the fruit, since 1976.'))
+        # A reading equal to a private value (qty 12, cost 3) is never exempt, spelled, digits or ambiguous.
+        for story in ('We planted twelve trees. The point is the fruit.', 'We planted about 12 trees.',
+                      'Three generations. The point is the fruit.', 'Jars were $5 in 1976.', 'Call 805-555-0100 to visit.'):
+            with self.subTest(story=story):
+                problems = card(story)
+                self.assertTrue({'public-text', 'card-number', 'card-copy', 'card-contact'} & set(problems), problems)
+                self.assertIn('public-text', problems)
+
+    def test_catalog_story_number_words_fail_closed_on_any_unresolved_reading(self):
+        # RETURN t_bf22eb69 item 1: "twelve hundred" is 'number-unclear' and values() reads only "twelve", so a private
+        # quantity of 1200 slipped through. Only a bare "point" in a story with no number at all may pass.
+        private = finance('cost $3; sell $3 each; qty 1200').private
+        ok = validate._catalog_story_numbers_ok
+        self.assertTrue(ok('We grow plums. The point is the fruit.', private))
+        self.assertTrue(ok('Founded in 1976 on a hill.', private))
+        for story in ('We planted twelve hundred trees.', 'We planted twelve hundred trees. The point is the fruit.',
+                      'A couple of hives. The point is the honey.', 'Two point five acres of plums.',
+                      'Since １９７６, the point is the fruit.', 'We grow ½ of our plums.', 'We planted 1200 trees.',
+                      'The point is the fruit, about 3 kinds.'):
+            with self.subTest(story=story):
+                self.assertFalse(ok(story, private))
+
+    def test_catalog_story_private_quantity_is_refused_on_record_and_card_behind_unread_number_forms(self):
+        # Contract: a catalog story may be shown with an unclear number verdict ("the point is") only when every number in
+        # it is read in full. Bug caught (review RETURN): with private quantity 1200, "twelve hundred trees" was
+        # number-unclear, values() read only "twelve", so the story passed the record and card exemptions and showed 1200.
+        # The same hole stood open for any scale or shorthand word and for numerals outside the decimal digits.
+        self.product['producerKey'] = 'oak-farm'
+        origin = 'Based in Oakdale'
+        big = finance('cost $3; sell $3 each; qty 1200')
+        self.assertIn(1200, big.private)
+        ctx = replace(self.ctx, private=big.private)
+
+        def verdict(story):
+            makers = {'oak-farm': {'name': 'Oak Farm', 'place': 'Oakdale', 'story': story}}
+            return validate.listing(self.writer, ctx, self.copy, self.draft, **(self.kw | dict(
+                finance=big, makers=makers, origin=origin, card_nodes=[*self.nodes, origin, story]))).problems
+        plain = verdict('We grow plums on a small hill.')
+        self.assertEqual(plain, ('existing-claims',))
+        self.assertEqual(verdict('We grow plums. The point is the fruit.'), plain)
+        for story in ('We planted twelve hundred trees.', 'We planted 12 hundred trees.', 'We planted one thousand two hundred trees.',
+                      'We planted twelve point five trees.', 'We planted a couple of trees.', 'We planted \u00bd the orchard.',
+                      'We planted \u5341\u4e8c trees.', 'We planted \u2161 trees.', 'We planted twelve\u00b2 trees.'):
+            with self.subTest(story=story):
+                self.assertFalse(validate._catalog_story_numbers_ok(story, big.private))
+                problems = verdict(story)
+                self.assertIn('public-text', problems)
+                self.assertIn('card-number', problems)
+
     def test_existing_maker_name_and_place_are_shown_only_when_they_carry_no_protected_claim(self):
         # Contract: the card-copy gate binds EVERY maker-panel fragment, not only the story. Bug caught: an existing
         # maker whose catalog name/place was "This cures cancer." was auto-allowed on the card (no contact or number in it).

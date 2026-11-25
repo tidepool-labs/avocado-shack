@@ -363,6 +363,86 @@ def bare_web(bare, sha):
     return Path(media.web_copy(bare.media, sha)["path"]).read_bytes()
 
 
+def label_words(im):
+    """(word, (left, top, width, height)) of the two stroke words ``labelled`` draws, on a photo or any copy of it."""
+    x0, y0, x1, y1 = label_box(im)
+    w, h = x1 - x0, y1 - y0
+    return [(word, (round(x0 + a * w), round(y0 + .38 * h), round((b - a) * w), round(.24 * h)))
+            for word, a, b in LABEL_WORDS]
+
+
+@unittest.skipUnless(HAVE_PIL, "Pillow is not installed")
+@mock.patch.object(photo_polish, "words", NO_LABEL)
+class WordMapTests(unittest.TestCase):
+    """The label words are judged where they really are on the edit. ``match`` finds the product in 11 % size steps
+    and five stretches; on this jar the best coarse place is a size step too tall and a stretch too narrow, so on the
+    coarse place alone an unchanged word looked erased (both under WORD_SURE, nothing read on the edit: ``text``).
+    The word map is refined on the product's own correlation, never on the words."""
+
+    def jar(self):
+        return labelled(syn.make_photo(background="white-sheet", size=(1024, 1024), seed=2, fmt="PNG"))
+
+    def reads(self, original):
+        return label_words(Image.open(io.BytesIO(original)).convert("RGB"))
+
+    def test_an_unchanged_label_is_kept(self):
+        data = self.jar()
+        with mock.patch.object(photo_polish, "photo_words", self.reads):
+            for name, edited in (("the photo itself", data), ("a faithful edit", edit_of(data))):
+                with self.subTest(name):
+                    verdict = photo_polish.gate(data, edited)
+                    self.assertEqual(verdict["code"], "ok", verdict["metrics"].get("kept"))
+                    for word, score in verdict["metrics"]["kept"]:
+                        self.assertGreaterEqual(score, photo_polish.WORD_SURE, word)
+
+    def test_the_word_map_lands_on_the_words(self):
+        data = self.jar()
+        made = photo_polish.frame(data)["jpeg"]
+        m = photo_polish.match(data, made)
+        (fw, fh), (rx, ry, rw, rh), (bx0, by0, bx1, by1) = m["_map"]
+        sx, sy = rw * fw / (bx1 - bx0), rh * fh / (by1 - by0)
+        self.assertAlmostEqual(sx / sy, 1.0, delta=0.03)  # the edit is the photo, scaled the same both ways
+        truth = label_words(Image.open(io.BytesIO(made)).convert("RGB"))
+        kept = photo_polish.kept_scores(data, made, m["_map"], self.reads(data))
+        for (word, _score, (left, top, width, height)), (_w, (tl, tt, tw, th)) in zip(kept, truth):
+            with self.subTest(word):  # within a quarter of the word's height of where it really is, both ways
+                self.assertLess(abs(left - tl), th / 4)
+                self.assertLess(abs(top - tt), th / 4)
+                self.assertLess(abs(width - tw), th / 4)
+
+    def test_the_match_verdict_is_still_the_coarse_one(self):
+        data = self.jar()
+        made = photo_polish.frame(data)["jpeg"]
+        m = photo_polish.match(data, made)
+        self.assertIn("map_fit", m)
+        with mock.patch.object(photo_polish, "_register", side_effect=lambda *a, **k: (0.0, a[2])):
+            coarse = photo_polish.match(data, made)  # the refinement switched off: start place, no climb
+        for key in ("match", "hue_shift", "chroma", "where"):
+            self.assertEqual(m[key], coarse[key], key)
+
+    def test_an_erased_word_is_still_caught(self):
+        def cover(words):
+            def change(im):
+                from PIL import ImageDraw
+                for word, (left, top, width, height) in label_words(im):
+                    if word in words:
+                        ImageDraw.Draw(im).rectangle((left - 3, top - 3, left + width + 3, top + height + 3),
+                                                     fill=(246, 238, 214))
+                return im
+            return change
+        data = self.jar()
+        with mock.patch.object(photo_polish, "photo_words", self.reads):
+            for name, gone in (("blank label", {"WILD", "HONEY"}), ("one word removed", {"HONEY"}),
+                               ("the other word removed", {"WILD"})):
+                with self.subTest(name):
+                    verdict = photo_polish.gate(data, edit_of(data, change=cover(gone)))
+                    self.assertEqual(verdict["code"], "text")
+                    self.assertTrue(verdict["metrics"]["text_removed"])
+                    scores = dict(verdict["metrics"]["kept"])
+                    for word in gone:
+                        self.assertLess(scores[word], photo_polish.WORD_MIN, word)
+
+
 @unittest.skipUnless(HAVE_PIL, "Pillow is not installed")
 class OCRFailureTests(unittest.TestCase):
     """The real ``words`` reader through ``run``: a read that does not work settles the house fallback (``ocr``)."""

@@ -80,6 +80,9 @@ WORD_HEIGHT = 24  # both word patches are compared at this height
 WORD_SEARCH = 0.6  # the search around the mapped spot, as a share of the word's size
 WORD_ZOOM = (0.85, 1.0, 1.15)  # word sizes tried around the mapped one
 WORK = 200  # Mike's photo is searched on a copy this many px on its long side
+REGISTER_SPAN = 1.12  # the word map's height may differ from the coarse match by this factor (width: STRETCH range too)
+REGISTER_STEPS = 80  # at most this many one-px refinement steps for the word map, per climb
+REGISTER_WORK = 400  # ...and its last climb is on a copy this many px on its long side
 ALLOWED_STYLE = {"no photo background left inside the product (patterned cloth, planks)"}  # a white label panel on a
 # generated seamless background is not left-over photo background; every other house-style hard failure rejects
 
@@ -474,20 +477,13 @@ def match(original, framed):
         return None
     photo, _alpha, _turned = newitem_render._upright(original)
     full = photo.size
+    upright = photo
     photo = photo.copy()
     photo.thumbnail((WORK, WORK), Image.Resampling.BOX)
     (w, h) = photo.size
-    chans, tchans = _channels(photo), _channels(rgb)
-    if ImageStat.Stat(tchans[1], mask).stddev[0] < 8:  # a colourless product: grey only
-        chans, tchans = chans[:1], tchans[:1]
-
-    def score(x, y, tms, tss):
-        return sum(_ncc(ImageChops, ImageStat, c.crop((x, y, x + tms[0][0].width, y + tms[0][0].height)), t, m, s)
-                   for c, (t, m), s in zip(chans, tms, tss)) / len(chans)
-
-    def templates(tw, th):
-        tms = [_template(Image, c, mask, tw, th) for c in tchans]
-        return tms, [ImageStat.Stat(t, m) for t, m in tms]
+    tchans = _channels(rgb)
+    grey_only = ImageStat.Stat(tchans[1], mask).stddev[0] < 8  # a colourless product: grey only
+    score, templates = _scorer(photo, rgb, mask, grey_only)
     best = (-2.0, None)
     # On a portrait/landscape phone frame the product can occupy most of the
     # long axis. Keep the same small candidates but search up to the full frame.
@@ -516,15 +512,93 @@ def match(original, framed):
             if s > best[0]:
                 best = (s, (x, y, tw, th, step))
     x, y, tw, th, _ = best[1]
+    aspect, coarse = rgb.width / rgb.height, (x, y, tw, th)
+    _fit, place = _register(score, templates, coarse, (w, h), coarse, aspect, best[0], spread=True)
+    fine = upright.copy()  # then once more on a larger copy, where one px is a smaller part of a label word
+    fine.thumbnail((REGISTER_WORK, REGISTER_WORK), Image.Resampling.BOX)
+    k = fine.width / w
+    fscore, ftemplates = _scorer(fine, rgb, mask, grey_only)
+    fit, place = _register(fscore, ftemplates, tuple(round(v * k) for v in place), fine.size,
+                           tuple(v * k for v in coarse), aspect)
+    fx, fy, fw_, fh_ = place
     m = tms[0][1]
     here, there = photo.crop((x, y, x + tw, y + th)), rgb.resize((tw, th), Image.Resampling.BOX)
     chroma = lambda c: (c[0] / max(1, sum(c)), c[1] / max(1, sum(c)))  # noqa: E731
     a, b = chroma(ImageStat.Stat(here, m).mean), chroma(ImageStat.Stat(there, m).mean)
     ha, hb = _hue(here, m), _hue(there, m)
     shift = round(min(abs(ha - hb), 360 - abs(ha - hb)), 1) if ha is not None and hb is not None else None
+    fw, fh = fine.size
     return {"match": round(best[0], 3), "hue_shift": shift, "chroma": round(max(abs(a[0] - b[0]), abs(a[1] - b[1])), 4),
             "where": [round(x / w, 3), round(y / h, 3), round(tw / w, 3), round(th / h, 3)],
-            "_map": (full, (x / w, y / h, tw / w, th / h), tuple(v * 2 for v in box))}  # framed 800 px -> photo px
+            "map_fit": round(fit, 3),  # the product's correlation at the refined word map (diagnostic only)
+            "_map": (full, (fx / fw, fy / fh, fw_ / fw, fh_ / fh), tuple(v * 2 for v in box))}  # framed 800 px -> photo px
+
+
+def _scorer(photo, rgb, mask, grey_only):
+    """(score(x, y, tms, tss), templates(tw, th)) for matching the product ``rgb``/``mask`` on the copy ``photo``."""
+    Image, ImageChops, ImageStat = _pil()
+    chans, tchans = _channels(photo), _channels(rgb)
+    if grey_only:
+        chans, tchans = chans[:1], tchans[:1]
+
+    def score(x, y, tms, tss):
+        return sum(_ncc(ImageChops, ImageStat, c.crop((x, y, x + tms[0][0].width, y + tms[0][0].height)), t, m, s)
+                   for c, (t, m), s in zip(chans, tms, tss)) / len(chans)
+
+    def templates(tw, th):
+        tms = [_template(Image, c, mask, tw, th) for c in tchans]
+        return tms, [ImageStat.Stat(t, m) for t, m in tms]
+    return score, templates
+
+
+def _register(score, templates, start, bounds, coarse, aspect, start_score=None, *, spread=False):
+    """(score, (x, y, tw, th)): the product's place in Mike's photo, refined for mapping label words only.
+
+    ``match`` searches size in 11 % steps and width in five stretches: plenty to find the product, too coarse to say
+    where each label word sits (a jar a size step too tall and a stretch too narrow puts a word at the label's left
+    end a word's width away from it, so an unchanged word looks erased). This climbs one px of width, height or
+    position at a time from ``start`` while the product's own correlation improves, and keeps the best fit. With
+    ``spread`` it also climbs from each STRETCH of the ``coarse`` height at the same centre (a ridge between width and
+    position can stop a single climb short of the true width). Height stays within REGISTER_SPAN of the coarse one,
+    width within the STRETCH range widened by it. It only moves the word map: the ``match`` score, colour and place
+    reported stay the coarse ones, and no word is looked at, so a changed or erased word cannot pull the map onto
+    itself."""
+    (w, h), (cx0, _cy0, ctw, cth) = bounds, coarse
+    base = cth * aspect  # the product's width at the coarse height, unstretched
+    lo_w, hi_w = base * STRETCH[0] / REGISTER_SPAN, base * STRETCH[-1] * REGISTER_SPAN
+    lo_h, hi_h = cth / REGISTER_SPAN, cth * REGISTER_SPAN
+    cache = {}
+
+    def at(cand):
+        cx, cy, cw, ch = cand
+        if not (0 <= cx and 0 <= cy and cx + cw <= w and cy + ch <= h and lo_w <= cw <= hi_w and lo_h <= ch <= hi_h
+                and cw >= 8 and ch >= 8):
+            return -2.0
+        if cand not in cache:
+            if (cw, ch) not in cache:
+                cache[(cw, ch)] = templates(cw, ch)
+            cache[cand] = score(cx, cy, *cache[(cw, ch)])
+        return cache[cand]
+    if start_score is not None:
+        cache[tuple(start)] = start_score
+    moves = [(dx, dy, 0, 0) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
+    moves += [(-d // 2, 0, d, 0) for d in (-2, -1, 1, 2)] + [(0, -d // 2, 0, d) for d in (-2, -1, 1, 2)]
+    moves += [(-d // 2, -d // 2, d, d) for d in (-2, 2)]
+    centre = cx0 + ctw / 2
+    starts = [tuple(start)]
+    if spread:
+        starts += [(round(centre - round(base * s) / 2), round(_cy0), round(base * s), round(cth)) for s in STRETCH]
+    found = (at(starts[0]), starts[0])
+    for here in starts:
+        best = at(here)
+        for _ in range(REGISTER_STEPS):
+            top = max(((here[0] + a, here[1] + b, here[2] + c, here[3] + d) for a, b, c, d in moves), key=at)
+            if at(top) <= best + 1e-6:
+                break
+            best, here = at(top), top
+        if best > found[0] + 1e-6:
+            found = (best, here)
+    return found
 
 
 def _hue(rgb, mask):

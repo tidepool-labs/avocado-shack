@@ -317,13 +317,19 @@ def _within(value, stat, slack=0.0, scale=0.0):
     return value is not None and lo - pad <= value <= hi + pad
 
 
-def check_image(data: bytes, spec=None) -> dict:
-    """Score picture bytes (JPEG/PNG/WEBP) against the measured catalog look."""
+def check_image(data: bytes, spec=None, *, enclosed_background=None) -> dict:
+    """Score picture bytes (JPEG/PNG/WEBP) against the measured catalog look.
+
+    ``enclosed_background`` is the renderer's own measure (share of its analysis frame) of the enclosed pockets of its
+    cut-out it could not show to be product (a pocket is product only when printed and off the background plane).
+    ``None`` (any picture we did not cut out ourselves) keeps the full check. When it is 0, every ivory-coloured patch
+    inside the product is a printed label, so only the patch count limit applies."""
     spec = spec or load_spec()
     m_spec = spec["pictures"]["catalog"]["metrics"]
     im, _ = open_image(data)
     fmt = im.format
     m = image_metrics(im)
+    product_only = enclosed_background is not None and enclosed_background == 0
     checks = [_c("size 800x800", (m["width"], m["height"]) == (800, 800), f"{m['width']}x{m['height']}", 3, True),
               _c("mode RGB", m["mode"] == "RGB", m["mode"], 1, True),
               _c("format webp/jpeg/png", fmt in ("WEBP", "JPEG", "PNG"), fmt, 1, True),
@@ -336,8 +342,9 @@ def check_image(data: bytes, spec=None) -> dict:
         _c("background even", m["bg_spread"] <= m_spec["bg_spread"]["p95"] * 1.5 + 1, f"spread {m['bg_spread']}", 2),
         _c("clean ivory around the product (no photo background left)", m["frame_clean"] >= m_spec["frame_clean"]["min"] * .97,
            f"{m['frame_clean']:.2f} of the outer frame (catalog lowest {m_spec['frame_clean']['min']:.2f})", 3, True),
-        _c("no photo background left inside the product (patterned cloth, planks)", m["holes"] <= m_spec["holes"]["max"] + 6 and m["hole_area"] <= m_spec["hole_area"]["max"] * 1.5,
-           f"{m['holes']} background patches covering {m['hole_area']:.3f} (catalog most {m_spec['holes']['max']:.0f}, {m_spec['hole_area']['max']:.3f})", 3, True),
+        _c("no photo background left inside the product (patterned cloth, planks)", m["holes"] <= m_spec["holes"]["max"] + 6 and (product_only or m["hole_area"] <= m_spec["hole_area"]["max"] * 1.5),
+           f"{m['holes']} background patches covering {m['hole_area']:.3f} (catalog most {m_spec['holes']['max']:.0f}, {m_spec['hole_area']['max']:.3f})"
+           + ("; the cut-out shows them as product, not photo background" if product_only else ""), 3, True),
         _c("subject size in frame", _within(m["fill_max"], m_spec["fill_max"], scale=.25) and m["fill_max"] <= 1.0, f"{m['fill_max']:.2f} of the frame", 3),
         _c("subject area", m_spec["area_ratio"]["min"] * .85 <= m["area_ratio"] <= m_spec["area_ratio"]["max"] * 1.1, f"{m['area_ratio']:.2f} of the frame", 2),
         _c("centred sideways", abs(m["center_x"]) <= m_spec["center_x"]["p95"] + .04, f"{m['center_x']:+.3f}", 2),

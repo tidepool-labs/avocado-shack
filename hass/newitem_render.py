@@ -51,6 +51,8 @@ JPEG_QUALITIES = (90, 85, 80, 74)
 SHADOW = {"colour": (70, 55, 40), "alpha": 0.055, "blur": 11, "width": 0.8, "height": 0.055, "lift": 0.012}  # tuned to the measured shadow_depth
 MAX_UPSCALE = 2.5
 NOISY = 12  # border variation (levels) above which the background is called busy
+PLANE_MATCH = 10  # levels: an enclosed pocket pixel this close to the background plane is photo background, not product
+PRINT_MIN = 0.02  # share of an enclosed pocket that must be print (letters, a logo) before it can count as a label
 STRAIGHTEN = (3.0, 20.0, 1.4)  # tilt range in degrees corrected, and the elongation a subject needs before its axis means anything
 
 
@@ -137,6 +139,35 @@ def _fill_holes(m):
     return inv.point(lambda v: 0 if v == 128 else 255)
 
 
+def _pockets(raw, before, after, px, refs, w, h, mad):
+    """{"enclosed": share, "enclosed_background": share} of the pockets ``_fill_holes`` put into the subject.
+
+    A pocket counts as product (a label) only with positive evidence: print on it (at least PRINT_MIN of its cells are
+    marks the raw subject mask saw: letters, a logo) and no patch of it on the background plane. Anything else (a plain
+    pale pocket, one showing the counter, one with a counter-coloured patch) may be the counter seen through a handle,
+    whatever its light, and counts as photo background. Pockets smaller than one house-style patch are ignored there too.
+    """
+    pocket = bytearray(1 if b and not a else 0 for a, b in zip(before, after))
+    tol = max(PLANE_MATCH, 1.6 * mad)
+    on_plane = bytearray(w * h)
+    for i, flag in enumerate(pocket):
+        if flag and max(abs(px[i][k] - refs[i][k]) for k in range(3)) <= tol:
+            on_plane[i] = 1
+    patch = round(hs.MIN_PATCH * (w * h) / (hs.WORK * hs.WORK))
+    plane_cells = set()
+    for size, cells in _components(on_plane, w, h):  # a lone anti-aliased letter edge can cross the counter colour
+        if size >= patch:
+            plane_cells.update(cells)
+    background = 0
+    for size, cells in _components(pocket, w, h):
+        if size < patch:
+            continue
+        printed = sum(1 for i in cells if raw[i]) / size
+        if printed < PRINT_MIN or any(i in plane_cells for i in cells):
+            background += size
+    return {"enclosed": round(sum(pocket) / (w * h), 4), "enclosed_background": round(background / (w * h), 4)}
+
+
 def _coarse(img):
     """(coarse L mask, plane image, cast-shadow L mask, (w, h), delta, report) at analysis size, or (None, ..., report).
     Raises Refused("too-narrow") for a strip (a 1000x1 image has no border ring to measure)."""
@@ -177,8 +208,10 @@ def _coarse(img):
     for _size, cells in keep:
         for i in cells: flat[i] = 255
     m = Image.frombytes("L", (w, h), bytes(flat)).filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))  # close pin-holes
+    before = m.getdata()
     m = _fill_holes(m)
     data = list(m.getdata())
+    report.update(_pockets(mask, before, data, px, refs, w, h, mad))
     area = sum(1 for v in data if v) / (w * h)
     sides = ([data[x] for x in range(w)], [data[(h - 1) * w + x] for x in range(w)], [data[y * w] for y in range(h)], [data[y * w + w - 1] for y in range(h)])
     touching = sum(sum(1 for v in side if v) / len(side) > .6 for side in sides)
@@ -374,7 +407,9 @@ def render(data: bytes, spec=None) -> dict:
         jpeg = buf.getvalue()
         report["jpeg_quality"] = quality
         if len(jpeg) <= stats["bytes"]["p95"] * 1.3: break
-    check = hs.check_image(jpeg, spec)
+    # only our own cut-out knows which enclosed pockets were background in the photo; a supplied alpha or a fallback does not
+    known = report.get("enclosed_background") if alpha is None and mask is not None else None
+    check = hs.check_image(jpeg, spec, enclosed_background=known)
     if not check["pass"]: review.append("The picture does not pass the house-style check: " + ", ".join(check["hard_failures"] or ["score %d" % check["score"]]))
     report["review"] = review
     return {"jpeg": jpeg, "report": report, "check": check}

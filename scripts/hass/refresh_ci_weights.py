@@ -61,6 +61,9 @@ def reexported_keys(modules):
     so a module that re-exports another module's TestCase class runs it a second
     time under the defining module's key. When both modules sit on one shard that
     key still looks unique to its owner, yet it holds the doubled time.
+
+    A module that cannot be loaded here hides its re-exports, so any owner it
+    doubles would look unique. That fails closed with ValueError.
     """
     def tests_of(item):
         for test in item:
@@ -73,6 +76,8 @@ def reexported_keys(modules):
     for name in modules:
         suite = unittest.defaultTestLoader.loadTestsFromName(ci_shards.PREFIX + name)
         for test in tests_of(suite):
+            if isinstance(test, unittest.loader._FailedTest):
+                raise ValueError(f"cannot load {name} to check its re-exports: {test._exception}")
             defining = type(test).__module__
             defining = defining[len(ci_shards.PREFIX):] if defining.startswith(ci_shards.PREFIX) else defining
             if defining != name:

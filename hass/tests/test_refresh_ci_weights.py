@@ -1,4 +1,6 @@
 """Contract tests for turning successful Hass full-run artifacts into weights."""
+import contextlib
+import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +10,8 @@ import unittest
 from unittest import mock
 
 import hass.tests
+from hass.tests import ci_shards
+from scripts.hass import refresh_ci_weights
 from scripts.hass.refresh_ci_weights import reexported_keys, render_weights
 
 
@@ -77,6 +81,22 @@ class RefreshWeightsTest(unittest.TestCase):
                 mock.patch.object(hass.tests, "test_zz_owner", owner, create=True):
             self.assertEqual(reexported_keys(["test_zz_alias", "test_zz_owner"]), {"test_zz_owner"})
             self.assertEqual(reexported_keys(["test_zz_owner"]), set())
+
+    def test_unloadable_module_fails_closed_and_writes_no_weights(self):
+        # Contract: a module the refresh cannot load may hide re-exports, so
+        # the tool stops instead of weighting owners it cannot vet. Bug: the
+        # loader's failed-import placeholder was read as a normal test, the
+        # hidden alias was never inspected, and a doubled timing was kept.
+        with self.assertRaisesRegex(ValueError, "cannot load test_zz_missing"):
+            reexported_keys(["test_zz_missing"])
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "weights.json"
+            argv = ["refresh_ci_weights.py", tmp, "--output", str(output)]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(ci_shards, "all_modules", return_value=["test_zz_missing"]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                refresh_ci_weights.main()
+            self.assertFalse(output.exists())
 
     def test_invalid_receipts_cannot_contribute_weights(self):
         # A cancelled shard, a failed shard, overlapping modules, or a bad

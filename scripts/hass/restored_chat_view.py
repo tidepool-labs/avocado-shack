@@ -167,13 +167,13 @@ def shots_index(state, found, problems):
         problems["link"] += 1
         return
     for entry in sorted(os.scandir(top), key=lambda e: e.name):
-        if not entry.name.endswith((".png", ".jpg")):
-            continue
-        rel = "screenshots/" + entry.name
         mode = os.lstat(entry.path).st_mode
         if not stat.S_ISREG(mode):
             problems["link"] += 1
             continue
+        if not entry.name.endswith((".png", ".jpg")):
+            continue
+        rel = "screenshots/" + entry.name
         try:
             data = read_nofollow(state, rel)
         except OSError:

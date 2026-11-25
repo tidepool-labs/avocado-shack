@@ -309,6 +309,26 @@ class RestoredChatViewTests(unittest.TestCase):
         self.assertIn("link", output)
         self.assertQuiet(output)
 
+    def test_a_link_or_special_entry_under_any_name_in_screenshots_is_refused(self):
+        for kind in ("symlink", "fifo", "dir"):
+            with self.subTest(kind=kind):
+                state, media, shots = self.with_editor_shot()
+                self.assertEqual(run("--state", state, "--media", media)[0], 0)  # the picture alone verifies
+                odd = shots / "ignored.txt"
+                if kind == "symlink":
+                    odd.symlink_to(self.tmp)
+                elif kind == "fifo":
+                    os.mkfifo(odd)
+                else:
+                    odd.mkdir()
+                code, output = run("--state", state, "--media", media)
+                self.assertEqual(code, 1)
+                self.assertIn("link", output)
+                self.assertQuiet(output)
+                shutil.rmtree(shots)
+                shutil.rmtree(state)
+                shutil.rmtree(media)
+
 
 if __name__ == "__main__":
     unittest.main()

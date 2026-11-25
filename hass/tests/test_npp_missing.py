@@ -44,6 +44,33 @@ class MissingTests(unittest.TestCase):
                     self.assertFalse(decision.maker.research_allowed)
                 self.assertNotIn("Post this?", str(decision.questions))
 
+    def test_non_food_keeps_a_confident_flowers_shelf_and_nothing_else(self):
+        # Golden 12: a bouquet is non-food but belongs on Flowers. A non-food item never lands on a food
+        # shelf, and a weak or missing category read still falls back to the kind default.
+        base = dict(EXAMPLES[0], item="dried flower bouquet", kind="non-food", visible_claims=[], label_words=[])
+        rows = (
+            ("flowers", 0.99, "flowers"),
+            ("general", 0.99, "general"),
+            ("pantry", 0.99, "general"),
+            ("meat", 0.99, "general"),
+            ("flowers", 0.1, "general"),
+            (None, 0.99, "general"),
+        )
+        for guess, confidence, want in rows:
+            with self.subTest(guess=guess, confidence=confidence):
+                raw = dict(base, category_guess=guess, confidence=dict(base["confidence"], category=confidence))
+                reading = Identifier(PINNED, runner=lambda _: runner_output(raw)).read((b"fixture",)).evidence
+                decision = self.rules.decide(reading, price=OwnerPrice("10.00", "item"), owner_texts=("bouquet",))
+                self.assertEqual((decision.item, decision.category, decision.ready), ("Dried Flower Bouquet", want, True))
+        # Food readings are unchanged: a confident guess is kept, a weak one falls back to the kind default.
+        for confidence, want in ((0.99, "flowers"), (0.1, "pantry")):
+            with self.subTest(kind="food", confidence=confidence):
+                raw = dict(base, item="candied violets", kind="food", category_guess="flowers",
+                           confidence=dict(base["confidence"], category=confidence))
+                reading = Identifier(PINNED, runner=lambda _: runner_output(raw)).read((b"fixture",)).evidence
+                decision = self.rules.decide(reading, price=OwnerPrice("10.00", "item"), owner_texts=("violets",))
+                self.assertEqual(decision.category, want)
+
     def test_no_photo_or_ambiguous_owner_price_can_satisfy_essentials(self):
         # Do not treat an old/ambiguous price or basket unit as publishable.
         cases = ((OwnerPrice(), "selling_price", "ask_price_unit"),

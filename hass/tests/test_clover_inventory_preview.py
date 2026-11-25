@@ -63,6 +63,17 @@ class PreviewTests(NoNetwork):
         self.assertEqual(change, ["Set the till count of Blue mug?", "  Item: Blue mug", f"  SKU: {SKU}", "  Count: 0 -> 30",
                                   f'Website: marks "{NAME}" as Available today', f'Link: "{NAME}" on the website is tied to SKU {SKU}', LAST])
         self.assertEqual(plain(preview.render(counted(12, 30, "yes"), SITE, None, CODE))[4], f'Website: no change to "{NAME}"')
+        # C1b: the website line names the product the site op writes to, not the till item; a draft for "Blue mug" that changes the site's
+        # "Red mug" read "marks Blue mug" before, so the yes named a change that was not the one made. A product that is not the op's target is refused.
+        item = mapper.CloverItem("FAKEITEM00001", NAME, SKU, "", 1400, "FIXED", "", ("Pantry",), (), Decimal(0), 1, False, True, 1)
+        red = {**SITE, "id": "red-mug", "name": "Red mug", "available": "no"}
+        red_draft = drafts.build_set_stock(item, 30, CFG, site_product=mapper.parse_site_product(red))
+        self.assertEqual(plain(preview.render(red_draft, red, {"sku": SKU}, CODE))[4], 'Website: marks "Red mug" as Available today')
+        self.assertEqual(plain(preview.render(red_draft, mapper.parse_site_product(red), {"sku": SKU}, CODE))[4],
+                         'Website: marks "Red mug" as Available today')
+        for label, wrong in (("other product", {**red, "id": "blue-mug", "name": NAME}), ("no id", {**red, "id": None}), ("no product", None)):
+            with self.subTest(wrong=label), self.assertRaises(ValueError):
+                preview.render(red_draft, wrong, {"sku": SKU}, CODE)
         for bad in (drafts.build_create_item(NAME, 1400, "pantry", [], CFG), drafts.build_set_price(
                 mapper.CloverItem("FAKEITEM00001", NAME, SKU, "", 1400, "FIXED", "", (), (), None, 1, False, True, 1), 1500, CFG)):
             with self.subTest(kind=bad.kind), self.assertRaises(ValueError):   # a draft with no count to show has no till preview
@@ -91,6 +102,15 @@ class PreviewTests(NoNetwork):
         for label in ("Yes mug", "Mug 012345678905", "x" * 40, "Bearer mug"):   # a name that reads as an answer, a barcode or a token fails closed
             with self.subTest(name=label), self.assertRaises(ValueError):
                 preview.render(replace(created(), label=label), SITE, None, CODE)
+
+        # C2b: the SKU and link lines are checked like every other line; a link SKU that is a 32-character token, or a till SKU that is
+        # a long number, was copied out verbatim when those two lines were skipped by the token check.
+        for bad_sku in ("A" * 32, "012345678905"):
+            with self.subTest(link=bad_sku), self.assertRaises(ValueError):
+                preview.render(created(), SITE, {"sku": bad_sku}, CODE)
+            with self.subTest(till=bad_sku), self.assertRaises(ValueError):
+                till_item = mapper.CloverItem("FAKEITEM00001", NAME, bad_sku, "", 1400, "FIXED", "", ("Pantry",), (), Decimal(0), 1, False, True, 1)
+                preview.render(drafts.build_set_stock(till_item, 30, CFG), SITE, {"sku": bad_sku}, CODE)
 
     def test_c3_questions(self):
         # C3: a question is not a request for approval; a code or a yes line on it would let one yes approve a change that was never

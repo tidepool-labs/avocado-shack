@@ -45,12 +45,12 @@ def _named(name):
 
 
 def _site(record):
-    """(name, selling price text or None, stock word or None) of a website product: a content record (dict) or a mapper.SiteProduct."""
+    """(name, selling price text or None, stock word or None, id) of a website product: a content record (dict) or a mapper.SiteProduct."""
     if record is None:
         return None
     if isinstance(record, dict):
-        return _one_line(record.get("name") or ""), record.get("sellingPrice"), record.get("available")
-    return _one_line(getattr(record, "name", "")), None, getattr(record, "availability", None)
+        return _one_line(record.get("name") or ""), record.get("sellingPrice"), record.get("available"), record.get("id")
+    return _one_line(getattr(record, "name", "")), None, getattr(record, "availability", None), getattr(record, "id", None)
 
 
 def _price_words(after):
@@ -63,13 +63,19 @@ def _website(draft, site, name):
     q = _named(name)
     if draft.kind == "set_stock":
         for op in draft.site_ops:
+            if op["op"] not in ("product.set_availability", "product.clear_availability"):
+                continue
+            # The yes writes this op to the product with this id, so the line names that product (the site's own name for it, which
+            # may differ from the till item's) and refuses when the product given is not the one the op targets.
+            if site is None or not site[3] or site[3] != op["args"]["id"]:
+                raise ValueError("the website product does not match the one this change would write to")
+            shown = _named(site[0])
             if op["op"] == "product.set_availability":
-                return f"Website: marks {q} as {SITE_WORDS[op['args']['available']]}"
-            if op["op"] == "product.clear_availability":
-                return f"Website: takes the stock word off {q}"
+                return f"Website: marks {shown} as {SITE_WORDS[op['args']['available']]}"
+            return f"Website: takes the stock word off {shown}"
         if site is None:
             return "Website: no matching product, so nothing changes there"
-        return f"Website: no change to {q}"
+        return f"Website: no change to {_named(site[0])}"
     if site is None:
         return "Website: no matching product, so nothing changes there"
     shown = _named(site[0])
@@ -90,7 +96,7 @@ def _link(link, sku, name):
     q = _named(name)
     if not link:
         return f"Link: {q} on the website is not tied to a till item"
-    tied = str(link.get("sku") or "").strip()
+    tied = _one_line(link.get("sku") or "")
     if not tied:
         return f"Link: {q} on the website is not tied to a till item"
     if sku and tied != sku:
@@ -137,7 +143,7 @@ def render(till_draft, site_record, link, code) -> str:
     shown = [voice.plain(line) for line in body]
     if any(_YES.search(line) for line in shown):
         raise ValueError("a name says yes, which would read as an answer")
-    if any(_TOKEN_RUN.search(line) or _NUMBER_RUN.search(line) for line in shown if not line.lstrip().startswith(("SKU:", "Link:"))):
+    if any(_TOKEN_RUN.search(line) or _NUMBER_RUN.search(line) for line in shown):   # every line, the SKU and link lines too
         raise ValueError("a line looks like a token or a barcode")
     text = voice.till("\n".join([*body, LAST_LINE.format(code=code)]))
     lines = voice.plain(text).split("\n")

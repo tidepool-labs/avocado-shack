@@ -70,15 +70,15 @@ SITE_UNSURE = ("I can't tell whether the website change from that bundle went li
 SITE_DETAILS = ("I can't read what that website change did, so I can't show you what undoing it would put back. Nothing was changed. "
                 "Check the website, then ask me again.")
 SITE_UNDONE = "That website change was already undone, so there is nothing on the website to put back. Nothing was changed."
-_ABSENT = {"available": "no word"}   # a website field that was not there before the change
+_ABSENT = {"available": "no word"}   # a website field that was not there at all (an explicit null is shown as null)
 
 
 def _shown(value, field):
-    """One website value in plain, short words: an absent field says what absent means ('no word'), anything else is quoted."""
-    if value is _MISSING or value is None:
+    """One website value, exact and in full: an absent field says what absent means ('no word' / 'not set'); anything present is its JSON
+    form, so an explicit null reads `null`, the text "5" differs from the number 5, and two long values differing only at the end differ."""
+    if value is _MISSING:
         return _ABSENT.get(field, "not set")
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return "'" + (text if len(text) <= 60 else text[:57] + "...") + "'"
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _site_parts(change_id, change):

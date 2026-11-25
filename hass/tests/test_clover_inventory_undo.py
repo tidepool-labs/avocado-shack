@@ -175,15 +175,38 @@ class InventoryUndoTests(NoNetwork):
         self.assertEqual(rig.reverse(unsure, went_live=lambda cid: False).site_ops, ())
         # the website half is previewed from the site's own record of that change: the product and what it goes back to. Two different prior
         # states give two different previews (a preview that named only the change id would read the same for both)
-        self.assertEqual(rev.parts[1], "Website: products blue-mug (Blue mug) goes back as it was: available 'yes' -> no word; "
-                                       "available_on '2026-11-24' -> not set")
+        self.assertEqual(rev.parts[1], "Website: products blue-mug (Blue mug) goes back as it was: available \"yes\" -> no word; "
+                                       "available_on \"2026-11-24\" -> not set")
         sold_out = Rig(self, PRIOR_NO)
         sold_row = sold_out.create_mug()
         sold = sold_out.reverse(sold_row)
         self.assertEqual(sold.site_ops, ({"op": "history.revert", "args": {"changeId": sold_row["change_id"]}},))
-        self.assertEqual(sold.parts[1], "Website: products blue-mug (Blue mug) goes back as it was: available 'yes' -> 'no'; "
-                                        "available_on '2026-11-24' -> '2026-11-20'")
+        self.assertEqual(sold.parts[1], "Website: products blue-mug (Blue mug) goes back as it was: available \"yes\" -> \"no\"; "
+                                        "available_on \"2026-11-24\" -> \"2026-11-20\"")
         self.assertNotEqual(sold.parts, rev.parts)
+        # exact values: a long value is shown in full (two that differ only at the end read differently), an explicit null is not an absent
+        # field, and the text "5" is not the number 5
+        def with_before(extra):
+            def reader(cid):
+                rec = json.loads(json.dumps(rig.site.records[cid]))
+                rec["records"][0]["before"].update(extra)
+                rec["records"][0]["after"].update({k: "changed" for k in extra})
+                return rec
+            return reader
+        long_a = rig.reverse(row, site_change=with_before({"description": "x" * 60 + "A"})).parts[1]
+        long_b = rig.reverse(row, site_change=with_before({"description": "x" * 60 + "B"})).parts[1]
+        self.assertNotEqual(long_a, long_b)
+        self.assertIn('description "changed" -> "' + "x" * 60 + 'A"', long_a)
+        self.assertNotIn("...", long_a)
+        null_part = rig.reverse(row, site_change=with_before({"description": None})).parts[1]
+        absent_part = rig.reverse(row, site_change=lambda cid: {**rig.site.records[cid], "records": [{**rig.site.records[cid]["records"][0],
+                                  "after": {**rig.site.records[cid]["records"][0]["after"], "description": "changed"}}]}).parts[1]
+        self.assertIn('description "changed" -> null', null_part)
+        self.assertIn('description "changed" -> not set', absent_part)
+        self.assertNotEqual(null_part, absent_part)
+        self.assertIn('rank 5 -> "5"', rig.reverse(row, site_change=lambda cid: {**rig.site.records[cid], "records": [{
+            **rig.site.records[cid]["records"][0], "before": {**rig.site.records[cid]["records"][0]["before"], "rank": "5"},
+            "after": {**rig.site.records[cid]["records"][0]["after"], "rank": 5}}]}).parts[1])
         # a website change whose details cannot be read is refused, not previewed vaguely: no reader, a reader that fails or finds nothing,
         # a record that is not an applied change, one already undone, or one of the wrong shape
         broken = {"no reader": None, "not found": lambda cid: None, "fails": lambda cid: 1 / 0, "empty": lambda cid: {"state": "applied", "records": []},
@@ -260,7 +283,7 @@ class InventoryUndoTests(NoNetwork):
             self.assertIn(part, text)
         self.assertIn("Register: Blue mug (SKU AS-GEN-BLUE-MUG-01) goes from showing to hidden", text)
         self.assertIn("Link: removes the link between website product blue-mug and this till item", text)
-        self.assertIn("Website: products blue-mug (Blue mug) goes back as it was: available 'yes' -> no word; available_on '2026-11-24' -> not set", text)
+        self.assertIn("Website: products blue-mug (Blue mug) goes back as it was: available \"yes\" -> no word; available_on \"2026-11-24\" -> not set", text)
         self.assertNotIn(row["change_id"], text)   # the owner sees the product and values, not an opaque change id
         self.assertIn("hidden, not deleted", text)
         self.assertIn("count record stays", text)

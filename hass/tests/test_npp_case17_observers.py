@@ -49,8 +49,9 @@ def keys(*rows, key="raspberry-jam"):
     return {(v["job_id"], v["n"]): [key] for v in rows}
 
 
-def check(versions, *, job_photo=SHA[FRONT], reads=((5, [SHA[FRONT], SHA[BACK]]),), product_keys=None, want=WANT):
-    return run_npp.photo_role_findings(want, list(versions), job_photo, list(reads), SHA.__getitem__,
+def check(versions, *, job_photos=None, reads=((5, [SHA[FRONT], SHA[BACK]]),), product_keys=None, want=WANT):
+    job_photos = {"j1": SHA[FRONT]} if job_photos is None else job_photos
+    return run_npp.photo_role_findings(want, list(versions), job_photos, list(reads), SHA.__getitem__,
                                        keys(*versions) if product_keys is None else product_keys)
 
 
@@ -60,9 +61,18 @@ class PhotoRoles(unittest.TestCase):
         self.assertEqual(check(rows), ([], set(WANT)))
 
     def test_back_photo_as_picture_fails_on_job_and_version(self):
-        bad, covered = check([version(1, 30, photo=SHA[BACK])], job_photo=SHA[BACK])
+        bad, covered = check([version(1, 30, photo=SHA[BACK])], job_photos={"j1": SHA[BACK]})
         self.assertIn("picture_source", covered)
         self.assertEqual(len([b for b in bad if b.startswith("picture_source")]), 2)
+
+    def test_job_photo_is_read_from_each_delivered_versions_own_job(self):
+        # A newer job with no delivered version neither fails the case nor masks the delivered job's photo.
+        rows = [version(1, 30), version(1, None, photo=SHA[BACK], job="j2")]
+        self.assertEqual(check(rows, job_photos={"j1": SHA[FRONT], "j2": SHA[BACK]})[0], [])
+        bad, _ = check(rows, job_photos={"j1": SHA[BACK], "j2": SHA[FRONT]})
+        self.assertEqual(bad, [f"picture_source: job j1 photo is not {FRONT}"])
+        bad, _ = check([version(1, 30)], job_photos={})
+        self.assertEqual(bad, [f"picture_source: job j1 photo is not {FRONT}"])
 
     def test_never_delivered_version_is_not_picture_evidence(self):
         # A wrong never-delivered draft cannot fail the case, and it cannot pass it either: with no delivered
@@ -98,7 +108,7 @@ class PhotoRoles(unittest.TestCase):
     def test_two_listings_fail(self):
         rows = [version(1, 30), version(1, 35, job="j2")]
         product_keys = {("j1", 1): ["raspberry-jam"], ("j2", 1): ["raspberry-jam-2"]}
-        bad, _ = check(rows, product_keys=product_keys)
+        bad, _ = check(rows, product_keys=product_keys, job_photos={"j1": SHA[FRONT], "j2": SHA[FRONT]})
         self.assertEqual(bad, ["listings: want 1, got 2"])
 
     def test_never_delivered_second_listing_does_not_count(self):

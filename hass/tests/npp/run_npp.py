@@ -1132,15 +1132,17 @@ def listing_findings(want, product, makers):
     return bad, unknown
 
 
-def photo_role_findings(want, versions, job_photo, reads, ref_sha, product_keys):
+def photo_role_findings(want, versions, job_photos, reads, ref_sha, product_keys):
     """Observe what each owner photo became: the picture, the label reading, and how many listings were shown.
 
     ``versions`` are npp_versions rows (dicts); only a version with ``delivered_at`` counts, because the owner saw it.
-    ``job_photo`` is the job's stored picture photo sha, ``reads`` the S2 identify calls as (seconds, [photo shas]) and
+    ``job_photos`` maps each job id to its stored picture photo sha, ``reads`` lists the S2 identify calls as
+    (seconds, [photo shas]) and
     ``product_keys`` maps (job id, version n) -> the product record keys of its frozen draft or committed change.
     ``ref_sha`` turns a fixture photo reference into its original sha.
 
-    * picture_source: the job's photo and every delivered version's frozen listing photo are the named photo.
+    * picture_source: the stored picture photo of each delivered version's own job, and that version's frozen listing
+      photo, are the named photo (a later job with no delivered version is not consulted).
     * label_words_from: every identify reading read exactly the named photos in order, and one of them happened at or
       before the first delivered version.
     * listings: the number of distinct product records across delivered versions.
@@ -1151,8 +1153,9 @@ def photo_role_findings(want, versions, job_photo, reads, ref_sha, product_keys)
     shown = sorted((v for v in versions if v.get('delivered_at')), key=lambda v: v['n'])
     if 'picture_source' in want and shown:
         expected = ref_sha(want['picture_source'])
-        if job_photo != expected:
-            bad.append(f"picture_source: job photo is not {want['picture_source']}")
+        for job_id in sorted({v.get('job_id') for v in shown}, key=str):
+            if job_photos.get(job_id) != expected:
+                bad.append(f"picture_source: job {job_id} photo is not {want['picture_source']}")
         for v in shown:
             photo = json.loads(v.get('listing_json') or '{}').get('photo')
             if photo != expected:
@@ -1438,10 +1441,10 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
 
     # What each owner photo became (case 17's front picture and back label), bound to delivered versions only.
     if want.keys() & {'picture_source', 'label_words_from', 'listings'}:
-        job = fx.job()
+        job_photos = {r[0]: r[1] for r in db.execute('SELECT job_id, photo_sha FROM npp_jobs')}
         keys = {(v.get('job_id'), v['n']): [r['key'] for r in version_record(v).get('records', [])
                                             if r.get('collection') == 'products' and r.get('key')] for v in rows}
-        found, observed_keys = photo_role_findings(want, rows, job['photo_sha'] if job else None, reads or [],
+        found, observed_keys = photo_role_findings(want, rows, job_photos, reads or [],
                                                    lambda ref: sha256(photo_bytes(ref)), keys)
         bad.extend(found)
         newly_covered.update(observed_keys)

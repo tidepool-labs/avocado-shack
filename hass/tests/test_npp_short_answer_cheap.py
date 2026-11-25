@@ -130,7 +130,8 @@ class ShortAnswerCheapTests(unittest.TestCase):
         self.assertEqual(lines[2:], ["FAIL check-error", TRAILER_FAIL])
 
     def test_c3_usage_exit_2(self):
-        for args in (("extra",), ("--bogus",)):
+        # --help/-h must be usage errors too (a help request would print to stdout and exit 0).
+        for args in (("extra",), ("--bogus",), ("--help",), ("-h",)):
             with self.subTest(args=args):
                 result = run_script(*args)
                 self.assertEqual(result.returncode, 2)

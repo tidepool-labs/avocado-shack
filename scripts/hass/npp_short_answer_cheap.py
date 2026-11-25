@@ -58,7 +58,7 @@ EXPECTED = [
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.parse_args(argv)
     failed = False
     for index, (kind, text) in enumerate(CASES):

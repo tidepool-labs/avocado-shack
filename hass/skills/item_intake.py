@@ -123,9 +123,14 @@ _FINANCE_CUE = re.compile(
 )
 
 
+# The dairy product's name, not a quantity: "half-and-half", "half and half", "Half & Half", "half 'n' half".
+HALF_AND_HALF = re.compile(
+    r"(?<!\w)half(?:(?:\s*-\s*|\s+)(?:and|'?n'?)(?:\s*-\s*|\s+)|\s*-?\s*&\s*-?\s*)half(?!\w)", re.I)
+
+
 def unresolved_finance(text):
     """Detect finance left in the deterministic parser's public remainder."""
-    return bool(_FINANCE_CUE.search(text))
+    return bool(_FINANCE_CUE.search(HALF_AND_HALF.sub(" ", text)))
 
 
 def without_unresolved_finance(text):

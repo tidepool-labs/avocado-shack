@@ -65,3 +65,25 @@ class Numbers(unittest.TestCase):
         for text in ('maybe twelve', 'four or five', 'a hundred', 'two point six', 'Ⅳ', 'Ｆｏｏ１２'):
             with self.subTest(text=text):
                 self.assertEqual(pn.problem(text), 'number-unclear')
+
+    def test_half_and_half_is_a_product_name_not_a_quantity(self):
+        # Golden case 3 (live recording): "Straus half-and-half, $7 each" asked for the price again, and the
+        # printed "Half & Half" label made the own-photo fallback a retake.
+        for caption in ('made by Straus, Straus half-and-half, $7 each', 'Straus half and half, $7 each',
+                        'Half & Half, $7 each', "half 'n' half, $7 each"):
+            with self.subTest(caption=caption):
+                finance = pn.finance(caption)
+                self.assertEqual(finance.selling_price, '7.00 each')
+                self.assertEqual(caption[slice(*finance.price_span)].strip(), '$7 each')
+                self.assertEqual(finance.private, frozenset())
+        for label in ('Half & Half', 'ORGANIC HALF & HALF', 'Half&Half', 'half-and-half', 'Half and Half'):
+            with self.subTest(label=label):
+                self.assertIsNone(pn.picture_problem(label, label, []))
+        # Only the whole idiom is exempt: a loose fraction, a count or money still fails closed.
+        for text, expected in (('half a crate', 'number-unclear'), ('Half & Half half', 'number-unclear'),
+                               ('Half & Half $7', 'money')):
+            with self.subTest(text=text):
+                self.assertEqual(pn.problem(text, digits_allowed=True), expected)
+        self.assertIsNone(pn.finance('half-and-half, $7 each; half a crate').selling_price)
+        counted = pn.finance('half & half $7 each, got half a dozen')
+        self.assertEqual((counted.selling_price, counted.private, counted.has_qty), ('7.00 each', {6}, True))

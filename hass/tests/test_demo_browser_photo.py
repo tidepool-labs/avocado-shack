@@ -19,7 +19,7 @@ from hass.content_model import REPO_ROOT
 from hass.tests import test_demo_transcript_photo as photo
 from hass.tests import test_demo_browser as _db
 from hass.tests.test_demo_browser import MISSING_PLAYWRIGHT, PNG_SIGNATURE
-from hass.tests.test_editor import git
+from hass.tests.test_editor import repo_status
 from hass.tests.test_set_photo import PID
 
 
@@ -50,7 +50,7 @@ class DemoBrowserPhotoTests(unittest.TestCase):
         return [json.loads(line) for line in out.getvalue().splitlines()], seen
 
     def test_whole_chain_shows_the_new_photo_then_the_old_one(self):
-        repo, before = self.site(), git(REPO_ROOT, "status", "--porcelain")
+        repo, before = self.site(), repo_status(REPO_ROOT)
         original = repo.product(PID)["image"]
         stranger = {**json.loads(photo.DEMO.read_text("utf-8").splitlines()[0]), "id": "photo-demo-9",
                     "sender": "stranger@example.invalid", "at": "2026-11-02T09:08:00-08:00"}
@@ -78,7 +78,7 @@ class DemoBrowserPhotoTests(unittest.TestCase):
         messages = {r["provider_id"]: r["disposition"] for r in self.query(repo, "SELECT * FROM messages")}
         self.assertEqual(messages["photo-demo-9"], "ignored")  # the stranger's photo: no draft, no reply
         self.assertEqual((len(messages), len(texts)), (8, 7))
-        self.assertEqual(git(REPO_ROOT, "status", "--porcelain"), before)
+        self.assertEqual(repo_status(REPO_ROOT), before)
 
     def test_missing_playwright_reports_the_failed_check_and_does_not_retry(self):
         repo = self.site()

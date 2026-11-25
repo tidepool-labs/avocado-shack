@@ -30,9 +30,11 @@ a link. A link anywhere on a path is refused.
 | `catalog-unreadable`, `could-not-check` | the shop's catalog or the saved conversation could not be read safely |
 | `not-served` | no served item carries the approved name (also: the record now claims another item's name) |
 | `name-differs`, `price-differs`, `descriptor-differs`, `picture-text-differs`, `shelf-differs`, `brand-differs`, `maker-differs` | that served field is not the approved one |
+| `display-brand-differs` | the brand a visitor actually sees (the record's `displayBrand`, else `brand`, as the shop page shows it) is not the approved one; the approved one is the card's `displayBrand`, else the catalog's own default for its brand ("From the market" for an unidentified producer) |
 | `served-photo-unreadable` | the served photo file is missing, is a link, or its path leaves the shop |
 | `served-photo-differs` | the served photo bytes are not the approved photo (a stale or another owner's photo, even when the catalog is right) |
 | `photo-on-another-item` | a different served item shows the approved photo (a wrong neighbor) |
+| `other-photo-unreadable` | another served item names a picture that is a link, is missing, or leaves the shop folder: the command fails closed, because a site might still follow a link to the approved photo |
 | `duplicate-served` | the approved item is served twice (a leftover record) |
 | `non-public-field` | the served record has a field outside the public set (id, name, brand, category, image, description, producerKey, displayBrand, imageAlt, sellingPrice, addedOn) |
 | `private-word` | a served field mentions cost, qty, quantity, stock, count, margin, wholesale or supplier (whole words) |
@@ -43,7 +45,7 @@ On a restored OFF install with two owners' cards waiting: before any yes, both l
 the command printed `MATCH undo` and every mismatch above printed its reason while the approval row was still on file. The other owner's
 listing still printed `not-approved`, and asking about Mike's listing with the other owner's photo printed `photo-mismatch`. The transcript bytes, commits, public names,
 approvals and the worktree status were identical before and after every run. Each check was mutation-tested: disabling the photo,
-field, neighbor-photo, duplicate, non-public or private-word check made the test fail.
+field, shown-brand, neighbor-photo, unreadable-neighbor, duplicate, non-public or private-word check made the test fail.
 
 ## Limits
 

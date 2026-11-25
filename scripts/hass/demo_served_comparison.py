@@ -94,6 +94,18 @@ def approved_card(db, job, version):
     return mine[0], photo
 
 
+def shown_brand(record):
+    """The brand a visitor sees: displayBrand when the record has one, else brand (storefront-mockup/shop.js)."""
+    return record.get("displayBrand") or record.get("brand")
+
+
+def approved_display_brand(args):
+    """The brand the approved card shows: the op's displayBrand, else the catalog's own default for its brand."""
+    if args.get("displayBrand"):
+        return args["displayBrand"]
+    return "From the market" if args.get("brand") == "Producer not identified" else args.get("brand")
+
+
 def served_photo_sha(worktree, record):
     image = record.get("image")
     if not isinstance(image, str) or not image or image.startswith("/") or ".." in Path(image).parts:
@@ -118,14 +130,21 @@ def compare(worktree, records, args, photo_sha):
             out.add("non-public-field")
         if any(isinstance(v, str) and PRIVATE_RE.search(v) for k, v in record.items() if k != "image"):
             out.add("private-word")
+        if shown_brand(record) != approved_display_brand(args):
+            out.add("display-brand-differs")
         served = served_photo_sha(worktree, record)
         if served is None:
             out.add("served-photo-unreadable")
         elif served != photo_sha:
             out.add("served-photo-differs")
     for record in records:
-        if record.get("name") != args["name"] and served_photo_sha(worktree, record) == photo_sha:
+        if record.get("name") == args["name"]:
+            continue
+        other = served_photo_sha(worktree, record)
+        if other == photo_sha:
             out.add("photo-on-another-item")
+        elif other is None and isinstance(record.get("image"), str) and record["image"]:
+            out.add("other-photo-unreadable")  # fail closed: a link, missing file or escaping path the site might still follow
     return sorted(out)
 
 

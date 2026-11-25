@@ -96,7 +96,8 @@ def _make():
 
                 for key, value, want in (("sellingPrice", "99.99", "price-differs"), ("description", "Edited later.", "descriptor-differs"),
                                          ("imageAlt", "Blue jar", "picture-text-differs"), ("category", "fruit", "shelf-differs"),
-                                         ("brand", "Someone Else", "brand-differs"), ("producerKey", "Someone Else", "maker-differs")):
+                                         ("brand", "Someone Else", "brand-differs"), ("producerKey", "Someone Else", "maker-differs"),
+                                         ("displayBrand", "Someone Else", "display-brand-differs")):
                     undo = self.edit_catalog(wt, swap(key, value))
                     self.must_mismatch(want, wt, state, conv, jm, mine, 1)
                     undo()
@@ -134,6 +135,16 @@ def _make():
                 neighbor.write_bytes(good)  # the approved bytes now also sit on another item's picture
                 self.must_mismatch("photo-on-another-item", wt, state, conv, jm, mine, 1)
                 neighbor.write_bytes(kept)
+                # a neighbor whose picture cannot be read safely is not ignored: the site might still follow a link to the approved photo
+                twin = Path(wt) / "storefront-mockup/assets/products/photo-product-016.webp"
+                kept_twin = twin.read_bytes()
+                twin.unlink()
+                twin.symlink_to(image)
+                self.must_mismatch("other-photo-unreadable", wt, state, conv, jm, mine, 1)
+                twin.unlink()
+                self.must_mismatch("other-photo-unreadable", wt, state, conv, jm, mine, 1)  # a missing neighbor picture too
+                twin.write_bytes(kept_twin)
+                self.assertEqual(self.compare(state, wt, jm, mine, 1), (0, "MATCH undo"))
                 moved = image.with_name("moved.png")
                 image.rename(moved)
                 self.must_mismatch("served-photo-unreadable", wt, state, conv, jm, mine, 1)

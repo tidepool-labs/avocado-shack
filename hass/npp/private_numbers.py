@@ -115,9 +115,22 @@ _MONEY_AMOUNT = re.compile(
     rf'\b(?:{_WORD}[ -]+)?{_WORD}\s+(?:cents?|dollars?|bucks?)\b', re.I)
 
 
+_PAID_CUE = re.compile(r'\b(?:paid|costs?|wholesale)\b', re.I)
+_FOR_AMOUNT = re.compile(r'(?:\b(?:for|at)\b|@)(.*)', re.I)
+
+
 def _names_cost(part):
-    """The clause talks about what the owner paid, with an amount or a word, whether or not it can be read."""
-    return bool(_COST_CUE.search(part)) and bool(_MONEY_AMOUNT.search(part) or _MONEY.search(part) or values(part))
+    """The clause talks about what the owner paid, with an amount or a word, whether or not it can be read.
+
+    paid/cost/wholesale plus any number name a cost. "bought"/"purchased" also name how many, so on their own
+    ("bought 5") they are a count only; they name a cost only beside money or an amount after "for"/"at".
+    """
+    if not _COST_CUE.search(part):
+        return False
+    if _PAID_CUE.search(part):
+        return bool(_MONEY_AMOUNT.search(part) or _MONEY.search(part) or values(part))
+    return bool(_MONEY_AMOUNT.search(part) or _MONEY.search(part)
+                or ((after := _FOR_AMOUNT.search(part)) and values(after[1])))
 
 
 def _names_qty(part):

@@ -139,6 +139,26 @@ class LaterTurnsKeepOrClearTests(_Journey):
                 self.assertEqual([r["answers"] for r in self.saved()], [{"cost": "1.00"}])
                 self.setUp()
 
+    def test_a_purchase_count_alone_keeps_the_earlier_cost(self):
+        # Contract: "bought N" names how many, not what he paid; the waiting cost must survive it.
+        # Believable bug: treating "bought" as a cost cue cleared the cost whenever he restated his count.
+        for words, count in (("bought 5", 5), ("I bought 7 today", 7)):
+            with self.subTest(words):
+                self.assertEqual(self.say_then([(words, None)]), [{"cost": "1.00", "qty": count}])
+                self.assertEqual([r["answers"] for r in self.saved()], [{"cost": "1.00", "qty": count}])
+                self.setUp()
+        for words in ("bought 5; bought 6", "bought about 6", "bought five"):
+            with self.subTest(words):  # an unreadable purchase count clears only the count
+                self.assertEqual(self.say_then([(words, None)]), [{"cost": "1.00"}])
+                self.setUp()
+
+    def test_a_purchase_count_beside_a_cost_in_one_turn_keeps_both(self):
+        # Believable bug: "bought 5" read as an unreadable cost voided the explicit cost typed in the same turn.
+        self.assertEqual(self.say_then([("cost $2; bought 5", None)]), [{"cost": "2.00", "qty": 5}])
+        self.assertEqual([r["answers"] for r in self.saved()], [{"cost": "2.00", "qty": 5}])
+        self.setUp()
+        self.assertEqual(self.say_then([("bought 5 for $3", None)]), [{"cost": "3.00", "qty": 5}])
+
     def test_a_clear_value_in_a_later_turn_still_replaces_the_earlier_one(self):
         self.assertEqual(self.say_then([("cost $2", None), ("got 7", None)]),
                          [{"cost": "2.00", "qty": 50}, {"cost": "2.00", "qty": 7}])
@@ -183,6 +203,18 @@ class FinanceLabelTests(unittest.TestCase):
             with self.subTest(words):
                 got = finance(words)
                 self.assertEqual((got.has_qty, got.qty, got.has_cost, got.cost), (True, None, False, None))
+
+    def test_bought_alone_names_a_count_not_a_cost(self):
+        from hass.npp.private_numbers import finance
+        got = finance("bought 5")
+        self.assertEqual((got.has_cost, got.cost, got.has_qty, got.qty), (False, None, True, 5))
+        got = finance("cost $2; bought 5")
+        self.assertEqual((got.cost, got.qty), ("2.00", 5))
+        got = finance("bought 5; bought 6")
+        self.assertEqual((got.has_cost, got.has_qty, got.qty), (False, True, None))
+        got = finance("bought 5 for $3")  # money beside it: both are named
+        self.assertEqual((got.has_cost, got.cost, got.qty), (True, "3.00", 5))
+        self.assertTrue(finance("bought them for about 3").has_cost)  # a figure after for/at still counts, fail closed
 
     def test_an_unreadable_clause_in_one_field_does_not_spoil_the_other(self):
         from hass.npp.private_numbers import finance

@@ -86,10 +86,10 @@ def served_state(backup, commit):
             records = json.loads(first[len(gate.CATALOG_HEAD):].rstrip(b";"))
         except ValueError:
             raise Refused("served-state-unreadable") from None
+        if not isinstance(records, list) or not all(isinstance(r, dict) and isinstance(r.get("name"), str) for r in records):
+            raise Refused("served-state-unreadable")  # an object, a list of non-records or a nameless record is not a catalog
         names = {}
         for record in records:
-            if not isinstance(record, dict) or not isinstance(record.get("name"), str):
-                continue
             photo, image = None, record.get("image")
             if isinstance(image, str) and image and not image.startswith("/") and ".." not in Path(image).parts:
                 with contextlib.suppress(Refused):
@@ -110,10 +110,17 @@ def classify(job, version, files, events, names):
     """(class, counts dict) for one listing."""
     photo_sha = job["photo_sha"]
     card_sha = version["card_png_sha"] if version else None
+    if not (isinstance(job["job_id"], str) and gate.JOB.fullmatch(job["job_id"]) and isinstance(photo_sha, str)
+            and gate.SHA.fullmatch(photo_sha) and isinstance(job["chat"], str)
+            and (card_sha is None or isinstance(card_sha, str) and gate.SHA.fullmatch(card_sha))
+            and (version is None or isinstance(version["n"], int) and not isinstance(version["n"], bool))):
+        raise Refused("bad-listing-record")  # nothing that is not a job code, a hash or a count is ever printed
     originals = sum(1 for rel in files if re.fullmatch(rf"{statebackup.ORIG}[0-9a-f]{{2}}/{re.escape(photo_sha)}\.(?!json$)\w+", rel))
     card_file = f"{statebackup.NPP}{job['job_id']}/card-{card_sha}.png" in files if card_sha else False
-    photos_in = sum(1 for e in events if e["direction"] == "in" and photo_sha in e["attachments"])
-    cards_out = sum(1 for e in events if e["direction"] == "out" and card_sha and card_sha in e["attachments"])
+    mine = [e for e in events if e["chat"] == job["chat"]]  # the listing's own chat only: two owners may share a photo or a card
+    photos_in = sum(1 for e in mine if e["direction"] == "in" and e["draft_code"] == job["job_id"] and photo_sha in e["attachments"])
+    code = f"{job['job_id']}-{version['n']}" if version else None
+    cards_out = sum(1 for e in mine if e["direction"] == "out" and card_sha and e["draft_code"] == code and card_sha in e["attachments"])
     name = listing_name(version["listing_json"]) if version else None
     counts = dict(history=f"{photos_in}/{cards_out}", originals=originals, card=int(card_file), served="no")
     if name and name in names:

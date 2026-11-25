@@ -32,7 +32,7 @@ codes and counts: no name, text, price, path or picture. Refusals are `REFUSED <
 | `incomplete-photo-original-missing` | the photo original is not in the backup |
 | `incomplete-card-not-delivered` / `in-progress` | the newest card was never delivered (in-progress when the listing is still being made) |
 | `incomplete-card-file-missing` | the delivered card picture file is not in the backup |
-| `incomplete-photo-not-in-history`, `incomplete-card-not-in-history` | the chat does not hold the photo message or the card message |
+| `incomplete-photo-not-in-history`, `incomplete-card-not-in-history` | the listing's own chat does not hold its photo message (marked with the job code) or its card message (marked with `<job>-<version>`); another owner's message with the same picture does not count |
 | `incomplete-listing-has-no-name` | the newest version has no name to compare with the shop |
 | `waiting-for-yes` | everything is in place and the listing is waiting for its yes |
 
@@ -45,7 +45,8 @@ codes and counts: no name, text, price, path or picture. Refusals are `REFUSED <
 | `no-served-state` | the backup has no content bundle (history and media only) |
 | `backup-not-intact` | it does not verify (missing, changed or extra file, wrong mode, a link on the path, not a backup) |
 | `history-unreadable` | the saved chat or the conversation store cannot be read |
-| `served-state-unreadable` | the content bundle or its catalog cannot be read |
+| `served-state-unreadable` | the content bundle or its catalog cannot be read, or the catalog is not a list of named records |
+| `bad-listing-record` | a listing's job code, photo or card hash, chat or version in the saved conversation is not the expected shape (nothing else is ever printed) |
 | `could-not-check` | anything else; never a traceback |
 
 ## Proven offline (fixtures, no service)

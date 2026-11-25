@@ -212,6 +212,48 @@ def _make():
                 self.assertIn(f"ITEM {jm} served-photo-differs history=1/1 originals=1 card=1 served=yes", self.run_inv(c)[1])
                 self.assertEqual(self.run_inv(b, against=c)[1][:1], ["COMPARE differs"])
 
+                # another owner's message with the same picture does not stand in for this listing's own history
+                def other_chat(column, value, where):
+                    def change(bdir, doc):
+                        path = Path(bdir) / "transcript.sqlite3"
+                        with sqlite3.connect(path) as db:
+                            for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+                                db.execute(f'DROP TRIGGER "{name}"')
+                            db.execute(f"UPDATE events SET {column}=? WHERE {where}", (value, *wherearg))
+                        doc["files"]["transcript.sqlite3"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    return change
+                wherearg = (f"{jg}-1",)
+                moved_chat = self.tamper_copy(a, Path(tmp) / "card-in-other-chat", other_chat("chat", trc.MCHAT, "draft_code=?"))
+                self.assertEqual(statebackup.verify(moved_chat)["result"], "ok", statebackup.verify(moved_chat))
+                self.assertIn(f"ITEM {jg} incomplete-card-not-in-history history=1/0 originals=1 card=1 served=no", self.run_inv(moved_chat)[1])
+                wrong_code = self.tamper_copy(a, Path(tmp) / "card-wrong-code", other_chat("draft_code", f"{jm}-1", "draft_code=?"))
+                self.assertIn(f"ITEM {jg} incomplete-card-not-in-history history=1/0 originals=1 card=1 served=no", self.run_inv(wrong_code)[1])
+                wherearg = (jg,)
+                photo_elsewhere = self.tamper_copy(a, Path(tmp) / "photo-in-other-chat", other_chat("chat", trc.MCHAT, "draft_code=?"))
+                self.assertIn(f"ITEM {jg} incomplete-photo-not-in-history history=0/1 originals=1 card=1 served=no", self.run_inv(photo_elsewhere)[1])
+                wrong_job = self.tamper_copy(a, Path(tmp) / "photo-wrong-job", other_chat("draft_code", jm, "draft_code=?"))
+                self.assertIn(f"ITEM {jg} incomplete-photo-not-in-history history=0/1 originals=1 card=1 served=no", self.run_inv(wrong_job)[1])
+
+                # a job code that is not a job code is refused, never printed
+                def odd_job(bdir, doc):
+                    path = Path(bdir) / "conversation.sqlite3"
+                    with sqlite3.connect(path) as db:
+                        db.execute("UPDATE npp_jobs SET job_id=? WHERE job_id=?", ("secret \x1b[31m text", jg))
+                    doc["files"]["conversation.sqlite3"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                odd = self.tamper_copy(a, Path(tmp) / "odd-job", odd_job)
+                self.assertEqual(statebackup.verify(odd)["result"], "ok", statebackup.verify(odd))
+                self.assertEqual(self.run_inv(odd), (1, ["REFUSED bad-listing-record"]))
+                self.assertEqual(self.run_inv(a, against=odd), (1, ["REFUSED bad-listing-record"]))
+
+                # a served-state catalog that is not a list of named records is refused, not read as "nothing served"
+                catalog = self.repo.wt / "storefront-mockup/catalog-products.js"
+                good_catalog = catalog.read_bytes()
+                for bad in (b"const catalog={};\n", b'const catalog=[3,{"name":"x"}];\n', b'const catalog=[{"id":"nameless"}];\n'):
+                    catalog.write_bytes(bad + good_catalog.split(b"\n", 1)[1])
+                    git(self.repo.wt, "add", "-A")
+                    git(self.repo.wt, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "odd catalog")
+                    self.assertEqual(self.run_inv(self.backup(out)), (1, ["REFUSED served-state-unreadable"]), bad)
+
                 # nothing was written anywhere by any run: backups, live state, scratch folders
                 self.assertEqual((tree(a), tree(b)), (snap_a, snap_b))
                 self.assertEqual(sorted(p.name for p in Path(tempfile.gettempdir()).glob("restore-inventory-*")), scratch_before)

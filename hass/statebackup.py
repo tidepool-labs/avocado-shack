@@ -6,7 +6,9 @@
 
 create refuses a symlinked or odd config.json/writer.lock before anything opens it, takes the writer lock and copies a
 settled state dir (config.json, drafts, changes, screenshots, the audit log and consistent sqlite snapshots of inbox.sqlite3, then
-conversation.sqlite3, transcript.sqlite3 and clover/cache.sqlite3 if present; never writer.lock, a journal, a symlink or an unknown entry) into a new private
+conversation.sqlite3, transcript.sqlite3 and the till's clover/cache.sqlite3, clover/journal.sqlite3 and clover/bundles.sqlite3
+if present, the latter two while holding their own flock; plus clover/links.json and clover/receipts/<day>-<code>.json copied whole;
+never writer.lock, a till lock file, a journal, a symlink or an unknown entry) into a new private
 <out>/hass-state-<UTC stamp>/ (out: an existing 0700 user dir; built aside, renamed in) and writes MANIFEST.json last.
 verify re-checks every hash and mode, refuses extra entries and symlinks and runs the sqlite integrity check on each
 store, and that config.json is an object naming the manifest's exact worktree; listed photo originals and sidecars must pair one-to-one
@@ -22,7 +24,7 @@ With a contentCommit, create also writes content.bundle (a full `git bundle` of 
 photos), listed and hashed like any file; verify requires its head to be contentCommit. Without --content-into DIR
 restore skips it; with it, restore/drill clone it into a NEW dir at contentCommit and run its sitegen --check (FAV-08).
 """
-import argparse, contextlib, ctypes, errno, hashlib, json, os, re, shutil, sqlite3, stat, subprocess, sys  # noqa: E401
+import argparse, contextlib, ctypes, errno, fcntl, hashlib, json, os, re, shutil, sqlite3, stat, subprocess, sys, time  # noqa: E401
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +41,13 @@ MANIFEST, CONFIG, DB, LOCK = "MANIFEST.json", "config.json", "conversation.sqlit
 INBOX = "inbox.sqlite3"  # H16 inbound queue; snapshotted like DB
 TRANSCRIPT = "transcript.sqlite3"  # Private append-only conversation history; online snapshot like DB.
 CLOVER = "clover/cache.sqlite3"  # till cache (hass/clover/cache.py); snapshotted; the item link table will join it
+JOURNAL, BUNDLES = "clover/journal.sqlite3", "clover/bundles.sqlite3"  # till write state (HCI-16): undo journal, change bundles
+LINKS = "clover/links.json"  # site product <-> Clover item link table; atomically replaced by its writer, so copied whole
+RECEIPT_DIR = "clover/receipts"  # private inventory receipts <YYYY-MM-DD>-<code>.json (hass/clover/inventory_receipt.py)
+RECEIPT = RECEIPT_DIR + r"/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{8}\.json"
+STORES = (DB, INBOX, TRANSCRIPT, CLOVER, JOURNAL, BUNDLES)  # sqlite stores: online snapshot, then integrity check on verify
+LOCKS = {JOURNAL: "clover/journal.lock", BUNDLES: "clover/bundles.lock"}  # each till store's own flock; skipped, never copied
+LOCK_WAIT = 5.0  # seconds create waits for a till store's flock (a write in flight) before answering `busy`
 BUNDLE = "content.bundle"  # FAV-07: git bundle of the writer worktree's HEAD == contentCommit
 DIRS = ("drafts", "changes", "screenshots", "audit")  # AVB-10: audit/ is the one audit log (ids only), kept with the state
 ORIG = "media/originals/"  # H10 photo originals <aa>/<sha>.<ext> + <aa>/<sha>.json, aa == sha[:2] (hass/media.py)
@@ -46,6 +55,8 @@ NPP = "media/npp/"  # private listing receipts and immutable, content-addressed 
 MEDIA = (ORIG, NPP)
 FALLBACK_JPEG = r"screenshots/([0-9a-f]{64})\.jpg"  # frozen listing picture, named by its bytes; never arbitrary JPEGs
 FILE_RE = re.compile(r"config\.json|conversation\.sqlite3|inbox\.sqlite3|transcript\.sqlite3|clover/cache\.sqlite3|content\.bundle"
+                     r"|clover/(?:journal|bundles)\.sqlite3|clover/links\.json"
+                     rf"|{RECEIPT}"
                      r"|(drafts|changes)/chg-[0-9A-Za-z_-]+\.json"
                      r"|screenshots/[0-9A-Za-z_-][0-9A-Za-z._-]*\.png"
                      rf"|{FALLBACK_JPEG}"
@@ -114,6 +125,30 @@ def _snapshot(src: Path, dst: Path) -> None:  # a consistent copy via the sqlite
         source.backup(target)
     os.chmod(dst, 0o600)
 
+class _StoreBusy(Exception):
+    """A till store's flock is held by a write in flight and stayed held for LOCK_WAIT seconds."""
+
+@contextlib.contextmanager
+def _store_lock(sdir: Path, rel: str):
+    """Hold the till store's own flock (the one its writer takes: clover/journal.lock, clover/bundles.lock) around the
+    snapshot. The lock file is opened without following a symlink, created 0600 if its writer has not yet, and must be
+    a private regular file of ours (as the writer requires); it is never copied. Waits LOCK_WAIT s, then _StoreBusy."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try: fd = os.open(sdir / LOCKS[rel], flags, 0o600)
+    except OSError as exc: raise UnsafeState(f"unsafe till lock: {LOCKS[rel]} ({exc.strerror})") from None
+    with os.fdopen(fd, "r+b"):
+        if not stat.S_ISREG((st := os.fstat(fd)).st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise UnsafeState(f"unsafe till lock: {LOCKS[rel]}")
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline: raise _StoreBusy(rel) from None
+                time.sleep(0.05)
+        yield
+
 def _inside(path: Path, roots) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
@@ -144,6 +179,13 @@ def _scan(sdir: Path):
                 rel = f"{entry.name}/{sub.name}"
                 if sub.is_symlink(): bad.append(f"symlink: {rel}")
                 elif sub.is_file(follow_symlinks=False) and FILE_RE.fullmatch(rel): files.append(rel)
+                elif sub.is_file(follow_symlinks=False) and rel in LOCKS.values(): continue  # a till store's flock file: never copied
+                elif rel == RECEIPT_DIR and sub.is_dir(follow_symlinks=False):
+                    for receipt in sorted(os.scandir(sub.path), key=lambda e: e.name):
+                        name = f"{rel}/{receipt.name}"
+                        if receipt.is_symlink(): bad.append(f"symlink: {name}")
+                        elif receipt.is_file(follow_symlinks=False) and FILE_RE.fullmatch(name): files.append(name)
+                        else: bad.append(f"unknown entry: {name}")
                 else: bad.append(f"unknown entry: {rel}")
         elif entry.is_file(follow_symlinks=False) and entry.name in (CONFIG, DB, INBOX, TRANSCRIPT): files.append(entry.name)
         elif not (entry.is_file(follow_symlinks=False) and entry.name == LOCK): bad.append(f"unknown entry: {entry.name}")
@@ -245,7 +287,10 @@ def create(state, out, now=None, media=None) -> dict:
                 _write_new(dest / rel, data)
                 hashes[rel] = fallback[1]
                 continue
-            (_snapshot if rel in (DB, INBOX, TRANSCRIPT, CLOVER) else _copy)(src, dest / rel)
+            try:
+                with _store_lock(sdir, rel) if rel in LOCKS else contextlib.nullcontext():
+                    (_snapshot if rel in STORES else _copy)(src, dest / rel)
+            except _StoreBusy: return {"result": "busy", "problems": [f"till store in use: {rel}"]}  # a write is in flight; retry
             hashes[rel] = hashlib.sha256(_read(dest / rel)).hexdigest()
         doc = {"schemaVersion": 1, "createdAt": now.isoformat(), "worktree": cfg["worktree"], "files": hashes}
         commit = _head(Path(cfg["worktree"]))  # inside the writer lock; read-only
@@ -339,7 +384,7 @@ def verify(backup) -> dict:
     doc = _manifest(bdir)
     if doc is None: return {"result": "corrupt", "problems": [f"{MANIFEST} missing or invalid"]}
     files, seen, problems = doc["files"], set(), []
-    walkable = set(DIRS) | {"clover"} | ({"media", ORIG[:-1], NPP[:-1]} if "media" in doc else set())
+    walkable = set(DIRS) | {"clover", RECEIPT_DIR} | ({"media", ORIG[:-1], NPP[:-1]} if "media" in doc else set())
     if stat.S_IMODE(bdir.stat().st_mode) != 0o700: problems.append("mode: backup dir")
     def walk(path: Path, prefix: str) -> None:
         for entry in sorted(os.scandir(path), key=lambda e: e.name):
@@ -367,7 +412,7 @@ def verify(backup) -> dict:
             except (OSError, ValueError): problems.append(f"invalid fallback picture: {rel}")
             if fallback[1] != digest: problems.append(f"hash mismatch: {rel}")
         elif hashlib.sha256(_read(bdir / rel)).hexdigest() != digest: problems.append(f"hash mismatch: {rel}")
-        elif rel in (DB, INBOX, TRANSCRIPT, CLOVER) and not _intact(bdir / rel): problems.append(f"integrity check failed: {rel}")
+        elif rel in STORES and not _intact(bdir / rel): problems.append(f"integrity check failed: {rel}")
         elif rel == CONFIG and (cfg_wt := _config_worktree(bdir / rel)) is None:
             problems.append("config: not a JSON object with a worktree")
         elif rel == CONFIG and cfg_wt != doc["worktree"]: problems.append("config: worktree does not match manifest")

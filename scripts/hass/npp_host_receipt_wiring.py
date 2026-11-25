@@ -169,7 +169,7 @@ def measure():
 
 
 def main(argv=None):
-    argparse.ArgumentParser(description=__doc__).parse_args(argv)
+    argparse.ArgumentParser(description=__doc__, add_help=False).parse_args(argv)
     try:
         dispatched, consumed = measure()
     except ProbeError:

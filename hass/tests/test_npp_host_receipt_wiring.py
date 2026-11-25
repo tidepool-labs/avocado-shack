@@ -136,8 +136,8 @@ class HostReceiptWiringTests(unittest.TestCase):
                 self.assertEqual((rc, lines), (1, ["FAIL check-error", TRAILER]))
 
     def test_c3_usage_exit_2(self):
-        # argparse's own refusal: nothing on stdout, exit 2, for a positional or an unknown flag.
-        for args in (("extra",), ("--unknown",)):
+        # argparse's own refusal: nothing on stdout, exit 2, for a positional, an unknown flag or help (help is disabled, so -h and --help are refused too; an enabled help exits 0 on stdout).
+        for args in (("extra",), ("--unknown",), ("--help",), ("-h",)):
             with self.subTest(args=args):
                 result = run_script(*args)
                 self.assertEqual((result.returncode, result.stdout), (2, ""))

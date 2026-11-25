@@ -142,7 +142,8 @@ class NppFactReplyKeysTests(unittest.TestCase):
         self.assertEqual((code, lines), (1, ["FAIL check-error", FAIL]))
 
     def test_c3_usage_exit_2(self):
-        for args in (["extra"], ["--nope"], ["--help=x"]):
+        # Every argument, help flags included, is an argparse error (no automatic help option).
+        for args in (["extra"], ["--nope"], ["--help=x"], ["--help"], ["-h"]):
             with self.subTest(args=args):
                 code, stdout, stderr = self.cli(*args)
                 self.assertEqual((code, stdout), (2, ""))

@@ -62,7 +62,7 @@ def non_fact_read(got):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="npp_fact_reply_keys.py", description=__doc__,
-                                     allow_abbrev=False)
+                                     allow_abbrev=False, add_help=False)
     parser.parse_args(argv)
 
     findings = 0

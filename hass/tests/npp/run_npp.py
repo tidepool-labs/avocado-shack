@@ -458,6 +458,49 @@ class TapeUnavailable(Exception):
     """An optional recording is absent, not an assertion pass."""
 
 
+# Case 26 observer. hass/screenshot.cjs (and so the renderer pin in MANIFEST.json) stays untouched: the live
+# replay runs it through card_observer.cjs, which reads the card's img alt and the body of the image resource the
+# browser actually loaded, in the same session and at the moment it screenshots the card.
+CARD_OBSERVER = HERE / 'card_observer.cjs'
+HEX64 = re.compile(r'[0-9a-f]{64}')
+
+
+def card_image_findings(alt_lacks, versions, delivered, shots, alts):
+    """Bind each delivered card PNG to the shown product img alt and the loaded image's SHA-256, both versions.
+
+    versions: {n: npp_versions row}; delivered: {outbox_id: [SHA-256 of each PNG sent to chat]};
+    shots: {n: captures whose PNG is that version's card}; alts: {n: imageAlt frozen in that version's draft}.
+    Returns (failures, missing): a wrong or stale observation fails, an absent one is only not-run.
+    """
+    bad, missing = [], []
+    for n in (1, 2):
+        v = versions.get(n)
+        if not v:
+            bad.append(f'v{n} was never delivered, so its picture cannot be bound')
+            continue
+        png = v.get('card_png_sha')
+        if delivered.get(v.get('outbox_id')) != [png]:
+            bad.append(f'v{n} PNG sent to chat is not its frozen card: want {[png]!r}, got {delivered.get(v.get("outbox_id"))!r}')
+        matches = shots.get(n) or []
+        if len(matches) > 1:
+            bad.append(f'v{n} PNG has {len(matches)} captures, so the shown image is ambiguous')
+            continue
+        seen = matches[0].get('image') if matches else None
+        if not (isinstance(seen, dict) and isinstance(seen.get('alt'), str) and
+                all(isinstance(seen.get(k), str) and HEX64.fullmatch(seen[k]) for k in ('image_sha256', 'png_sha256'))):
+            missing.append(f'v{n} has no shown-image observation (img alt, loaded image SHA-256) for its delivered PNG')
+            continue
+        if seen['png_sha256'] != png:
+            bad.append(f'v{n} observation is of another PNG: want {png!r}, got {seen["png_sha256"]!r}')
+        if seen['image_sha256'] != v.get('image_sha256'):
+            bad.append(f'v{n} loaded image SHA-256 is not the delivered image: want {v.get("image_sha256")!r}, '
+                       f'got {seen["image_sha256"]!r}')
+        if seen['alt'] != alts.get(n):
+            bad.append(f'v{n} shown alt is not the frozen alt: want {alts.get(n)!r}, got {seen["alt"]!r}')
+        bad.extend(f'v{n} shown alt contains {term}' for term in alt_lacks if term.casefold() in seen['alt'].casefold())
+    return bad, missing
+
+
 def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
     """Real stages, Conversation and writer, with fixture-only I/O in replay."""
     from unittest.mock import patch
@@ -474,6 +517,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
     asset = pinned[0]['assets']['hass-product-identify/SKILL.md']
     calls, ordinals = Counter(), Counter()
     failures, missing, observed, bodies = [], [], [], []
+    live_images = {}  # out png path -> card_observer.cjs observation of the live browser
     inputs = view.get('inputs', {})
     stubs, polish = inputs.get('stubs', {}), inputs.get('polish', {})
     clock, generation, running = VirtualClock(), 0, set()
@@ -540,7 +584,22 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
 
         def capture(files, target, out, assets=None):
             if browser is not None and recorder is None:
-                return browser.capture(files, target, out, assets=assets)
+                if view['id'] != 26 or not target.get('cardOnly'):
+                    return browser.capture(files, target, out, assets=assets)
+                import tempfile
+                from unittest.mock import patch as patch_script
+                with tempfile.TemporaryDirectory(prefix='npp-observe-') as raw:
+                    sink = Path(raw) / 'image.json'
+                    with patch_script.object(renderer, 'SCRIPT', CARD_OBSERVER):
+                        shot = browser.capture(files, {**target, 'observeTo': str(sink)}, out, assets=assets)
+                    try:
+                        seen = json.loads(sink.read_text())
+                    except (OSError, ValueError):
+                        seen = None
+                if isinstance(seen, dict):
+                    live_images[str(out)] = {'alt': seen.get('alt'), 'image_sha256': seen.get('imageSha256'),
+                                             'png_sha256': seen.get('pngSha256')}
+                return shot
             hashes = {key: sha256(val if isinstance(val, bytes) else val.encode())
                       for key, val in {**files, **(assets or {})}.items()}
             digest = sha256(json.dumps([hashes, target], sort_keys=True).encode())
@@ -633,6 +692,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                 if self.fail:
                     raise OSError('fixture send outage')
                 super().send_card(row, chat, text, png_path, digest)
+                delivered.setdefault(row, []).append(sha256(Path(png_path).read_bytes()))
                 self.receipts[row] = dict(state='confirmed', png_sha256=digest, provider_guid=f'fixture-card-{row}',
                                           confirmed_at=fx.now.isoformat())
 
@@ -640,7 +700,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         fx.transport.fail = any(spec.get('retry_send') for spec in view['turns'])
         current = []
         fx.fetch = lambda _pid, count: current[:count]
-        attempts, late, captures = Counter(), {}, {}
+        attempts, late, captures, delivered = Counter(), {}, {}, {}
         schedule = inputs.get('outbox', {}) if view['id'] == 25 else {}
 
         def outbox_count():
@@ -655,6 +715,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                     captures.setdefault(sha256(Path(shot['png']).read_bytes()), []).append({
                         'description': target['description'] if shot['checks'].get('description') is True else None,
                         'text': shot.get('cardText'), 'assets': {p: sha256(b) for p, b in (assets or {}).items()},
+                        'image': shot.get('cardImage') or live_images.pop(str(out), None),
                     })
                 return shot
 
@@ -830,7 +891,8 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             if 'polish_settled_before_answer' in view['expect'] and observed[1]['polish_ready'] != view['expect']['polish_settled_before_answer']:
                 failures.append('polish did not settle before the price answer')
             decision = photo_polish.decision(fx.root, row['photo_sha']) if row and row['photo_sha'] else None
-            failures += check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures)
+            failures += check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures,
+                                   delivered, missing)
         return failures, {'observed': observed, 'state': state, 'calls': dict(calls), 'missing': sorted(set(missing)), 'gaps': gaps}
     finally:
         fx.doCleanups()
@@ -911,7 +973,8 @@ def check_conversation(expect, observed, state, calls, bodies, replies):
     return bad
 
 
-def check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures):
+def check_card(view, fx, state, versions, decision, gaps, attempts, late, observed, captures, delivered=None,
+               missing=None):
     """Bind delivery and publish claims to stored versions and actual committed bytes."""
     want, bad = view['expect'], []
     db = fx.conv.db
@@ -1098,8 +1161,13 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
             same('applied alt exists', bool(alt), True)
             for term in want['alt_lacks']:
                 same(f'applied alt contains {term}', term.casefold() in alt.casefold(), False)
-            newly_covered.update({'alt_lacks', 'bytes_equal'})
-            gaps.append('needs each delivered PNG bound to the selected product img DOM alt and loaded image SHA; capture currently returns only text and checks')
+            frozen_alts = {n: next((r['after'].get('imageAlt') for r in version_record(versions.get(n, {})).get('records', [])
+                                    if r['collection'] == 'products'), None) for n in (1, 2)}
+            found, absent = card_image_findings(want.get('card_alt_lacks', []), versions, delivered or {},
+                                                {n: shots[n - 1] for n in (1, 2)}, frozen_alts)
+            bad.extend(found)
+            (bad if missing is None else missing).extend(absent)  # no sink for not-run: never a silent pass
+            newly_covered.update({'alt_lacks', 'bytes_equal', 'card_alt_lacks'})
         else:
             description = product.get('description')
             same('applied fallback description', description, want['description_equals'])

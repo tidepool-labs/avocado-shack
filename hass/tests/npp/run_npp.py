@@ -508,6 +508,11 @@ def identify_body(photos):
     return json.dumps({'stage': 'identify', 'photos': ['<photo>'] * len(photos)})
 
 
+def selector_digest(step, prompt, schema, options):
+    """Tape key for one copy-selector call: its pinned step, prompt, schema and eligible public IDs."""
+    return sha256(json.dumps([step, prompt, schema, options], sort_keys=True).encode())
+
+
 def stub_body(stage, *payload):
     """The owner-variable input a taped edit-map stub received (his finance-free remainder and the card fields), scanned
     like any cloud body. The copy selector's input is pinned template/phrase IDs only, so it has no owner part."""
@@ -528,6 +533,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
 
     pinned = pinned or npp.assets()
     asset = pinned[0]['assets']['hass-product-identify/SKILL.md']
+    copy_asset = pinned[0]['assets']['hass-listing-copy/SKILL.md']
     calls, ordinals = Counter(), Counter()
     failures, missing, observed, bodies = [], [], [], []
     live_images = {}  # out png path -> card_observer.cjs observation of the live browser
@@ -565,6 +571,15 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
             return SimpleNamespace(evidence=stubs['identify'])
         create = (lambda: recorder.identify(pinned, photos)) if recorder else None
         return SimpleNamespace(evidence=replay('s2', asset, digest, create, optional=True))
+
+    def select(step, prompt, schema, options):
+        # The production copy selector's whole input is pins and public IDs (no owner words), so it is the tape
+        # key. Record mode calls the real adapter through the capped recorder; replay returns the recorded choice
+        # (including a recorded None). An input the recording does not hold is unobserved, never a guess.
+        digest = selector_digest(step, prompt, schema, options)
+        calls['copy'] += 1
+        create = (lambda: recorder.select(step, prompt, schema, options)) if recorder else None
+        return replay('copy', copy_asset, digest, create, optional=True)
 
     def research_fixture(*_args, **kwargs):
         try:
@@ -644,7 +659,14 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
                 raise TapeMiss('the production stages are not composed')
             fx.conv.npp.stages = port
             port.identifier.read = identify
-            port.selector = (lambda *_a, **_k: stubs['copy']) if 'copy' in stubs else None
+            if 'copy' in stubs:
+                port.selector = lambda *_a, **_k: stubs['copy']
+            elif recorder is not None or 'copy' in tapes.sources:
+                port.selector = select
+            else:
+                # A recording made before the selector was taped holds no choice to replay: the Writer's
+                # local default wording, exactly as before (never an inferred or synthetic selection).
+                port.selector = None
 
             def mapped(_prompt, _schema, text, fields):
                 bodies.append(stub_body('edit_map', text, fields))
@@ -1573,11 +1595,23 @@ class RecordCaps:
 class Recorder:
     """Only the attended CLI attaches paid ports; count calls before dispatch."""
 
-    def __init__(self, caps, *, codex=None, images=None):
+    def __init__(self, caps, *, codex=None, images=None, selector_transport=None):
         from hass import cloud_codex, photo_polish
         self.caps, self.entries = caps, {}
         self.codex = codex if codex is not None else cloud_codex.Runner()
         self.images = images if images is not None else photo_polish.HermesTransport()
+        self.selector_transport = selector_transport
+
+    def select(self, step, prompt, schema, options):
+        """The production copy selector (copy.codex_selector), each transport call counted against the Codex cap."""
+        from hass.npp import copy as npp_copy
+
+        def counted(url, body, headers, timeout):
+            self.caps.take('codex')
+            send = self.selector_transport or npp_copy.CodexTransport(step['effort'])
+            return send(url, body, headers, timeout)
+
+        return npp_copy.codex_selector(transport=counted)(step, prompt, schema, options)
 
     def identify(self, pinned, photos):
         from hass.npp.identify import Identifier
@@ -1685,6 +1719,8 @@ def main(argv=None, environ=None):
             recorder.save(args.record_to)
         if args.recorded:
             fingerprint['recorded_sha256'] = sha256(args.recorded.read_bytes())
+            # Report, never score: a recording without selector tapes replays the Writer's local default wording.
+            fingerprint['copy_selector'] = 'taped' if 'copy' in read_json(args.recorded) else 'not taped: local default wording'
     except (ManifestMismatch, ValueError, OSError, RuntimeError) as error:
         print(json.dumps({"error": str(error)}))
         return 2

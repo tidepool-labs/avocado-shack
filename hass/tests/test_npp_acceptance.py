@@ -701,6 +701,23 @@ class PrivateIntakeObserverTests(unittest.TestCase):
         for want in ({"cost": "1.00"}, {"cost": "one", "quantity": "50"}, {**self.WANT, "price": "3"}):
             self.assertIn("must name", run_npp.private_intake_findings(want, [final], final, "published")[0])
 
+    def test_a_non_object_or_non_finite_expectation_is_a_case_failure_not_a_crash_or_a_pass(self):
+        # Contract: a malformed private_intake_saved fixture is reported as a case finding. Bugs it catches: a
+        # null/list/string expectation raising AttributeError and aborting the replay, and "Infinity" parsing as a
+        # Decimal that equals a saved row holding the same non-finite value, so a bad fixture passes.
+        db, sdir = self.store()
+        (sdir / "item-intake.jsonl").write_text(json.dumps(
+            {"draft": "ABCD", "status": "saved", "answers": {"cost": "Infinity", "qty": "NaN"}}) + "\n")
+        final = self.view(db, sdir)
+        for want in (None, [], ["cost", "quantity"], "cost", 5, True, {},
+                     {"cost": "Infinity", "quantity": "NaN"}, {"cost": "Infinity", "quantity": "50"},
+                     {"cost": "-Infinity", "quantity": "50"}, {"cost": "1.00", "quantity": "NaN"},
+                     {"cost": float("inf"), "quantity": 50}, {"cost": [1], "quantity": {"a": 1}}):
+            with self.subTest(want=want):
+                found = run_npp.private_intake_findings(want, [final], final, "published")
+                self.assertEqual(len(found), 1)
+                self.assertIn("must name", found[0])
+
     def test_the_store_reader_ignores_a_symlinked_file_and_bad_json(self):
         db, sdir = self.store()
         db.execute("INSERT INTO intake_pending VALUES ('X', 'not json', 't')")

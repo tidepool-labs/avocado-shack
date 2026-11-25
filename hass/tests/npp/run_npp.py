@@ -1431,12 +1431,15 @@ def private_intake_findings(want, snapshots, final, terminal):
 
     def number(value):
         try:
-            return Decimal(str(value)) if value is not None and not isinstance(value, bool) else None
+            parsed = Decimal(str(value)) if value is not None and not isinstance(value, bool) else None
         except InvalidOperation:
             return None
+        return parsed if parsed is not None and parsed.is_finite() else None
 
-    expected = {'cost': number(want.get('cost')), 'qty': number(want.get('quantity'))}
-    if None in expected.values() or set(want) - {'cost', 'quantity'}:
+    if not isinstance(want, dict) or set(want) != {'cost', 'quantity'}:
+        return ['private_intake_saved: the fixture must name exactly a numeric cost and quantity']
+    expected = {'cost': number(want['cost']), 'qty': number(want['quantity'])}
+    if None in expected.values():
         return ['private_intake_saved: the fixture must name exactly a numeric cost and quantity']
     if not isinstance(final, dict) or not snapshots or not isinstance(snapshots[0], dict):
         return ['private_intake_saved: the private intake store was not observed (turn zero or final view missing)']

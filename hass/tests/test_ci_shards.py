@@ -3,6 +3,10 @@ changed-files -> test-modules map with its FULL fallbacks, and the aggregate ver
 import contextlib
 import io
 import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +72,114 @@ class PartitionTest(unittest.TestCase):
         self.assertIn("missing: c", text)
         self.assertIn("extra: d", text)
         self.assertIn("duplicated: b", text)
+
+
+PARALLEL_MODULE = '''\
+import os, shutil, subprocess, tempfile, time, unittest
+from pathlib import Path
+
+SHARED = Path(os.environ["CI20_TEST_ROOT"])
+CHECKOUT = Path(__file__).resolve().parents[2]
+SCENARIO = os.environ["CI20_SCENARIO"]
+
+
+def wait_for(name):
+    end = time.monotonic() + 10
+    while not (SHARED / name).exists():
+        if time.monotonic() > end:
+            raise AssertionError("timed out waiting for " + name)
+        time.sleep(0.02)
+
+
+def status():
+    return subprocess.run(["git", "status", "--porcelain"], cwd=CHECKOUT, capture_output=True, text=True, check=True).stdout
+
+
+class Work(unittest.TestCase):
+    def test_one(self):
+        (SHARED / __name__).write_text(f"{tempfile.gettempdir()}|{CHECKOUT}|{os.getcwd()}")
+        if __name__.endswith("test_a"):
+            # the sibling: a default-named scratch dir inside ITS checkout, created after the observer's first look
+            wait_for("b-before")
+            scratch = Path(tempfile.mkdtemp(dir=CHECKOUT))
+            (scratch / "file").touch()  # git status lists an untracked dir only once it holds a file
+            (SHARED / "a-ready").touch()
+            try:
+                wait_for("b-done")
+            finally:
+                shutil.rmtree(scratch)
+            return
+        # the observer: the unfiltered "this run left the checkout as it found it" assert
+        try:
+            before = status()
+            (SHARED / "b-before").touch()
+            wait_for("a-ready")
+            if SCENARIO == "leak":
+                (Path(tempfile.mkdtemp(dir=CHECKOUT)) / "shot.png").touch()  # same shape as the sibling's, but left behind by the code under test
+            self.assertEqual(status(), before)
+        finally:
+            (SHARED / "b-done").touch()
+'''
+
+
+class ParallelRunTest(unittest.TestCase):
+    """Each --workers lane runs in its own checkout, so one lane's scratch is invisible to the other's whole-checkout status.
+
+    Protects the clean-checkout asserts in test_preview/test_fixture_chat/test_demo_browser_photo, which stay unfiltered.
+    Bugs that fail it: lanes sharing one checkout (the sibling's dir shows in the observer's status), a runner that hides
+    every untracked dir (the observer's own leak passes), a dropped lane, a shared temporary root, an ignored failure.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root, self.shared = Path(tmp.name) / "repo", Path(tmp.name) / "shared"
+        self.shared.mkdir()
+        tests = self.root / "hass" / "tests"
+        tests.mkdir(parents=True)
+        (tests / "__init__.py").touch()
+        (tests.parent / "__init__.py").touch()
+        shutil.copyfile(cs.__file__, tests / "ci_shards.py")
+        self.names = ["test_a", "test_b"]
+        for name in self.names:
+            (tests / f"{name}.py").write_text(PARALLEL_MODULE, encoding="utf-8")
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "base")):
+            subprocess.run(["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                           check=True, capture_output=True)
+
+    def run_scenario(self, scenario):
+        rec = self.root.parent / f"record-{scenario}"
+        run = subprocess.run([sys.executable, "-B", str(self.root / "hass" / "tests" / "ci_shards.py"), "run", "--shard", "0",
+                              "--workers", "2", "--record-dir", str(rec)],
+                             cwd=self.root, capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "CI20_TEST_ROOT": str(self.shared), "CI20_SCENARIO": scenario,
+                                  "HASS_PLAN": json.dumps({"tier": "full", "shards": [self.names]})})
+        seen = {name: self.shared.joinpath(f"hass.tests.{name}").read_text().split("|") for name in self.names}
+        for marker in self.shared.iterdir():
+            marker.unlink()
+        return run, json.loads((rec / "0.json").read_text()), (rec / "0.log").read_text(), seen
+
+    def untracked(self):
+        out = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"], check=True, capture_output=True, text=True)
+        return out.stdout
+
+    def test_sibling_scratch_is_invisible_but_a_leak_in_the_observing_checkout_fails(self):
+        run, result, _, seen = self.run_scenario("sibling")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual((result["modules"], result["tests_run"], result["ok"]), (self.names, 2, True))
+        (tmp_a, checkout_a, cwd_a), (tmp_b, checkout_b, cwd_b) = (seen[name] for name in self.names)
+        self.assertNotEqual((tmp_a, checkout_a), (tmp_b, checkout_b))
+        self.assertEqual((cwd_a, cwd_b), (checkout_a, checkout_b))
+        self.assertNotIn(str(self.root), (checkout_a, checkout_b))
+        self.assertEqual(self.untracked(), "")  # the parent checkout is nobody's worker checkout and keeps no worktree
+        run, result, log, _ = self.run_scenario("leak")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual((result["modules"], result["tests_run"], result["ok"], result["failures"]),
+                         (self.names, 2, False, 1))
+        self.assertIn("=" * 70 + "\nFAIL: test_one (hass.tests.test_b", log)
+        self.assertEqual(self.untracked(), "")
+        listed = subprocess.run(["git", "-C", str(self.root), "worktree", "list"], capture_output=True, text=True).stdout
+        self.assertEqual(len(listed.splitlines()), 1)  # worker checkouts are removed after the run
 
 
 class InventoryTest(unittest.TestCase):

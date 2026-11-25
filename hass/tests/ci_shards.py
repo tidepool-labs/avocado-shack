@@ -30,6 +30,11 @@ Commands:
   plan   --event E [--base REV] [--shards N]  prints the plan, its partition and the union proof, and writes
                                               plan/tier/shards to $GITHUB_OUTPUT
   run    --shard K|quick --record-dir D       runs one shard of $HASS_PLAN and writes D/<K>.json and D/<K>.log
+         --workers 2 (full only)             packs the shard's modules by measured weight into two local processes,
+                                             each in its own detached `git worktree` checkout of HEAD (clean tracked
+                                             tree required) with its own TMPDIR, so tests that look at the whole
+                                             checkout never see a sibling's scratch. Tests must still use temporary
+                                             paths and ephemeral ports; do not mutate the checkout.
   verify --record-dir D                       the aggregate: recomputes the plan, checks it against $HASS_PLAN,
                                               then checks the records (every planned module ran exactly once, test
                                               count, verdicts) and reprints failing shard logs
@@ -37,15 +42,20 @@ Commands:
 import argparse
 import ast
 import collections
+import contextlib
 import fnmatch
 import json
+import multiprocessing
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import cast
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parents[1]
@@ -457,6 +467,93 @@ def shard_keys(plan):
     return ["quick"] if plan["tier"] == "affected" else [str(i) for i in range(len(plan["shards"]))]
 
 
+def run_modules(names, stream, root=ROOT):
+    sys.path.insert(0, str(root))
+    suite = unittest.defaultTestLoader.loadTestsFromNames([PREFIX + n for n in names])
+    runner = unittest.TextTestRunner(stream=stream, verbosity=2, resultclass=TimedResult)
+    result = cast(TimedResult, runner.run(suite))
+    return {"modules": names, "tests_run": result.testsRun, "failures": len(result.failures),
+            "errors": len(result.errors), "skipped": len(result.skipped),
+            "unexpected_successes": len(result.unexpectedSuccesses),
+            "ok": result.wasSuccessful() and result.testsRun > 0,
+            "module_seconds": {k[len(PREFIX):] if k.startswith(PREFIX) else k: round(v, 1)
+                               for k, v in sorted(result.seconds.items())}}
+
+
+def git_here(*args):
+    run = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    if run.returncode:
+        raise ValueError(f"git {' '.join(args)} failed: {run.stderr.strip()}")
+    return run.stdout
+
+
+@contextlib.contextmanager
+def worker_checkouts(count):
+    """One detached checkout of HEAD per worker, so a worker's whole-checkout `git status` never sees a sibling's scratch.
+
+    Several tests make a tempfile dir inside the checkout, and others assert the checkout is unchanged after they run; in one
+    shared checkout those collide. A worker runs, and its tests resolve REPO_ROOT, inside its own checkout.
+    """
+    if git_here("status", "--porcelain", "--untracked-files=no").strip():
+        raise ValueError("--workers needs a clean tracked tree: each worker runs a checkout of HEAD, so commit or stash first")
+    made = []
+    with tempfile.TemporaryDirectory(prefix="checkouts-") as base:
+        try:
+            for i in range(count):
+                made.append(Path(base) / str(i) / "checkout")
+                git_here("worktree", "add", "-q", "--detach", str(made[-1]), "HEAD")
+            yield made
+        finally:
+            for path in made:
+                subprocess.run(["git", "-C", str(ROOT), "worktree", "remove", "--force", str(path)], capture_output=True)
+            subprocess.run(["git", "-C", str(ROOT), "worktree", "prune"], capture_output=True)
+
+
+def run_worker(names, log_path, checkout):
+    # Keep both Python's tempfile cache and child commands inside this worker's own TMPDIR and checkout.
+    prior, cached, cwd = os.environ.get("TMPDIR"), tempfile.tempdir, os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="w") as tmp:
+        os.environ["TMPDIR"] = tempfile.tempdir = tmp
+        os.chdir(checkout)
+        try:
+            with log_path.open("w", encoding="utf-8") as log:
+                result = run_modules(names, log, Path(checkout))
+            hass_file = Path(sys.modules["hass"].__file__ or "").resolve()
+            if not hass_file.is_relative_to(Path(checkout).resolve()):
+                raise ValueError(f"worker imported {hass_file}, outside its checkout {checkout}")
+            return result
+        finally:
+            os.chdir(cwd)
+            tempfile.tempdir = cached
+            if prior is None:
+                os.environ.pop("TMPDIR", None)
+            else:
+                os.environ["TMPDIR"] = prior
+
+
+def run_parallel(names, stream, rec, workers):
+    groups = partition(names, workers, load_weights())
+    # Merge only after every subprocess returns; a crash cannot yield a successful shard record.
+    with tempfile.TemporaryDirectory(prefix="workers-", dir=rec) as tmp:
+        logs = [Path(tmp) / f"{i}.log" for i in range(len(groups))]
+        with worker_checkouts(len(groups)) as checkouts, \
+                ProcessPoolExecutor(max_workers=len(groups), mp_context=multiprocessing.get_context("spawn")) as pool:
+            results = list(pool.map(run_worker, groups, logs, checkouts))
+        for path in logs:
+            with path.open(encoding="utf-8") as log:
+                for part in iter(lambda: log.read(64 * 1024), ""):
+                    stream.write(part)
+    ran = [r["modules"] for r in results]
+    if ran != groups or not union_proof(names, ran)[0]:
+        raise ValueError("worker modules differ from the shard plan")
+    timing = collections.Counter()
+    for result in results:
+        timing.update(result["module_seconds"])
+    return {"modules": names, "ok": all(r["ok"] for r in results), "module_seconds": dict(timing),
+            **{key: sum(r[key] for r in results)
+               for key in ("tests_run", "failures", "errors", "skipped", "unexpected_successes")}}
+
+
 def cmd_run(a):
     plan = read_plan()
     keys = shard_keys(plan)
@@ -466,29 +563,24 @@ def cmd_run(a):
     names = plan["shards"][keys.index(a.shard)]
     known = set(all_modules())
     unknown = sorted(set(names) - known)
-    if unknown or not names:
-        print(f"::error::shard {a.shard}: empty or unknown modules {unknown}", flush=True)
+    if unknown or not names or len(names) != len(set(names)):
+        print(f"::error::shard {a.shard}: empty, duplicate, or unknown modules {unknown}", flush=True)
         return 1
     rec = Path(a.record_dir)
     rec.mkdir(parents=True, exist_ok=True)
     print(f"hass shard {a.shard} ({plan['tier']}): {len(names)} modules: {' '.join(names)}", flush=True)
-    sys.path.insert(0, str(ROOT))
     t0 = time.perf_counter()
     with open(rec / f"{a.shard}.log", "w", encoding="utf-8") as log:
         stream = Tee(sys.stdout, log)
-        suite = unittest.defaultTestLoader.loadTestsFromNames([PREFIX + n for n in names])
-        result = unittest.TextTestRunner(stream=stream, verbosity=2, resultclass=TimedResult).run(suite)
-    ok = result.wasSuccessful() and result.testsRun > 0
-    record = {"shard": a.shard, "tier": plan["tier"], "modules": names, "tests_run": result.testsRun,
-              "failures": len(result.failures), "errors": len(result.errors), "skipped": len(result.skipped),
-              "unexpected_successes": len(result.unexpectedSuccesses), "ok": ok,
-              "seconds": round(time.perf_counter() - t0, 1),
-              "module_seconds": {k[len(PREFIX):] if k.startswith(PREFIX) else k: round(v, 1)
-                                 for k, v in sorted(result.seconds.items())}}
+        if a.workers > 1 and plan["tier"] == "full" and len(names) > 1:
+            record = run_parallel(names, stream, rec, a.workers)
+        else:
+            record = run_modules(names, stream)
+    record.update(shard=a.shard, tier=plan["tier"], seconds=round(time.perf_counter() - t0, 1))
     (rec / f"{a.shard}.json").write_text(json.dumps(record, indent=1, sort_keys=True), encoding="utf-8")
-    print(f"hass shard {a.shard}: ran {result.testsRun} tests in {record['seconds']}s, "
-          f"{'OK' if ok else 'FAILED'}", flush=True)
-    return 0 if ok else 1
+    print(f"hass shard {a.shard}: ran {record['tests_run']} tests in {record['seconds']}s, "
+          f"{'OK' if record['ok'] else 'FAILED'}", flush=True)
+    return 0 if record["ok"] else 1
 
 
 # ---------------------------------------------------------------- verify (aggregate job 'check')
@@ -594,6 +686,7 @@ def main(argv=None):
     r = sub.add_parser("run")
     r.add_argument("--shard", required=True)
     r.add_argument("--record-dir", required=True)
+    r.add_argument("--workers", type=int, choices=(1, 2), default=1)
     v = sub.add_parser("verify")
     v.add_argument("--record-dir", required=True)
     v.add_argument("--base", default="HEAD^1")

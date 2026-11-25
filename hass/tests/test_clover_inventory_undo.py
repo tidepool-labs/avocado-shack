@@ -29,6 +29,31 @@ def site_product(word):
     return SiteProduct(PRODUCT, "Blue mug", "", None, "general", "", word, "active")
 
 
+class FakeSite:
+    """The website side of the bundle saga: it numbers each prepared change and says whether it went live (as `test_item_both.Site`)."""
+
+    def __init__(self):
+        self.settings, self.conv, self.drafts, self.live = {}, None, {}, set()
+
+    def stopped(self):
+        return False
+
+    def prepare(self, ops):
+        cid = f"chg-{len(self.drafts)}"
+        self.drafts[cid] = list(ops)
+        return {"result": "ok", "draft": {"change_id": cid, "draft_hash": "fixture-hash"}}
+
+    def apply(self, cid, digest, chat):
+        self.live.add(cid)
+        return {"result": "applied"}
+
+    def went_live(self, cid):
+        return cid in self.live
+
+
+SITE_OPS = [{"op": "product.set_availability", "args": {"id": PRODUCT, "available": "yes"}}]   # what a counted create tells the site
+
+
 class Rig:
     """A fake till (one seeded item counted 12), the real apply engine and bundle saga on a temp state folder: the reverse is run
     against what really happened, not against a hand-written journal."""
@@ -52,7 +77,7 @@ class Rig:
         self.engine = ApplyEngine(self.root, self.cfg, lambda token: CloverWriteClient(MERCHANT, token, self.fake, min_interval=0,
                                                                                        max_retries=0), mike=tuple(self.owner.values()))
         self.journal = bundle.BundleJournal(self.root)
-        self.site = SimpleNamespace(settings={}, conv=None, stopped=lambda: False)
+        self.site = FakeSite()
 
     def link_writer(self, product_id, clover_id, sku):
         links.write(links.table(self.root), {**self.links(), product_id: {"cloverId": clover_id, "sku": sku}})
@@ -61,18 +86,18 @@ class Rig:
         path = links.table(self.root)
         return json.loads(path.read_text("utf-8")) if path.exists() else {}
 
-    def applied(self, draft, link=None):
+    def applied(self, draft, link=None, site_ops=()):
         """Propose and apply one bundle, the way the owner's one yes does; returns the journal row."""
-        code, _ = bundle.propose(site_ops=(), till_draft=draft, link=link, journal=self.journal, engine=self.engine, site=self.site,
+        code, _ = bundle.propose(site_ops=site_ops, till_draft=draft, link=link, journal=self.journal, engine=self.engine, site=self.site,
                                  **self.owner)
         state, _ = bundle.apply(code, journal=self.journal, engine=self.engine, site=self.site, link_writer=self.link_writer,
                                 now=self.engine.clock(), **self.owner)
         self.case.assertEqual(state, "done")
         return self.journal.get(code)
 
-    def create_mug(self, quantity=30):
+    def create_mug(self, quantity=30, site_ops=SITE_OPS):
         draft = drafts.build_create_counted("Blue mug", "14.00 each", None, quantity, [], self.cfg)
-        return self.applied(draft, {"product_id": PRODUCT, "sku": draft.after["sku"]})
+        return self.applied(draft, {"product_id": PRODUCT, "sku": draft.after["sku"]}, site_ops)
 
     def set_count(self, quantity, link=None):
         return self.applied(drafts.build_set_stock(self.item(SEED), quantity, self.cfg), link)
@@ -83,8 +108,8 @@ class Rig:
     def stock(self, item_id):
         return self.reader.get_item(item_id)["itemStock"]["quantity"]
 
-    def reverse(self, row, site=None):
-        return undo.reverse(row, self.item(row["clover_id"]), site, self.links())
+    def reverse(self, row, site=None, **kw):
+        return undo.reverse(row, self.item(row["clover_id"]), site, self.links(), **kw)
 
     def run_till_half(self, rev):
         code, _ = self.engine.offer(rev.till, **self.owner)
@@ -95,13 +120,6 @@ class Rig:
 
     def writes(self):
         return [entry for entry in self.fake.log if entry[0] in ("POST", "PUT")]
-
-
-def with_site_words(row, before):
-    """The journalled website words of a change set: the product showed `before`, the change set made it Available today."""
-    entry = row["undo_result"]
-    return {**row, "undo_result": {**entry, "before": {**entry["before"], "site": {"id": PRODUCT, "available": before}},
-                                   "after": {**entry["after"], "site": {"id": PRODUCT, "available": "yes"}}}}
 
 
 class InventoryUndoTests(NoNetwork):
@@ -115,21 +133,34 @@ class InventoryUndoTests(NoNetwork):
         rig = self.rig
         row = rig.create_mug()
         item_id, entry = row["clover_id"], row["undo_result"]
-        rev = rig.reverse(with_site_words(row, "no"), site_product("yes"))
+        rev = rig.reverse(row, site_product("yes"))
         self.assertIsInstance(rev, undo.Reverse)
         self.assertEqual((rev.till.kind, rev.till.item_id, rev.till.undo_of), ("set_hidden", item_id, entry["change_id"]))
         self.assertEqual(rev.till.requests, ({"method": "POST", "path": f"/items/{item_id}", "json": {"hidden": True}},))
         self.assertEqual(rev.unlink, {"product_id": PRODUCT, "clover_id": item_id, "sku": entry["after"]["sku"]})
-        self.assertEqual(rev.site_ops, ({"op": "product.set_availability", "args": {"id": PRODUCT, "available": "no"}},))
+        # the REAL journal row: the website half is recorded as the bundle's own change, not in the till result, and the reverse puts
+        # that whole change back (a reverse that read only `undo_result` would hide the item and leave the website word changed)
+        self.assertNotIn("site", entry["after"])
+        self.assertEqual((row["site"], row["bundle"]["site_ops"]), ("live", SITE_OPS))
+        self.assertEqual(rev.site_ops, ({"op": "history.revert", "args": {"changeId": row["change_id"]}},))
         self.assertEqual(rev.till.site_ops, ())   # the engine verifies only what it wrote
         self.assertTrue(rev.hides)
-        # a product that had no word gets its word taken off, never an invented one
-        self.assertEqual(rig.reverse(with_site_words(row, None), site_product("yes")).site_ops,
-                         ({"op": "product.clear_availability", "args": {"id": PRODUCT}},))
-        # a newer site change is never overwritten; a journal with no site words changes no site word
-        self.assertEqual(rig.reverse(with_site_words(row, "no"), site_product("limited")).site_ops, ())
-        self.assertEqual(rig.reverse(row, site_product("yes")).site_ops, ())
-
+        # it is the very inverse the bundle saga's own undo drafts for that change
+        saga = Rig(self)
+        saga_row = saga.create_mug()
+        code, _ = bundle.undo(saga_row["bundle"]["code"], journal=saga.journal, engine=saga.engine, site=saga.site, **saga.owner)
+        self.assertEqual(saga.site.drafts[saga.journal.get(code)["change_id"]], list(saga.reverse(saga_row).site_ops))
+        # a bundle with no website half has no website part, and one whose website half never ran has nothing to put back
+        plain = Rig(self).create_mug(site_ops=())
+        self.assertEqual(rig.reverse(plain).site_ops, ())
+        self.assertEqual(rig.reverse({**row, "site": "pending"}).site_ops, ())
+        # a website half the journal cannot place is refused (never guessed); the site's own answer settles it
+        unsure = {**row, "site": "not-confirmed"}
+        refused = rig.reverse(unsure)
+        self.assertIsInstance(refused, undo.Refusal)
+        self.assertEqual(refused.reason, undo.SITE_UNSURE)
+        self.assertEqual(rig.reverse(unsure, went_live=lambda cid: cid == row["change_id"]).site_ops, rev.site_ops)
+        self.assertEqual(rig.reverse(unsure, went_live=lambda cid: False).site_ops, ())
         # a count change: the old count, from drafts.build_undo, with no link part
         counted = rig.set_count(30)
         rev = rig.reverse(counted)
@@ -181,7 +212,7 @@ class InventoryUndoTests(NoNetwork):
     def test_c3_preview_names_all(self):
         # C3: a preview that lists only the hide, calls it a delete, hides that the count record stays, or reuses the first change's code
         # makes the owner say yes to something other than the exact reverse.
-        row = with_site_words(self.rig.create_mug(), "no")
+        row = self.rig.create_mug()
         rev = self.rig.reverse(row, site_product("yes"))
         text = undo.render(rev, "zz99")
         self.assertEqual(text.split("\n")[-1], yes_line("zz99"))
@@ -192,7 +223,7 @@ class InventoryUndoTests(NoNetwork):
             self.assertIn(part, text)
         self.assertIn("Register: Blue mug (SKU AS-GEN-BLUE-MUG-01) goes from showing to hidden", text)
         self.assertIn("Link: removes the link between website product blue-mug and this till item", text)
-        self.assertIn("Website: puts Blue mug back to Sold out", text)
+        self.assertIn(f"Website: puts the website back as it was before this change (undoes website change {row['change_id']})", text)
         self.assertIn("hidden, not deleted", text)
         self.assertIn("count record stays", text)
         self.assertIn("still says 30", text)

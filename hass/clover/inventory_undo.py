@@ -1,7 +1,8 @@
 """HCI-10: the exact reverse of an applied till inventory change. This module only PLANS and PREVIEWS the reverse; it sends nothing.
 
 `undo <code>` reverses what a bundle did and nothing else. Clover has no delete here (hide only) and cannot remove a count record, so the
-reverse of "new item with 30" is: hide the item on the register, remove its link, and put back the website word the change set. The preview
+reverse of "new item with 30" is: hide the item on the register, remove its link, and revert the website change the bundle made (the
+journalled `history.revert`, never a recomputed word). The preview
 says so plainly. The reverse is a NEW change with its own code and its own `yes` (the till engine and bundle saga carry it out, cap-exempt,
 exactly as they carry out any other undo); `finish` is the one step that happens after the till half has read back.
 
@@ -36,7 +37,7 @@ class Reverse:
     label: str                 # the item as the owner knows it
     item_id: "str | None"       # the till item (None for a link-only reverse)
     till: "d.Draft | None"      # the till draft (hide, old count, ...), without site ops: the engine verifies exactly what it wrote
-    site_ops: tuple            # website ops that put the stock word back (the existing site path applies them)
+    site_ops: tuple            # website ops that undo the bundle's website half (its `history.revert`; the existing site path applies them)
     unlink: "dict | None"       # {product_id, clover_id, sku}: the link that finish() removes
     parts: tuple               # every reversed part, in plain words
     hides: bool                # the reverse hides the item (a created item is never deleted)
@@ -61,12 +62,28 @@ def _check_created(entry, current, counted, count_known):
         raise d.DraftRefused(CHANGED_AGAIN)
 
 
-def _site_part(word, site_product):
-    if word == d.CLEAR:
-        return ({"op": "product.clear_availability", "args": {"id": site_product.id}},
-                f"Website: takes the stock word off {site_product.name}, as it was before")
-    return ({"op": "product.set_availability", "args": {"id": site_product.id, "available": word}},
-            f"Website: puts {site_product.name} back to {d.SITE_WORDS[word]}")
+SITE_UNSURE = ("I can't tell whether the website change from that bundle went live, so I can't undo it safely. Nothing was changed. "
+               "Check the website, then ask me again.")
+
+
+def _bundle_site(row, went_live):
+    """The website half of the bundle, as the bundle journal really recorded it: its site ops ran under `row['change_id']`, and the exact
+    inverse is the existing `history.revert` of that change (the same op `bundle.undo` drafts; the site path refuses it, with no draft, if a
+    later edit touched those records). Returns (ops, parts). No site ops, or ops that never ran, mean nothing to put back. When the journal
+    cannot say whether the change landed (`went_live(change_id)` is the site's own answer, if given) the reverse is refused, never guessed."""
+    if not row["bundle"].get("site_ops"):
+        return (), []
+    change_id, site = row.get("change_id"), row.get("site")
+    if site in ("intent", "not-confirmed"):
+        if not callable(went_live) or not change_id:
+            raise d.DraftRefused(SITE_UNSURE)
+        site = "live" if went_live(change_id) else "never"
+    if site != "live":
+        return (), []   # pending / confirmed not live: the website never changed
+    if not change_id:
+        raise d.DraftRefused(SITE_UNSURE)
+    return (({"op": "history.revert", "args": {"changeId": change_id}},),
+            [f"Website: puts the website back as it was before this change (undoes website change {change_id})"])
 
 
 def _unlink(row, entry, links):
@@ -82,7 +99,7 @@ def _unlink(row, entry, links):
     return {"product_id": link["product_id"], "clover_id": item_id, "sku": held.get("sku", "")}
 
 
-def _plan(row, current, site_product, links, config):
+def _plan(row, current, site_product, links, config, went_live=None):
     if not isinstance(row, dict) or row.get("state") not in APPLIED or not isinstance(row.get("bundle"), dict):
         raise d.DraftRefused(NOTHING)
     entry = row.get("undo_result")
@@ -90,6 +107,7 @@ def _plan(row, current, site_product, links, config):
     if asked and not entry:
         raise d.DraftRefused("I have no record of what the till change did, so I can't undo it safely. Nothing was changed.")
     unlink = _unlink(row, entry, links)
+    bundle_ops, bundle_parts = _bundle_site(row, went_live)   # the website half the journal really recorded
     till, site_ops, parts, hides, label, item_id, count = None, (), [], False, "the link", None, "not counted"
     if entry:
         item_id = entry["result_item_id"]
@@ -102,32 +120,33 @@ def _plan(row, current, site_product, links, config):
             _check_created(entry, current, counted, row.get("till") == "applied" and row["state"] != "partial")
         draft = d.build_undo(entry, current, config, site_product=site_product)   # also refuses when modifiedTime / stock moved
         if created:
-            word = d._site_restore(entry, site_product)
             parts.append(f"Register: {d._label(current)} goes from showing to hidden")
-            if word:
-                op, part = _site_part(word, site_product)
-                site_ops, parts = (op,), parts + [part]
             hides = True
         else:
-            site_ops = draft.site_ops
-            parts += [line.strip() for line in draft.lines[1:] if line.strip()]
+            # a count change journalled with its own website word (chat path) restores that word; a bundle's website half is reverted whole
+            site_ops = () if bundle_ops else draft.site_ops
+            parts += [line.strip() for line in draft.lines[1:] if line.strip() and not (bundle_ops and line.strip().startswith("Website:"))]
         till = replace(draft, site_ops=(), before={k: v for k, v in draft.before.items() if k != "site"},
                        after={k: v for k, v in draft.after.items() if k != "site"})
+    if bundle_ops:
+        site_ops, parts = bundle_ops, parts + bundle_parts
     if unlink:
         parts.append(f"Link: removes the link between website product {unlink['product_id']} and this till item")
-    if till is None and not unlink:
+    if till is None and not unlink and not site_ops:
         raise d.DraftRefused(NOTHING)
     return Reverse(label, item_id, till, tuple(site_ops), unlink, tuple(parts), hides, count, row["bundle"]["code"])
 
 
-def reverse(bundle_row, current_item, site_product, links, *, config=None):
+def reverse(bundle_row, current_item, site_product, links, *, config=None, went_live=None):
     """The exact reverse of one applied bundle (a journal row: `BundleJournal.get(code)`), or a Refusal.
     `current_item` is the till item read right now (None when it cannot be found), `site_product` the website product or None, `links`
     the private link table ({product id: {cloverId, sku}}). A created counted item is hidden (never deleted), its link removed and the
-    website word the change set put back; a count change gets its old count back; a link added to an existing item is removed. If the till
+    bundle's own website change reverted (`history.revert` of the journalled `change_id`, the same inverse `bundle.undo` drafts); a count
+    change gets its old count back; a link added to an existing item is removed. `went_live(change_id)` is the site's answer, used only
+    when the journal row says the website half was left uncertain; with no answer that bundle is refused. If the till
     item changed after the change (count, price, SKU, hidden, modifiedTime) it refuses with the "changed again" sentence and prepares nothing."""
     try:
-        return _plan(bundle_row, current_item, site_product, links, config)
+        return _plan(bundle_row, current_item, site_product, links, config, went_live)
     except d.DraftRefused as exc:
         return Refusal(str(exc))
 

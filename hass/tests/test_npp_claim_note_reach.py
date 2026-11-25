@@ -217,6 +217,16 @@ class ClaimNoteReachTests(unittest.TestCase):
         self.assertEqual([row[:4] for row in rows], [("organic", False, False, False), ("health", False, False, False),
                                                      ("no_claim", True, True, True)])
 
+    def test_c8_one_printed_claim_read_at_two_widths_is_one_claim(self):
+        # C8: S2 may read the same printed claim as 'Immune' and 'Immune support'. Bug it catches: both reach the Writer,
+        # and the owner note says 'left off: health or award wording, immune support' for one claim on the label.
+        widest = self.module.stages._widest_claims
+        self.assertEqual(widest(["Immune", "Immune support"]), ["Immune support"])
+        self.assertEqual(widest(["Organic", "USDA Organic", "Non-GMO", "non-gmo"]), ["USDA Organic", "Non-GMO"])
+        self.assertEqual(widest(["Immune support", "Supports immunity"]), ["Immune support", "Supports immunity"])
+        self.assertEqual(widest(["Raw", "Unfiltered", "", "!!"]), ["Raw", "Unfiltered"])
+        self.assertEqual(widest(["support", "Immune support"]), ["Immune support"])  # not only a prefix
+
     def test_c7_live_pins(self):
         # C7: live pin at main: both claim cases and the control all-yes, no findings, exit 0.
         result = run_script()

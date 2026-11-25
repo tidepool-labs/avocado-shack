@@ -57,6 +57,20 @@ def _finance(work, unit):
                                    frozenset(Decimal(n) for n in slot.get('private', ())))
 
 
+def _widest_claims(found):
+    """One printed claim read at several widths ('Immune', 'Immune support') is one claim: keep each phrase that is not
+    a contiguous run of words inside another read claim, in first-seen order (exact repeats once)."""
+    words = [tuple(re.findall(r'\w+', claim.casefold())) for claim in found]
+    kept, seen = [], set()
+    for claim, mine in zip(found, words):
+        inside = any(len(other) > len(mine) and any(other[i:i + len(mine)] == mine for i in range(len(other) - len(mine) + 1))
+                     for other in words)
+        if mine and not inside and mine not in seen:
+            seen.add(mine)
+            kept.append(claim)
+    return kept
+
+
 def _site_words(phrase, texts):
     """Only explicit, unambiguous owner wording; never infer a town or URL from S2/S4."""
     lines = '\n'.join(map(claims.fold, texts))
@@ -151,8 +165,8 @@ class ProductionStages(Stages):
         label_words = [word for word in reading.get('label_words', []) if not validate._contact(word)
                        and not private_numbers.problem(word, private)]
         # Printed claims reach only the Writer's drop list and the owner's card note, never public text.
-        label_claims = [claim for claim in reading.get('visible_claims') or [] if isinstance(claim, str)
-                        and not validate._contact(claim) and not private_numbers.problem(claim, private)]
+        label_claims = _widest_claims([claim for claim in reading.get('visible_claims') or [] if isinstance(claim, str)
+                                       and not validate._contact(claim) and not private_numbers.problem(claim, private)])
         # The durable listing is a narrow projection, not a caption, full model read, or research transcript.
         return Plan(listing={
             'name': decision.item, 'category': decision.category or 'general', 'kind': reading.get('kind') or 'non-food',

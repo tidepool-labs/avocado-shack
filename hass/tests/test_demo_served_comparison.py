@@ -6,6 +6,7 @@ record, a stale or swapped photo, an edited price or descriptor, a leftover dupl
 MISMATCH with a fixed label, even though the approval history still says the listing was posted, and the command changes nothing.
 Fixtures only: throwaway repos, no network, no service, no live site.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -19,6 +20,9 @@ from hass.tests import test_two_chat_restore as trc
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/hass/demo_served_comparison.py"
 HEAD = b"const catalog="
+_spec = importlib.util.spec_from_file_location("demo_served_comparison", SCRIPT)
+comparison = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(comparison)
 
 
 def _make():
@@ -51,6 +55,27 @@ def _make():
             before = self.fingerprint(wt, state, conv)
             self.assertEqual(self.compare(state, wt, job, photo_file, version), (1, f"MISMATCH {want}"))
             self.assertEqual(before, self.fingerprint(wt, state, conv), want + ": the check changed something")
+
+        def test_shown_brand_follows_the_shop_page_rule(self):
+            """The brand a visitor sees is displayBrand, else 'From the market' for an unidentified producer, else brand (shop.js)."""
+            import tempfile as _tempfile
+            unknown = "Producer not identified"
+            card = {"name": "n", "brand": unknown}
+            cases = (
+                # (approved fields, served record, expect a display-brand mismatch)
+                (card, dict(card, displayBrand="From the market"), False),
+                (card, dict(card), False),  # displayBrand missing: the page shows 'From the market'
+                (card, dict(card, displayBrand=""), False),  # empty: same
+                (dict(card, displayBrand=unknown), dict(card), True),  # approved the literal words; the page now shows 'From the market'
+                (dict(card, displayBrand=unknown), dict(card, displayBrand=unknown), False),
+                (card, dict(card, displayBrand=unknown), True),  # the page was approved as 'From the market'
+                ({"name": "n", "brand": "A Farm"}, {"name": "n", "brand": "A Farm"}, False),
+                ({"name": "n", "brand": "A Farm"}, {"name": "n", "brand": "A Farm", "displayBrand": "B Farm"}, True),
+            )
+            with _tempfile.TemporaryDirectory() as empty:  # no photos here: only the brand label is looked at
+                for approved, served, bad in cases:
+                    labels = comparison.compare(empty, [served], approved, "0" * 64)
+                    self.assertEqual("display-brand-differs" in labels, bad, (approved, served, labels))
 
         def test_served_comparison(self):
             jobs = self.two_pending()

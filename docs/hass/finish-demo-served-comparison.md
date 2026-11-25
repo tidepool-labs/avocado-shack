@@ -30,7 +30,7 @@ a link. A link anywhere on a path is refused.
 | `catalog-unreadable`, `could-not-check` | the shop's catalog or the saved conversation could not be read safely |
 | `not-served` | no served item carries the approved name (also: the record now claims another item's name) |
 | `name-differs`, `price-differs`, `descriptor-differs`, `picture-text-differs`, `shelf-differs`, `brand-differs`, `maker-differs` | that served field is not the approved one |
-| `display-brand-differs` | the brand a visitor actually sees (the record's `displayBrand`, else `brand`, as the shop page shows it) is not the approved one; the approved one is the card's `displayBrand`, else the catalog's own default for its brand ("From the market" for an unidentified producer) |
+| `display-brand-differs` | the brand a visitor sees is not the approved one. Both sides use the shop page's own rule: `displayBrand`, else "From the market" when the brand is "Producer not identified", else `brand` (so a missing or empty `displayBrand` is judged by what the page would show) |
 | `served-photo-unreadable` | the served photo file is missing, is a link, or its path leaves the shop |
 | `served-photo-differs` | the served photo bytes are not the approved photo (a stale or another owner's photo, even when the catalog is right) |
 | `photo-on-another-item` | a different served item shows the approved photo (a wrong neighbor) |

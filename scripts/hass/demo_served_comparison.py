@@ -94,16 +94,10 @@ def approved_card(db, job, version):
     return mine[0], photo
 
 
-def shown_brand(record):
-    """The brand a visitor sees: displayBrand when the record has one, else brand (storefront-mockup/shop.js)."""
-    return record.get("displayBrand") or record.get("brand")
-
-
-def approved_display_brand(args):
-    """The brand the approved card shows: the op's displayBrand, else the catalog's own default for its brand."""
-    if args.get("displayBrand"):
-        return args["displayBrand"]
-    return "From the market" if args.get("brand") == "Producer not identified" else args.get("brand")
+def shown_brand(fields):
+    """The brand a visitor sees for a record or an approved card's fields: displayBrand, else 'From the market' for an unidentified
+    producer, else brand (the `brand()` rule in storefront-mockup/shop.js and the catalog's own default)."""
+    return fields.get("displayBrand") or ("From the market" if fields.get("brand") == "Producer not identified" else fields.get("brand"))
 
 
 def served_photo_sha(worktree, record):
@@ -130,7 +124,7 @@ def compare(worktree, records, args, photo_sha):
             out.add("non-public-field")
         if any(isinstance(v, str) and PRIVATE_RE.search(v) for k, v in record.items() if k != "image"):
             out.add("private-word")
-        if shown_brand(record) != approved_display_brand(args):
+        if shown_brand(record) != shown_brand(args):
             out.add("display-brand-differs")
         served = served_photo_sha(worktree, record)
         if served is None:

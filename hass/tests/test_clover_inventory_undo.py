@@ -32,8 +32,9 @@ def site_product(word):
 class FakeSite:
     """The website side of the bundle saga: it numbers each prepared change and says whether it went live (as `test_item_both.Site`)."""
 
-    def __init__(self):
-        self.settings, self.conv, self.drafts, self.live = {}, None, {}, set()
+    def __init__(self, prior=None):
+        self.settings, self.conv, self.drafts, self.live, self.records = {}, None, {}, set(), {}
+        self.prior = {"id": PRODUCT, "name": "Blue mug", "status": "active"} if prior is None else prior   # the product as the website had it
 
     def stopped(self):
         return False
@@ -45,20 +46,30 @@ class FakeSite:
 
     def apply(self, cid, digest, chat):
         self.live.add(cid)
+        # the change record the editor writes for product.set_availability: the product before and after, with the word and its day
+        after = {**self.prior, "available": self.drafts[cid][0]["args"]["available"], "available_on": "2026-11-24"}
+        self.records[cid] = {"state": "applied", "change_id": cid,
+                             "records": [{"collection": "products", "key": PRODUCT, "before": dict(self.prior), "after": after}]}
         return {"result": "applied"}
 
     def went_live(self, cid):
         return cid in self.live
 
+    def change(self, cid):
+        """What the editor's `show(change_id)['change']` returns."""
+        return self.records.get(cid)
+
 
 SITE_OPS = [{"op": "product.set_availability", "args": {"id": PRODUCT, "available": "yes"}}]   # what a counted create tells the site
+PRIOR_NO = {"id": PRODUCT, "name": "Blue mug", "status": "active", "available": "no", "available_on": "2026-11-20"}   # sold out before
+PRIOR_NONE = {"id": PRODUCT, "name": "Blue mug", "status": "active"}   # no word before
 
 
 class Rig:
     """A fake till (one seeded item counted 12), the real apply engine and bundle saga on a temp state folder: the reverse is run
     against what really happened, not against a hand-written journal."""
 
-    def __init__(self, case):
+    def __init__(self, case, prior=None):
         self.case = case
         tmp = TemporaryDirectory()
         case.addCleanup(tmp.cleanup)
@@ -77,7 +88,7 @@ class Rig:
         self.engine = ApplyEngine(self.root, self.cfg, lambda token: CloverWriteClient(MERCHANT, token, self.fake, min_interval=0,
                                                                                        max_retries=0), mike=tuple(self.owner.values()))
         self.journal = bundle.BundleJournal(self.root)
-        self.site = FakeSite()
+        self.site = FakeSite(prior)
 
     def link_writer(self, product_id, clover_id, sku):
         links.write(links.table(self.root), {**self.links(), product_id: {"cloverId": clover_id, "sku": sku}})
@@ -109,6 +120,7 @@ class Rig:
         return self.reader.get_item(item_id)["itemStock"]["quantity"]
 
     def reverse(self, row, site=None, **kw):
+        kw.setdefault("site_change", self.site.change)   # the site's own record of the change, as the editor's show() returns it
         return undo.reverse(row, self.item(row["clover_id"]), site, self.links(), **kw)
 
     def run_till_half(self, rev):
@@ -161,6 +173,31 @@ class InventoryUndoTests(NoNetwork):
         self.assertEqual(refused.reason, undo.SITE_UNSURE)
         self.assertEqual(rig.reverse(unsure, went_live=lambda cid: cid == row["change_id"]).site_ops, rev.site_ops)
         self.assertEqual(rig.reverse(unsure, went_live=lambda cid: False).site_ops, ())
+        # the website half is previewed from the site's own record of that change: the product and what it goes back to. Two different prior
+        # states give two different previews (a preview that named only the change id would read the same for both)
+        self.assertEqual(rev.parts[1], "Website: products blue-mug (Blue mug) goes back as it was: available 'yes' -> no word; "
+                                       "available_on '2026-11-24' -> not set")
+        sold_out = Rig(self, PRIOR_NO)
+        sold_row = sold_out.create_mug()
+        sold = sold_out.reverse(sold_row)
+        self.assertEqual(sold.site_ops, ({"op": "history.revert", "args": {"changeId": sold_row["change_id"]}},))
+        self.assertEqual(sold.parts[1], "Website: products blue-mug (Blue mug) goes back as it was: available 'yes' -> 'no'; "
+                                        "available_on '2026-11-24' -> '2026-11-20'")
+        self.assertNotEqual(sold.parts, rev.parts)
+        # a website change whose details cannot be read is refused, not previewed vaguely: no reader, a reader that fails or finds nothing,
+        # a record that is not an applied change, one already undone, or one of the wrong shape
+        broken = {"no reader": None, "not found": lambda cid: None, "fails": lambda cid: 1 / 0, "empty": lambda cid: {"state": "applied", "records": []},
+                  "not applied": lambda cid: {**rig.site.records[cid], "state": "failed"},
+                  "wrong shape": lambda cid: {"state": "applied", "records": [{"collection": "products", "key": PRODUCT, "before": "x", "after": {}}]},
+                  "no change": lambda cid: {"state": "applied", "records": [{"collection": "products", "key": PRODUCT,
+                                                                             "before": {"id": PRODUCT}, "after": {"id": PRODUCT}}]}}
+        for name, reader in broken.items():
+            with self.subTest(site_change=name):
+                self.assertEqual(rig.reverse(row, site_change=reader), undo.Refusal(undo.SITE_DETAILS))
+        undone = {**rig.site.records[row["change_id"]], "revertedBy": "chg-9"}
+        self.assertEqual(rig.reverse(row, site_change=lambda cid: undone), undo.Refusal(undo.SITE_UNDONE))
+        # a bundle with no website half needs no reader
+        self.assertEqual(rig.reverse(plain, site_change=None).site_ops, ())
         # a count change: the old count, from drafts.build_undo, with no link part
         counted = rig.set_count(30)
         rev = rig.reverse(counted)
@@ -194,7 +231,7 @@ class InventoryUndoTests(NoNetwork):
                 change(case, row["clover_id"])
                 item = case.item(row["clover_id"])
                 before = list(case.fake.log)
-                self.assertEqual(undo.reverse(row, item, None, case.links()), undo.Refusal(CHANGED_AGAIN))
+                self.assertEqual(undo.reverse(row, item, None, case.links(), site_change=case.site.change), undo.Refusal(CHANGED_AGAIN))
                 self.assertEqual(case.fake.log, before)   # the reverse sends nothing
                 self.assertNotIn("DELETE", case.methods())
         # a counted change that a sale overtook is refused the same way
@@ -223,7 +260,8 @@ class InventoryUndoTests(NoNetwork):
             self.assertIn(part, text)
         self.assertIn("Register: Blue mug (SKU AS-GEN-BLUE-MUG-01) goes from showing to hidden", text)
         self.assertIn("Link: removes the link between website product blue-mug and this till item", text)
-        self.assertIn(f"Website: puts the website back as it was before this change (undoes website change {row['change_id']})", text)
+        self.assertIn("Website: products blue-mug (Blue mug) goes back as it was: available 'yes' -> no word; available_on '2026-11-24' -> not set", text)
+        self.assertNotIn(row["change_id"], text)   # the owner sees the product and values, not an opaque change id
         self.assertIn("hidden, not deleted", text)
         self.assertIn("count record stays", text)
         self.assertIn("still says 30", text)

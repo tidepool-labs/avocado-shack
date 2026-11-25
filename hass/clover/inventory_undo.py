@@ -6,7 +6,7 @@ journalled `history.revert`, never a recomputed word). The preview
 says so plainly. The reverse is a NEW change with its own code and its own `yes` (the till engine and bundle saga carry it out, cap-exempt,
 exactly as they carry out any other undo); `finish` is the one step that happens after the till half has read back.
 
-* `reverse(bundle_row, current_item, site_product, links)` -> `Reverse` or `Refusal`.
+* `reverse(bundle_row, current_item, site_product, links, site_change=...)` -> `Reverse` or `Refusal`.
 * `render(reverse, code)` -> the owner-facing preview, ending with the one yes line.
 * `finish(reverse, state, till)` -> removes the link only after the till half read back `applied`.
 
@@ -62,15 +62,68 @@ def _check_created(entry, current, counted, count_known):
         raise d.DraftRefused(CHANGED_AGAIN)
 
 
+_MISSING = object()   # a website field that is absent (distinct from an explicit null)
 SITE_UNSURE = ("I can't tell whether the website change from that bundle went live, so I can't undo it safely. Nothing was changed. "
                "Check the website, then ask me again.")
 
 
-def _bundle_site(row, went_live):
+SITE_DETAILS = ("I can't read what that website change did, so I can't show you what undoing it would put back. Nothing was changed. "
+                "Check the website, then ask me again.")
+SITE_UNDONE = "That website change was already undone, so there is nothing on the website to put back. Nothing was changed."
+_ABSENT = {"available": "no word"}   # a website field that was not there before the change
+
+
+def _shown(value, field):
+    """One website value in plain, short words: an absent field says what absent means ('no word'), anything else is quoted."""
+    if value is _MISSING or value is None:
+        return _ABSENT.get(field, "not set")
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return "'" + (text if len(text) <= 60 else text[:57] + "...") + "'"
+
+
+def _site_parts(change_id, change):
+    """The website records one applied change wrote, as owner-facing parts: for each record the product (or other record), and each field
+    it takes back with the value now on the website and the value it goes back to (the record's own `before`; `no word` when the field
+    was not there). Reads only the site's change record, the same one `history.revert` restores from; anything unreadable is refused."""
+    if not isinstance(change, dict) or not isinstance(change.get("records"), list) or not change["records"]:
+        raise d.DraftRefused(SITE_DETAILS)
+    if change.get("state") != "applied":
+        raise d.DraftRefused(SITE_DETAILS)
+    if change.get("revertedBy"):
+        raise d.DraftRefused(SITE_UNDONE)
+    first, last = {}, {}   # per record: the value before the change and the value the change finally wrote (as history.revert reads them)
+    for record in change["records"]:
+        if not (isinstance(record, dict) and isinstance(record.get("collection"), str) and isinstance(record.get("key"), str)
+                and "before" in record and "after" in record
+                and all(v is None or isinstance(v, dict) for v in (record["before"], record["after"]))):
+            raise d.DraftRefused(SITE_DETAILS)
+        ref = (record["collection"], record["key"])
+        first.setdefault(ref, record["before"])
+        last[ref] = record["after"]
+    parts = []
+    for (collection, key), before in first.items():
+        after = last[(collection, key)] or {}
+        name = after.get("name") or after.get("title") or (before or {}).get("name") or (before or {}).get("title")
+        label = f"{collection} {key}" + (f" ({name})" if isinstance(name, str) and name else "")
+        if before is None:   # this change added the record; history.revert hides or cancels it, never deletes it
+            parts.append(f"Website: {label} was added by this change; it is taken off the website (hidden or cancelled, not deleted)")
+            continue
+        fields = sorted(k for k in before.keys() | after.keys() if before.get(k, _MISSING) != after.get(k, _MISSING))
+        if fields:
+            parts.append(f"Website: {label} goes back as it was: " + "; ".join(
+                f"{k} {_shown(after.get(k, _MISSING), k)} -> {_shown(before.get(k, _MISSING), k)}" for k in fields))
+    if not parts:
+        raise d.DraftRefused(SITE_DETAILS)   # the change left nothing to put back: not a reverse the owner can be shown
+    return parts
+
+
+def _bundle_site(row, went_live, site_change):
     """The website half of the bundle, as the bundle journal really recorded it: its site ops ran under `row['change_id']`, and the exact
     inverse is the existing `history.revert` of that change (the same op `bundle.undo` drafts; the site path refuses it, with no draft, if a
-    later edit touched those records). Returns (ops, parts). No site ops, or ops that never ran, mean nothing to put back. When the journal
-    cannot say whether the change landed (`went_live(change_id)` is the site's own answer, if given) the reverse is refused, never guessed."""
+    later edit touched those records). Returns (ops, parts), the parts naming each website record and the value it goes back to, read from
+    that change's own record (`site_change(change_id)`); with no way to read it the reverse is refused, since the owner could not see what
+    they approve. No site ops, or ops that never ran, mean nothing to put back. When the journal cannot say whether the change landed
+    (`went_live(change_id)` is the site's own answer, if given) the reverse is refused, never guessed."""
     if not row["bundle"].get("site_ops"):
         return (), []
     change_id, site = row.get("change_id"), row.get("site")
@@ -82,8 +135,13 @@ def _bundle_site(row, went_live):
         return (), []   # pending / confirmed not live: the website never changed
     if not change_id:
         raise d.DraftRefused(SITE_UNSURE)
-    return (({"op": "history.revert", "args": {"changeId": change_id}},),
-            [f"Website: puts the website back as it was before this change (undoes website change {change_id})"])
+    if not callable(site_change):
+        raise d.DraftRefused(SITE_DETAILS)
+    try:
+        change = site_change(change_id)
+    except Exception:   # noqa: BLE001 - an unreadable record is a refusal, never a guess
+        raise d.DraftRefused(SITE_DETAILS) from None
+    return (({"op": "history.revert", "args": {"changeId": change_id}},), _site_parts(change_id, change))
 
 
 def _unlink(row, entry, links):
@@ -99,7 +157,7 @@ def _unlink(row, entry, links):
     return {"product_id": link["product_id"], "clover_id": item_id, "sku": held.get("sku", "")}
 
 
-def _plan(row, current, site_product, links, config, went_live=None):
+def _plan(row, current, site_product, links, config, went_live=None, site_change=None):
     if not isinstance(row, dict) or row.get("state") not in APPLIED or not isinstance(row.get("bundle"), dict):
         raise d.DraftRefused(NOTHING)
     entry = row.get("undo_result")
@@ -107,7 +165,7 @@ def _plan(row, current, site_product, links, config, went_live=None):
     if asked and not entry:
         raise d.DraftRefused("I have no record of what the till change did, so I can't undo it safely. Nothing was changed.")
     unlink = _unlink(row, entry, links)
-    bundle_ops, bundle_parts = _bundle_site(row, went_live)   # the website half the journal really recorded
+    bundle_ops, bundle_parts = _bundle_site(row, went_live, site_change)   # the website half the journal really recorded
     till, site_ops, parts, hides, label, item_id, count = None, (), [], False, "the link", None, "not counted"
     if entry:
         item_id = entry["result_item_id"]
@@ -137,16 +195,19 @@ def _plan(row, current, site_product, links, config, went_live=None):
     return Reverse(label, item_id, till, tuple(site_ops), unlink, tuple(parts), hides, count, row["bundle"]["code"])
 
 
-def reverse(bundle_row, current_item, site_product, links, *, config=None, went_live=None):
+def reverse(bundle_row, current_item, site_product, links, *, config=None, went_live=None, site_change=None):
     """The exact reverse of one applied bundle (a journal row: `BundleJournal.get(code)`), or a Refusal.
     `current_item` is the till item read right now (None when it cannot be found), `site_product` the website product or None, `links`
     the private link table ({product id: {cloverId, sku}}). A created counted item is hidden (never deleted), its link removed and the
     bundle's own website change reverted (`history.revert` of the journalled `change_id`, the same inverse `bundle.undo` drafts); a count
-    change gets its old count back; a link added to an existing item is removed. `went_live(change_id)` is the site's answer, used only
+    change gets its old count back; a link added to an existing item is removed. `site_change(change_id)` returns that website change's
+    own record (the editor's `show(change_id)['change']`: its records with their `before` and `after`), from which the preview names each
+    website record and the value it goes back to; a bundle whose website half landed is refused when that record cannot be read.
+    `went_live(change_id)` is the site's answer, used only
     when the journal row says the website half was left uncertain; with no answer that bundle is refused. If the till
     item changed after the change (count, price, SKU, hidden, modifiedTime) it refuses with the "changed again" sentence and prepares nothing."""
     try:
-        return _plan(bundle_row, current_item, site_product, links, config, went_live)
+        return _plan(bundle_row, current_item, site_product, links, config, went_live, site_change)
     except d.DraftRefused as exc:
         return Refusal(str(exc))
 

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from hass.content_model import REPO_ROOT, SITE_DIR
 from hass.preview import Previewer
 from hass.tests import test_hidden_listing_served_projection as projection
 from hass.tests import test_npp_undo_journey as journey
@@ -187,8 +188,40 @@ def browser(target, program, pid, image=None):
     return json.loads(result.stdout)
 
 
+INPUT_TREES = ('hass', 'storefront-mockup')
+
+
+def tracked_inputs_only(root):
+    """Refuse unless the trees the inherited sandbox copies are exactly Git's tracked files.
+
+    The PhotoRepo/WriterRepo harness copies all of hass/ (skipping only
+    __pycache__), listed storefront files and every assets/products entry. Any
+    untracked or ignored file in those trees (for example a local .env or a
+    private photo), or a tracked file changed from HEAD, stops the run before
+    anything is copied. Only interpreter caches outside storefront assets (CI's
+    syntax step compiles storefront-mockup), which the harness does not copy,
+    are allowed.
+    """
+    try:
+        result = subprocess.run(
+            ['git', '-C', str(root), 'status', '--porcelain=v1', '-z', '--ignored=traditional',
+             '--untracked-files=all', '--', *INPUT_TREES],
+            capture_output=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise Refused('input-tree-unverified') from None
+    require(result.returncode == 0, 'input-tree-unverified')
+    for entry in filter(None, result.stdout.split(b'\0')):
+        state, path = entry[:2], entry[3:].decode('utf-8', 'replace')
+        parts = path.split('/')
+        require(state == b'!!' and '__pycache__' in parts[:-1] and parts[:2] != ['storefront-mockup', 'assets'],
+                'untracked-or-changed-input')
+
+
 def fixture_pass():
     """One fixture with positive and counterfactual observations; return digest-only evidence."""
+    require(REPO_ROOT.resolve() == ROOT and SITE_DIR.resolve() == ROOT / 'storefront-mockup',
+            'input-tree-unverified')
+    tracked_inputs_only(ROOT)
     facts = {}
 
     class Walk(journey.NppUndoJourneyTests):

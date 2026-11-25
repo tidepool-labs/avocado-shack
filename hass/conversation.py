@@ -2421,9 +2421,9 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
             return self._reply(jobs.replies["guards"]["render_failed"]) or "npp-unavailable"
         finance, replace_price = self._npp_words(msg.text.replace("\ufffc", ""), photo=True)
         accepted = npp_instant(self._forwarded) or now
-        disposition = jobs.input(msg, self._asker, min(accepted, now), now, finance, shas, replace_price=replace_price)
+        result = jobs.input(msg, self._asker, min(accepted, now), now, finance, shas, replace_price=replace_price)
         self._npp_keep_private(jobs, msg, finance, now)
-        return disposition
+        return result
 
     def _npp_keep_private(self, jobs, msg, finance, now):
         """HASS-INTAKE-2 for listing jobs: the owner's labelled cost and count wait in the conversation's private state

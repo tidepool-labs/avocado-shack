@@ -732,7 +732,6 @@
 "test_plain_shelf_check": 18,
 "test_post_availability": 5,
 "test_post_by_name": 5,
-"test_post_command": 8,
 "test_post_hike_command": 5,
 "test_post_maker_command": 11,
 "test_post_notice_command": 6,

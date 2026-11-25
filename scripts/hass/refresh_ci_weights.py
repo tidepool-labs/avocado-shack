@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 from statistics import median
 import sys
+import unittest
 
 # Running the file directly starts with scripts/hass, not the repository root.
 if __name__ == "__main__":
@@ -53,13 +54,40 @@ def read_run(run_dir):
             if len(entries) == 1 and owners.get(name) == entries[0][0]}
 
 
-def render_weights(run_dirs, modules):
+def reexported_keys(modules):
+    """Defining-module keys that some other listed module also executes.
+
+    The runner's TimedResult files every test under its class's defining module,
+    so a module that re-exports another module's TestCase class runs it a second
+    time under the defining module's key. When both modules sit on one shard that
+    key still looks unique to its owner, yet it holds the doubled time.
+    """
+    def tests_of(item):
+        for test in item:
+            if isinstance(test, unittest.TestSuite):
+                yield from tests_of(test)
+            else:
+                yield test
+
+    keys = set()
+    for name in modules:
+        suite = unittest.defaultTestLoader.loadTestsFromName(ci_shards.PREFIX + name)
+        for test in tests_of(suite):
+            defining = type(test).__module__
+            defining = defining[len(ci_shards.PREFIX):] if defining.startswith(ci_shards.PREFIX) else defining
+            if defining != name:
+                keys.add(defining)
+    return keys
+
+
+def render_weights(run_dirs, modules, ambiguous):
+    """`ambiguous` is reexported_keys(modules); those keys are never weighted."""
     ordered = sorted(run_dirs, key=lambda p: p.name)
     ids = [p.name for p in ordered]
     if (not ids or len(ids) != len(set(ids))
             or any(not name.isascii() or not name.isdecimal() for name in ids)):
         raise ValueError("provide unique numeric GitHub workflow run IDs as directory names")
-    active = set(modules)
+    active = set(modules) - set(ambiguous)
     samples = defaultdict(list)
     for run_dir in ordered:
         for name, seconds in read_run(run_dir).items():
@@ -80,7 +108,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="new file to create for review")
     args = parser.parse_args()
     try:
-        output = render_weights(args.runs, ci_shards.all_modules())
+        modules = ci_shards.all_modules()
+        output = render_weights(args.runs, modules, reexported_keys(modules))
         with args.output.open("x", encoding="utf-8") as file:
             file.write(output)
     except (OSError, ValueError, OverflowError) as error:

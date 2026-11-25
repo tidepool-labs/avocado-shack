@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts/hass/npp_supplement_plan.py'
+AUTHORITY = ('none: counts of submitted metadata only; '
+             'not a census, replay pass or authority to record')
 
 
 def key(kind, *, pin='a', digest='b', ordinal=0):
@@ -34,7 +36,28 @@ class SupplementPlanCLI(unittest.TestCase):
                                     capture_output=True, text=True, timeout=5)
             self.assertEqual(result.stderr, '')
             self.assertEqual(path.read_bytes(), before)
-            return result.returncode, json.loads(result.stdout)
+            return result.returncode, self.without_authority(result.stdout)
+
+    def without_authority(self, stdout):
+        # Contract: every result, WITHIN_CAPS included, states it grants no recording authority.
+        # A bug that drops the field from the CLI output (docstring-only disclaimer) fails here.
+        parsed = json.loads(stdout)
+        self.assertEqual(parsed.pop('recording_authority'), AUTHORITY)
+        return parsed
+
+    def test_every_result_states_it_is_not_recording_authority(self):
+        # A bare WITHIN_CAPS could be read as a go-ahead to record; the disclaimer must travel with it.
+        for cases, status in [({'14': covered(), '16': covered()}, 'WITHIN_CAPS'),
+                              ({'14': covered(op('s2')), '16': covered()}, 'HOLD')]:
+            with self.subTest(status=status):
+                code, result = self.run_plan(cases)
+                self.assertEqual(result['status'], status)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'synthetic-metadata.json'
+            path.write_text(json.dumps({'base_keys': [], 'cases': {'14': covered(), '16': covered()}}))
+            out = subprocess.run([sys.executable, '-B', str(SCRIPT), str(path), '--case', '14', '--case', '16'],
+                                 capture_output=True, text=True, timeout=5).stdout
+        self.assertIn('not a census, replay pass or authority to record', json.loads(out)['recording_authority'])
 
     def test_shared_missing_key_charges_once_and_base_hits_charge_zero(self):
         # Per-case billing would double-charge the shared copy key; per-kind hit checks would miss image v2.
@@ -97,7 +120,7 @@ class SupplementPlanCLI(unittest.TestCase):
         result = subprocess.run([sys.executable, '-B', str(SCRIPT), '--private-example'],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.stderr, '')
-        self.assertEqual((result.returncode, json.loads(result.stdout)),
+        self.assertEqual((result.returncode, self.without_authority(result.stdout)),
                          (2, {'status': 'HOLD', 'reason': 'invalid_arguments'}))
 
     def test_malformed_input_returns_only_fixed_status_and_does_not_echo_data(self):

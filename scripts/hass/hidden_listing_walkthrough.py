@@ -86,7 +86,7 @@ def check_checkout(args) -> tuple[bool, str]:
 
 def read_photo(path) -> tuple[bytes | None, str]:
     """(bytes, "") for a usable photo, else (None, reason). The path is never echoed."""
-    from hass import media
+    from hass import media, newitem_render
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -107,8 +107,10 @@ def read_photo(path) -> tuple[bytes | None, str]:
     if len(data) != info.st_size:
         return None, "photo file changed while it was read"
     try:
-        media.check_photo(data)  # the real photo checks: whole PNG/JPEG structure, not just the first bytes
-    except media.Refused as exc:
+        # The renderer's own opener: media.check_photo (whole PNG/JPEG segment structure), then a header pixel budget and a
+        # full decode. Structure alone is not enough (a PNG signature plus an IEND chunk passes it but has no image).
+        newitem_render._decode(data)
+    except (media.Refused, newitem_render.Refused) as exc:
         return None, f"photo is not a usable PNG/JPEG ({exc.code})"
     except Exception:  # noqa: BLE001 - never echo exception text (paths, bytes)
         return None, "photo is not a usable PNG/JPEG"

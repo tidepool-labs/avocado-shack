@@ -25,7 +25,7 @@ text goes in the receipt or on the screen.
 | Step | Passes when | A FAIL means |
 |---|---|---|
 | checkout | the tools checkout is exactly the reviewed commit, clean, with the expected origin (the existing `install_tools_checkout.py` check) | wrong commit, a changed or extra file, or the wrong origin. Nothing is made. Fix the checkout, run again. |
-| photo | the file exists, is a plain file (not a link or folder), is a whole, readable PNG or JPEG (the real photo check, not just the first bytes), and is neither empty nor larger than 8 MB | missing or odd photo. No preview is made. |
+| photo | the file exists, is a plain file (not a link or folder), is a whole PNG or JPEG that passes the real photo check and decodes as an image (not just the first bytes), and is neither empty nor larger than 8 MB | missing or odd photo. No preview is made. |
 | preview | the card is made from the supplied photo (same fingerprint), nothing is saved yet, and the site is unchanged | the card shows a different photo. **No yes is sent.** |
 | confirm | one coded `yes` saves exactly one change and the public card is the approved one (name, descriptor, public price, photo description, photo) | the saved card is not what the preview showed |
 | served | what a visitor is served over loopback equals the approved card; no cost, count or chat id | the page or the photo is not the approved one |

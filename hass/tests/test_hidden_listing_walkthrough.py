@@ -136,8 +136,14 @@ class WalkthroughTests(unittest.TestCase):
         folder.mkdir()
         cases = {"missing": self.root / "nowhere.jpg", "link": link, "empty": empty, "not a picture": text_file, "folder": folder}
         real = (FIXTURES / "pixel.jpg").read_bytes()
+        png_sig, png_ihdr = b"\x89PNG\r\n\x1a\n", (FIXTURES / "pixel.png").read_bytes()[8:33]  # the real 1x1 IHDR chunk
+        png_iend = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        # Contract: a photo that passes the byte-structure filter but holds no decodable image (no IHDR / no pixel data) must stop
+        # at the photo step. Bug it catches: trusting media.check_photo alone, which accepts signature + IEND.
         for label, data in {"jpeg magic then junk": b"\xff\xd8\xff" + b"junk" * 40, "png magic then junk": b"\x89PNG\r\n\x1a\n" + b"junk" * 40,
-                            "truncated jpeg": real[: len(real) // 2], "truncated png": (FIXTURES / "pixel.png").read_bytes()[:30]}.items():
+                            "truncated jpeg": real[: len(real) // 2], "truncated png": (FIXTURES / "pixel.png").read_bytes()[:30],
+                            "png signature and IEND only": png_sig + png_iend,
+                            "png header and IEND, no pixel data": png_sig + png_ihdr + png_iend}.items():
             odd = self.root / f"odd-{len(cases)}.jpg"
             odd.write_bytes(data)
             cases[label] = odd

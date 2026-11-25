@@ -993,6 +993,14 @@ def public_holds(text, term):
     return bool(term) and re.search(r'(?<!\w)' + re.escape(term), text.casefold()) is not None
 
 
+def public_text(records, card_dom=()):
+    """What a visitor can read: each record's stored fields (``after``) and the card's captured DOM text.
+
+    Owner transport messages (the 'Post this? Reply yes ...' line and its '(left off: ...)' bracket) and record
+    metadata (collection, key, op, before) are not public, so a required owner note never counts as a leak."""
+    return '\n'.join([json.dumps([r.get('after') for r in records], ensure_ascii=False), *card_dom])
+
+
 def listing_findings(want, product, makers):
     """Compare expect.listing with the product a person would see (committed if approved, else the delivered draft).
 
@@ -1281,9 +1289,9 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
             if not unknown:
                 newly_covered.add('listing')
         if 'public_lacks' in want and 'public_lacks' not in newly_covered and not contradiction:
-            cards = [re.sub(r'(?<=yes )[A-Z0-9]{4,12}(?=-\d+)', '<code>', row[0], flags=re.I)
-                     for row in fx.transport.cards.values()]
-            public = json.dumps(record.get('records', []), ensure_ascii=False) + '\n' + '\n'.join(cards)
+            card_dom = [m['text'] for v in versions.values() for m in captures.get(v.get('card_png_sha'), [])
+                        if m.get('text')]
+            public = public_text(record.get('records', []), card_dom)
             for term in want['public_lacks']:
                 if public_holds(public, term):
                     bad.append(f'public listing or card holds {term!r}')

@@ -562,6 +562,20 @@ class GenericObserverTests(unittest.TestCase):
         self.assertEqual([b.split(":")[0] for b in bad],
                          ["listing.name", "listing.price", "listing.maker_panel", "listing.description_sentences"])
 
+    def test_public_text_is_the_listing_and_card_not_the_owner_note(self):
+        # Contract: public_lacks inspects what a visitor reads. Bug it catches: scanning the owner's
+        # 'Post this? ... (left off: immune support)' message, which case 15 requires, as a public leak.
+        records = [{"collection": "products", "key": "immune-support", "op": "add", "before": None,
+                    "after": {"name": "Elderberry syrup", "description": "A dark berry syrup."}}]
+        owner_card = "Post this? Reply yes ABCD-1, or tell me what to change. (left off: immune support)"
+        public = run_npp.public_text(records, ["Elderberry syrup A dark berry syrup."])
+        self.assertNotIn(owner_card, public)
+        for term in ("immune", "support", "Reply yes"):
+            self.assertFalse(run_npp.public_holds(public, term), term)
+        leaked = run_npp.public_text([{**records[0], "after": {"description": "Boosts immune health."}}])
+        self.assertTrue(run_npp.public_holds(leaked, "immune"))
+        self.assertTrue(run_npp.public_holds(run_npp.public_text([], ["supports immunity"]), "support"))
+
     def test_public_terms_match_at_a_word_start_only(self):
         self.assertTrue(run_npp.public_holds("Good for eating", "eat"))
         self.assertFalse(run_npp.public_holds("A great glue for heat", "eat"))

@@ -50,6 +50,19 @@ class FixturePreflightTests(unittest.TestCase):
                 ('{"item":"Dried figs"}', 2, "INVALID", ["invalid_fixture"]),
                 ('{"item":"Dried figs","products":[null]}', 2, "INVALID", ["invalid_fixture"]),
                 ('{"item":"Dried figs","products":[],"products":[]}', 2, "INVALID", ["invalid_fixture"]),
+                # Malformed nested projections must not read as CLEAR: explicit nulls, bad status, unknown keys.
+                ('{"item":"Dried figs","products":[],"label":null}', 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[],"owner_maker":null}', 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[],"owner_url":null}', 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[{"name":"Figs","status":"bogus"}]}', 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[{"name":"Figs","status":null}]}', 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[{"name":"Figs","extra":1}]}', 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[],"label":{"brand":"Miners","confidence":0.9,"extra":1}}',
+                 2, "INVALID", ["invalid_fixture"]),
+                ('{"item":"Dried figs","products":[],"label":{"brand":"Miners"}}', 2, "INVALID", ["invalid_fixture"]),
+                # Absent optionals and every valid status stay CLEAR.
+                ('{"item":"Dried figs","products":[{"name":"Figs","status":"hidden"},{"name":"Plums"}]}',
+                 0, "CLEAR", []),
             ):
                 with self.subTest(code=code, text=text), contextlib.redirect_stdout(io.StringIO()) as out:
                     path.write_text(text, encoding="utf-8")

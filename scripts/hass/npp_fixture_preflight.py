@@ -2,9 +2,11 @@
 """Check a public demo-fixture projection, without rendering or visiting its URL.
 
 Usage: python3 -B scripts/hass/npp_fixture_preflight.py public-fixture.json
-The JSON object supplies item and products (a local fixture's [{name, status?}]),
-plus optional owner_url, owner_maker, and label ({brand, confidence}, as read by
-S2). Supply [] explicitly for an empty fixture catalog. No private replay inputs.
+The JSON object supplies item and products (a local fixture's [{name, status?}],
+status one of active/hidden/held), plus optional owner_url, owner_maker, and label
+({brand, confidence}, as read by S2). Optional fields may be omitted but never
+null; unknown keys anywhere are INVALID. Supply [] explicitly for an empty fixture
+catalog. No private replay inputs.
 Exit 0 CLEAR (these checks only), 1 HOLD (named checks), 2 INVALID (bad input).
 """
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from hass.content_model import _https
+from hass.content_model import PRODUCT_STATUSES, _https
 from hass.npp.missing import _duplicates, _maker
 
 
@@ -32,16 +34,19 @@ def lint(fixture: dict) -> list[str]:
         raise ValueError("fixture")
     products = fixture.get("products")
     if not isinstance(products, list) or any(
-        not isinstance(row, dict) or not _text(row.get("name"))
-        or ("status" in row and not _text(row["status"])) for row in products
+        not isinstance(row, dict) or set(row) - {"name", "status"} or not _text(row.get("name"))
+        or ("status" in row and row["status"] not in PRODUCT_STATUSES) for row in products
     ):
         raise ValueError("products")
+    # Optional fields may be absent, but a present field is never null or the wrong type.
     maker, label = fixture.get("owner_maker"), fixture.get("label")
-    if maker is not None and not _text(maker):
+    if "owner_maker" in fixture and not _text(maker):
         raise ValueError("maker")
+    if "owner_url" in fixture and not isinstance(fixture["owner_url"], str):
+        raise ValueError("owner_url")
     evidence = {}
-    if label is not None:
-        if not isinstance(label, dict) or not _text(label.get("brand")):
+    if "label" in fixture:
+        if not isinstance(label, dict) or set(label) - {"brand", "confidence"} or not _text(label.get("brand")):
             raise ValueError("label")
         c = label.get("confidence")
         if not isinstance(c, (int, float)) or isinstance(c, bool) or not 0 <= c <= 1:

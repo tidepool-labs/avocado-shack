@@ -48,7 +48,16 @@ if str(ROOT) not in sys.path:
 
 NAME = "hidden_listing_walkthrough"
 PHOTO_MAX = 8 * 1024 * 1024
-MAGIC = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpeg"))
+STAGE_MESSAGES = {  # the only failure texts that reach the screen or the receipt: fixed, never taken from an exception
+    "preview": "the preview check did not hold",
+    "confirm": "the saved card is not the approved one",
+    "served": "the served page is not the approved card",
+    "takedown": "the card is still served, or the site is not back to how it was, after the take-down",
+}
+
+
+class Refusal(Exception):
+    """A gate that stops the walkthrough with its own fixed message."""
 
 
 class Args(argparse.ArgumentParser):
@@ -77,6 +86,7 @@ def check_checkout(args) -> tuple[bool, str]:
 
 def read_photo(path) -> tuple[bytes | None, str]:
     """(bytes, "") for a usable photo, else (None, reason). The path is never echoed."""
+    from hass import media
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -96,8 +106,12 @@ def read_photo(path) -> tuple[bytes | None, str]:
         os.close(fd)
     if len(data) != info.st_size:
         return None, "photo file changed while it was read"
-    if not any(data.startswith(magic) for magic, _kind in MAGIC):
-        return None, "photo is not a PNG or JPEG"
+    try:
+        media.check_photo(data)  # the real photo checks: whole PNG/JPEG structure, not just the first bytes
+    except media.Refused as exc:
+        return None, f"photo is not a usable PNG/JPEG ({exc.code})"
+    except Exception:  # noqa: BLE001 - never echo exception text (paths, bytes)
+        return None, "photo is not a usable PNG/JPEG"
     return data, ""
 
 
@@ -153,14 +167,23 @@ def run_fixture(photo: bytes, steps: Steps, delivered: bytes | None = None) -> d
         def gate(self):
             """Before the owner's yes: the preview shows the supplied photo and nothing has been saved or published."""
             digest = self.approved_photo_digest()
-            self.assertEqual(digest, wanted, "the preview photo is not the supplied photo")
-            self.assert_commit_delta(0)
-            self.assertEqual((self.repo.head(), self.site()), (self.base_head, self.base_site))
+            if digest != wanted:
+                raise Refusal("the preview photo is not the supplied photo")
+            if (self.commits() != self.base_count or self.repo.status() != ""
+                    or (self.repo.head(), self.site()) != (self.base_head, self.base_site)):
+                raise Refusal("something was saved or published before the yes")
             facts["commits_before_yes"] = self.commits() - self.base_count
             steps.add("preview", True, "the card was made from the supplied photo; nothing is saved or public yet",
                       photo_sha12=digest[:12], draft_price=journey.PRICE)
 
         def walk(self):
+            try:
+                self.walk_steps()
+            except Refusal as refusal:
+                facts["why"] = str(refusal)  # one of this file's own fixed messages
+                raise
+
+        def walk_steps(self):
             self.publish()  # preview (gate above), one coded yes, the saved card and its photo bytes
             approved = self.approved_card()
             self.assertEqual(approved["sellingPrice"], journey.PRICE)
@@ -183,10 +206,10 @@ def run_fixture(photo: bytes, steps: Steps, delivered: bytes | None = None) -> d
     case.run(result)
     problems = result.failures + result.errors
     if problems:
-        text = problems[0][1].strip().splitlines()[-1] if problems[0][1].strip() else "unknown"
         done = {row["step"] for row in steps.rows}
         stage = next((s for s in ("preview", "confirm", "served", "takedown") if s not in done), "takedown")
-        steps.add(stage, False, text[:300])
+        # Never the exception's own text: it can carry a full digest, a path or a chat line.
+        steps.add(stage, False, facts.get("why") or STAGE_MESSAGES[stage])
     return facts
 
 
@@ -202,17 +225,18 @@ def write_receipt(out_dir: Path, steps: Steps, ok: bool, photo_sha12) -> Path:
     return path
 
 
-def private_out(raw) -> Path | None:
-    """The receipt folder: an existing real directory, mode 0700, outside this checkout."""
+def private_out(raw, repo=None) -> Path | None:
+    """The receipt folder: an existing real directory, mode 0700, outside this tool's checkout AND the --repo checkout."""
     path = Path(raw)
     try:
         info = path.lstat()
         real = path.resolve()
+        roots = [ROOT] + ([Path(repo).resolve()] if repo is not None else [])
     except OSError:
         return None
     if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
         return None
-    if real == ROOT or ROOT in real.parents:
+    if any(real == root or root in real.parents for root in roots):
         return None
     return real
 
@@ -226,7 +250,7 @@ def main(argv=None, out=None) -> int:
     parser.add_argument("--photo", required=True, help="a PNG or JPEG file for the fixture listing")
     parser.add_argument("--out", required=True, help="private (0700) receipt folder outside the repo")
     args = parser.parse_args(argv)
-    out_dir = private_out(args.out)
+    out_dir = private_out(args.out, args.repo)
     if out_dir is None:
         print("FAIL receipt folder must be an existing 0700 directory outside the repo", file=out)
         return 2

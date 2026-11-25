@@ -16,7 +16,7 @@ python3 -B scripts/hass/hidden_listing_walkthrough.py \
   --photo <a PNG or JPEG file> --out <private receipt folder>
 ```
 
-The receipt folder must already exist, be private (mode 0700) and sit outside the repository. The script writes one small
+The receipt folder must already exist, be private (mode 0700) and sit outside both the tools checkout and this repository. The script writes one small
 receipt there per run: step names, seconds, counts and 12-character photo fingerprints only. No photo, file path, code or chat
 text goes in the receipt or on the screen.
 
@@ -25,7 +25,7 @@ text goes in the receipt or on the screen.
 | Step | Passes when | A FAIL means |
 |---|---|---|
 | checkout | the tools checkout is exactly the reviewed commit, clean, with the expected origin (the existing `install_tools_checkout.py` check) | wrong commit, a changed or extra file, or the wrong origin. Nothing is made. Fix the checkout, run again. |
-| photo | the file exists, is a plain file (not a link or folder), is a PNG or JPEG, and is neither empty nor larger than 8 MB | missing or odd photo. No preview is made. |
+| photo | the file exists, is a plain file (not a link or folder), is a whole, readable PNG or JPEG (the real photo check, not just the first bytes), and is neither empty nor larger than 8 MB | missing or odd photo. No preview is made. |
 | preview | the card is made from the supplied photo (same fingerprint), nothing is saved yet, and the site is unchanged | the card shows a different photo. **No yes is sent.** |
 | confirm | one coded `yes` saves exactly one change and the public card is the approved one (name, descriptor, public price, photo description, photo) | the saved card is not what the preview showed |
 | served | what a visitor is served over loopback equals the approved card; no cost, count or chat id | the page or the photo is not the approved one |

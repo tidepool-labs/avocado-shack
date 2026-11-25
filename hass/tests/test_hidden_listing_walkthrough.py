@@ -135,6 +135,12 @@ class WalkthroughTests(unittest.TestCase):
         folder = self.root / "folder.jpg"
         folder.mkdir()
         cases = {"missing": self.root / "nowhere.jpg", "link": link, "empty": empty, "not a picture": text_file, "folder": folder}
+        real = (FIXTURES / "pixel.jpg").read_bytes()
+        for label, data in {"jpeg magic then junk": b"\xff\xd8\xff" + b"junk" * 40, "png magic then junk": b"\x89PNG\r\n\x1a\n" + b"junk" * 40,
+                            "truncated jpeg": real[: len(real) // 2], "truncated png": (FIXTURES / "pixel.png").read_bytes()[:30]}.items():
+            odd = self.root / f"odd-{len(cases)}.jpg"
+            odd.write_bytes(data)
+            cases[label] = odd
         for label, path in cases.items():
             with self.subTest(label), self.never_built():
                 status, text, doc = self.run_walk(photo=path)
@@ -170,13 +176,35 @@ class WalkthroughTests(unittest.TestCase):
         self.assertEqual([(r["step"], r["result"]) for r in doc["steps"]][-2:], [("served", "PASS"), ("takedown", "FAIL")])
         self.assertEqual(doc["result"], "FAIL")
 
+    def test_w6b_a_failure_never_prints_the_exception_text(self):
+        # A failing check can carry a full digest or a path in its own message; only fixed texts may reach screen or receipt.
+        import hashlib
+        from hass.tests import test_hidden_listing_served_projection as served_tests
+        full = hashlib.sha256(self.photo.read_bytes()).hexdigest()
+        boom = AssertionError(f"{full} {self.root} yes abcd-1")
+        with mock.patch.object(served_tests.HiddenListingServedProjectionTests, "approved_card", side_effect=boom):
+            status, text, doc = self.run_walk()
+        receipt = next(self.out_dir.glob("walkthrough-*.json")).read_text("utf-8")
+        self.assertEqual(status, 1, text)
+        self.assertEqual([(r["step"], r["result"]) for r in doc["steps"]][-2:], [("preview", "PASS"), ("confirm", "FAIL")])
+        self.assertEqual(doc["steps"][-1]["detail"], walk.STAGE_MESSAGES["confirm"])
+        for private in (full, str(self.root), "abcd-1"):
+            self.assertNotIn(private, text + receipt)
+
     # ---- the receipt folder ------------------------------------------------------------------------------------------------
     def test_w7_the_receipt_folder_must_be_private_and_outside_the_repo(self):
         loose = self.root / "loose"
         loose.mkdir(mode=0o755)
         os.chmod(loose, 0o755)
-        inside = walk.ROOT / "hass" / "tests" / "fixtures"
-        for label, out in {"missing": self.root / "none", "world-readable": loose, "inside the repo": inside}.items():
+        inside = Path(tempfile.mkdtemp(dir=walk.ROOT / "hass" / "tests"))  # mkdtemp: private 0700, so only the location can refuse it
+        self.addCleanup(os.rmdir, inside)
+        self.assertEqual(stat.S_IMODE(inside.stat().st_mode), 0o700)
+        inside_tools = self.repo / "receipts-here"
+        inside_tools.mkdir(mode=0o700)
+        os.chmod(self.repo, 0o700)  # so only the "inside the checkout" rule, not the mode rule, can refuse it
+        cases = {"missing": self.root / "none", "world-readable": loose, "inside this repo": inside,
+                 "inside the --repo checkout": inside_tools, "the --repo checkout itself": self.repo}
+        for label, out in cases.items():
             with self.subTest(label), self.never_built():
                 stream = io.StringIO()
                 status = walk.main(["--repo", str(self.repo), "--sha", self.sha, "--remote-url", ORIGIN,

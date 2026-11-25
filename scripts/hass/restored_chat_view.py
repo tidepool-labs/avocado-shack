@@ -152,8 +152,38 @@ def media_index(media):
             if hashlib.sha256(data).hexdigest() != sha or not data.startswith(magic):
                 problems["bad-bytes"] += 1
                 continue
-            found.setdefault(sha, rel)
+            found.setdefault(sha, (top, rel))
     return found, problems
+
+
+def shots_index(state, found, problems):
+    """Add the state dir's own editor pictures (screenshots/*.png, screenshots/<sha>.jpg) to `found`, keyed by the sha of
+    their bytes: the transcript names an editor preview by the hash of its bytes, but the file name is the change id.
+    A link or other non-regular entry is a failure; the media tree's pictures win when both hold the same bytes."""
+    top = Path(state) / "screenshots"
+    if not os.path.lexists(top):
+        return
+    if top.is_symlink() or not top.is_dir():
+        problems["link"] += 1
+        return
+    for entry in sorted(os.scandir(top), key=lambda e: e.name):
+        if not entry.name.endswith((".png", ".jpg")):
+            continue
+        rel = "screenshots/" + entry.name
+        mode = os.lstat(entry.path).st_mode
+        if not stat.S_ISREG(mode):
+            problems["link"] += 1
+            continue
+        try:
+            data = read_nofollow(state, rel)
+        except OSError:
+            problems["link"] += 1
+            continue
+        magic = PNG_MAGIC if rel.endswith(".png") else JPEG_MAGIC
+        if not data.startswith(magic):
+            problems["bad-bytes"] += 1
+            continue
+        found.setdefault(hashlib.sha256(data).hexdigest(), (Path(state), rel))
 
 
 def compare(events, reference):
@@ -182,9 +212,9 @@ def page(events, found, media, out, force, source):
     staged = Path(tempfile.mkdtemp(prefix=".restored-chat-"))
     try:
         os.chmod(staged, 0o700)
-        for sha, rel in found.items():  # flat, sha-named copies read without following links; the page re-checks them
+        for sha, (base, rel) in found.items():  # flat, sha-named copies read without following links; the page re-checks them
             target = staged / sha
-            target.write_bytes(read_nofollow(media, rel))
+            target.write_bytes(read_nofollow(base, rel))
             os.chmod(target, 0o600)
         destination = chat_page.output_path(Path(out), Path(source), staged, force)
         html, missing, _ambiguous = chat_page.render(events, staged)
@@ -210,6 +240,7 @@ def main(argv=None):
             raise Refused("state-is-a-link")
         events = rows(args.state)
         found, problems = media_index(args.media)
+        shots_index(args.state, found, problems)
         failures = [label for label, count in problems.items() if count]
         ids = [event["id"] for event in events]
         if ids != sorted(set(ids)):
@@ -223,7 +254,7 @@ def main(argv=None):
         missing = sorted(named - found.keys())
         if missing and args.media is not None:
             failures.append(f"attachments-missing-{len(missing)}")
-        if args.media is None and named:
+        if args.media is None and missing:
             failures.append("media-not-given")
         if args.page is not None and not failures:
             out_dir = args.page.parent.resolve()

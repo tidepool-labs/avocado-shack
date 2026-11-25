@@ -255,6 +255,60 @@ class RestoredChatViewTests(unittest.TestCase):
         self.assertEqual(run("--state", state, "--media", media, "--page", page)[0], 1)
         self.assertFalse(page.exists())
 
+    def with_editor_shot(self, data=None):
+        """A restored state whose transcript also names an editor preview kept under state/screenshots (named by change id)."""
+        shot = PNG + b"editor-preview" if data is None else data
+        transcript.append(self.state, **transcript.event(CHAT, "hass", "out", "photo", "fixture-preview-private",
+                                                          attachments=[sha(PNG + b"editor-preview")]))
+        state, media = self.restored()
+        shots = private_dir(state, "screenshots")
+        (shots / "chg-0123456789ab-proposal.png").write_bytes(shot)
+        os.chmod(shots / "chg-0123456789ab-proposal.png", 0o600)
+        return state, media, shots
+
+    def test_an_editor_preview_in_the_state_screenshots_dir_counts_as_restored(self):
+        state, media, _shots = self.with_editor_shot()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            transcript.main(["export", "--state", str(self.state), "--since", "2000-01-01"])
+        ref = self.tmp / "with-shot.jsonl"
+        ref.write_text(out.getvalue(), encoding="utf-8")
+        code, output = run("--state", state, "--media", media, "--reference", ref)
+        self.assertEqual((code, output.strip()), (0, "PASS restored_chat_view events=4 attachments=3 linked=3 reference=matched"))
+        self.assertQuiet(output)
+        page = private_dir(self.tmp, "view") / "chat.html"
+        self.assertEqual(run("--state", state, "--media", media, "--page", page)[0], 0)
+        self.assertEqual(page.read_text(encoding="utf-8").count("<img "), 3)
+        self.assertEqual(run("--state", state)[0], 1)  # without --media the media pictures are still unlinked
+
+    def test_a_missing_or_changed_editor_preview_is_not_verified(self):
+        state, media, shots = self.with_editor_shot(b"not-a-picture")
+        code, output = run("--state", state, "--media", media)
+        self.assertEqual(code, 1)
+        self.assertIn("bad-bytes", output)
+        self.assertIn("attachments-missing-1", output)
+        (shots / "chg-0123456789ab-proposal.png").unlink()
+        code, output = run("--state", state, "--media", media)
+        self.assertEqual(code, 1)
+        self.assertIn("attachments-missing-1", output)
+        self.assertQuiet(output)
+
+    def test_a_linked_editor_preview_or_screenshots_dir_is_refused(self):
+        state, media, shots = self.with_editor_shot()
+        outside = self.tmp / "outside-preview.png"
+        outside.write_bytes(PNG + b"editor-preview")
+        (shots / "chg-0123456789ab-proposal.png").unlink()
+        (shots / "chg-0123456789ab-proposal.png").symlink_to(outside)
+        code, output = run("--state", state, "--media", media)
+        self.assertEqual(code, 1)
+        self.assertIn("link", output)
+        self.assertIn("attachments-missing-1", output)  # never followed, never counted
+        shutil.rmtree(shots)
+        shots.symlink_to(self.tmp)
+        code, output = run("--state", state, "--media", media)
+        self.assertEqual(code, 1)
+        self.assertIn("link", output)
+        self.assertQuiet(output)
+
 
 if __name__ == "__main__":
     unittest.main()

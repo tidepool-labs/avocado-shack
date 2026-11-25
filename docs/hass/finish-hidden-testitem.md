@@ -5,7 +5,7 @@ with one coded yes, edited, hidden in one step, put back exactly, and hidden aga
 step should give. **What it does not prove:** anything on the real site, in Clover or on the phone. The real attended proof
 is in [CLOVER-TESTITEM.md](CLOVER-TESTITEM.md); this page is the rehearsal and the checklist for what to look at.
 
-## Rehearsal result (fixtures only, main `dd21b6cd`)
+## Rehearsal result (fixtures only, tools at main `86d12fe8`)
 
 Driver: `finish/hass-listing/hidden-drill/hidden_drill.py` (agent-work; it reuses `hass/tests/test_npp_undo_journey.py`).
 Run: `python3 -B hidden_drill.py <repo> <receipt-dir>`. Result **pass**, 0 service calls, 0 network calls, no private text in
@@ -13,7 +13,7 @@ the receipt.
 
 | Step | What happens | What is compared | Result |
 |---|---|---|---|
-| publish | owner photo + `sell $12.34`, card preview, one `yes <code>` | public card = name, descriptor, price, photo description, photo bytes (SHA-256) | card present; price and photo description as sent; no cost/qty/quantity field anywhere |
+| publish | owner photo + `sell $12.34`, card preview, one `yes <code>` | public card = name, descriptor, price, photo description, photo bytes (SHA-256) | card present; price and photo description as sent; checked on the published record itself: no key or value containing cost, qty, quantity, stock, count, margin, wholesale or supplier |
 | edit | editor draft `product.edit` changes the descriptor only | same fields | only the descriptor moved; name, price, photo description and photo bytes identical |
 | hide | `product.hide`, one step | public catalog bytes | card gone; catalog bytes equal the pre-publication site; product kept as `hidden` |
 | restore | `product.restore` | public card | exactly the edited card returns, photo bytes included |

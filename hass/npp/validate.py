@@ -9,6 +9,7 @@ from hass.content_model import CATEGORIES, ID_RE, TEXT_LIMITS, iso_day, shop_tod
 from hass.house_style import OWNER_IMAGE_RE
 from hass.npp import private_numbers as numbers
 from hass.npp.copy import words
+from hass.ops import catalog
 from hass.ops.photos import MAX_ALT, _alt_problem
 
 ORIGIN_UNKNOWN = 'Ask us about the source in store.'
@@ -65,6 +66,20 @@ def field_problem(writer, key, text, permits, ctx):
 
 def _flat(text):
     return ' '.join(text.split())
+
+
+# storefront-mockup/shop.js organic(): the shop shows an "Organic" badge on a product whose name says organic, and on
+# every product of the catalog makers in hass.ops.catalog.ORGANIC_MAKERS (kept equal to shop.js by test_organic_sync)
+# whatever its name.
+
+
+def _organic_badge(product, makers, new_makers):
+    """The badge shop.js draws for this product: by its own name, or because its EXISTING catalog maker is one the shop
+    badges. A maker this draft adds (even under one of those keys) or a key missing from the catalog never earns it."""
+    if re.search(r'\borganic\b', product.get('name') or '', re.I):
+        return True
+    key = product.get('producerKey')
+    return not new_makers and key in catalog.ORGANIC_MAKERS and isinstance((makers or {}).get(key), dict)
 
 
 def _fixed_ui(maker, count, organic):
@@ -190,9 +205,40 @@ def _catalog_story_numbers_ok(story, private):
         return True  # problem() already refuses money and any private reading
     if found != 'number-unclear':
         return False
+    if _years_with_distant_cues(story, private):
+        return True
     if unicodedata.normalize('NFKC', story) != story or any(c.isnumeric() for c in story) or numbers.values(story):
         return False
     return numbers.problem(re.sub(r'\bpoint\b', ' ', story, flags=re.I), private, digits_allowed=True) is None
+
+
+def _years_with_distant_cues(story, private):
+    """A published story whose only numbers are four-digit founding years (1800-2026) may use "or", "about" ... as
+    ordinary words away from the year: "the conversation about American dairy ... certified organic in 1994", "a sauce,
+    or simply a cold glass". numbers.problem() calls any such cue anywhere in a text with a number unclear, which kept
+    the Straus and Sierra Nevada stories (and so every new card of theirs) off the card.
+
+    Fail closed: any non-year number (digits or words), a cue within three words of a year ("about 1994", "1994 or
+    1995"), NFKC changes, money, a contact or a private reading still keep the story off."""
+    if unicodedata.normalize('NFKC', story) != story:
+        return False
+    found = numbers.values(story)
+    if not found or any(not n.digits or not re.fullmatch(r'[0-9]{4}', story[n.start:n.end])
+                        or not 1800 <= int(story[n.start:n.end]) <= 2026 for n in found):
+        return False
+    spans = [m.span() for m in re.finditer(r'\S+', story)]
+
+    def word(pos):
+        return next(i for i, (a, b) in enumerate(spans) if a <= pos < b)
+
+    years = [word(n.start) for n in found]
+    cues = list(numbers._UNCLEAR.finditer(story))
+    if not cues or any(abs(word(m.start()) - y) <= 3 for m in cues for y in years):
+        return False
+    stripped = story
+    for m in reversed(cues):
+        stripped = stripped[:m.start()] + ' ' * (m.end() - m.start()) + stripped[m.end():]
+    return numbers.problem(stripped, private, digits_allowed=True) is None
 
 
 @dataclass(frozen=True)
@@ -320,7 +366,7 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
                                         allowed=shown_ok,
                                         maker=maker['name'] if _panel_clean(maker.get('name')) else None,
                                         maker_count=maker_count,
-                                        organic=claims_passed and bool(re.search(r'\borganic\b', product.get('name') or '', re.I)),
+                                        organic=claims_passed and _organic_badge(product, known, new_makers),
                                         once=once,
                                         required=tuple(text[k] for k in ('name', 'description', 'story') if text.get(k)))):
         problems.append(problem)

@@ -30,8 +30,11 @@ Commands:
   plan   --event E [--base REV] [--shards N]  prints the plan, its partition and the union proof, and writes
                                               plan/tier/shards to $GITHUB_OUTPUT
   run    --shard K|quick --record-dir D       runs one shard of $HASS_PLAN and writes D/<K>.json and D/<K>.log
-         --workers 2 (full only)             packs the shard's modules by measured weight into two local processes.
-                                             Tests must use temporary paths and ephemeral ports; do not mutate the checkout.
+         --workers 2 (full only)             packs the shard's modules by measured weight into two local processes,
+                                             each in its own detached `git worktree` checkout of HEAD (clean tracked
+                                             tree required) with its own TMPDIR, so tests that look at the whole
+                                             checkout never see a sibling's scratch. Tests must still use temporary
+                                             paths and ephemeral ports; do not mutate the checkout.
   verify --record-dir D                       the aggregate: recomputes the plan, checks it against $HASS_PLAN,
                                               then checks the records (every planned module ran exactly once, test
                                               count, verdicts) and reprints failing shard logs
@@ -39,6 +42,7 @@ Commands:
 import argparse
 import ast
 import collections
+import contextlib
 import fnmatch
 import json
 import multiprocessing
@@ -463,8 +467,8 @@ def shard_keys(plan):
     return ["quick"] if plan["tier"] == "affected" else [str(i) for i in range(len(plan["shards"]))]
 
 
-def run_modules(names, stream):
-    sys.path.insert(0, str(ROOT))
+def run_modules(names, stream, root=ROOT):
+    sys.path.insert(0, str(root))
     suite = unittest.defaultTestLoader.loadTestsFromNames([PREFIX + n for n in names])
     runner = unittest.TextTestRunner(stream=stream, verbosity=2, resultclass=TimedResult)
     result = cast(TimedResult, runner.run(suite))
@@ -476,15 +480,50 @@ def run_modules(names, stream):
                                for k, v in sorted(result.seconds.items())}}
 
 
-def run_worker(names, log_path):
-    # Keep both Python's tempfile cache and child commands inside this worker's own TMPDIR.
-    prior, cached = os.environ.get("TMPDIR"), tempfile.tempdir
+def git_here(*args):
+    run = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    if run.returncode:
+        raise ValueError(f"git {' '.join(args)} failed: {run.stderr.strip()}")
+    return run.stdout
+
+
+@contextlib.contextmanager
+def worker_checkouts(count):
+    """One detached checkout of HEAD per worker, so a worker's whole-checkout `git status` never sees a sibling's scratch.
+
+    Several tests make a tempfile dir inside the checkout, and others assert the checkout is unchanged after they run; in one
+    shared checkout those collide. A worker runs, and its tests resolve REPO_ROOT, inside its own checkout.
+    """
+    if git_here("status", "--porcelain", "--untracked-files=no").strip():
+        raise ValueError("--workers needs a clean tracked tree: each worker runs a checkout of HEAD, so commit or stash first")
+    made = []
+    with tempfile.TemporaryDirectory(prefix="checkouts-") as base:
+        try:
+            for i in range(count):
+                made.append(Path(base) / str(i) / "checkout")
+                git_here("worktree", "add", "-q", "--detach", str(made[-1]), "HEAD")
+            yield made
+        finally:
+            for path in made:
+                subprocess.run(["git", "-C", str(ROOT), "worktree", "remove", "--force", str(path)], capture_output=True)
+            subprocess.run(["git", "-C", str(ROOT), "worktree", "prune"], capture_output=True)
+
+
+def run_worker(names, log_path, checkout):
+    # Keep both Python's tempfile cache and child commands inside this worker's own TMPDIR and checkout.
+    prior, cached, cwd = os.environ.get("TMPDIR"), tempfile.tempdir, os.getcwd()
     with tempfile.TemporaryDirectory(prefix="w") as tmp:
         os.environ["TMPDIR"] = tempfile.tempdir = tmp
+        os.chdir(checkout)
         try:
             with log_path.open("w", encoding="utf-8") as log:
-                return run_modules(names, log)
+                result = run_modules(names, log, Path(checkout))
+            hass_file = Path(sys.modules["hass"].__file__ or "").resolve()
+            if not hass_file.is_relative_to(Path(checkout).resolve()):
+                raise ValueError(f"worker imported {hass_file}, outside its checkout {checkout}")
+            return result
         finally:
+            os.chdir(cwd)
             tempfile.tempdir = cached
             if prior is None:
                 os.environ.pop("TMPDIR", None)
@@ -497,8 +536,9 @@ def run_parallel(names, stream, rec, workers):
     # Merge only after every subprocess returns; a crash cannot yield a successful shard record.
     with tempfile.TemporaryDirectory(prefix="workers-", dir=rec) as tmp:
         logs = [Path(tmp) / f"{i}.log" for i in range(len(groups))]
-        with ProcessPoolExecutor(max_workers=len(groups), mp_context=multiprocessing.get_context("spawn")) as pool:
-            results = list(pool.map(run_worker, groups, logs))
+        with worker_checkouts(len(groups)) as checkouts, \
+                ProcessPoolExecutor(max_workers=len(groups), mp_context=multiprocessing.get_context("spawn")) as pool:
+            results = list(pool.map(run_worker, groups, logs, checkouts))
         for path in logs:
             with path.open(encoding="utf-8") as log:
                 for part in iter(lambda: log.read(64 * 1024), ""):

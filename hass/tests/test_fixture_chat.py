@@ -18,7 +18,7 @@ from pathlib import Path
 from hass.content_model import REPO_ROOT
 from hass.owner_answers import NOT_LIVE
 from hass.tests.test_conversation import CHAT
-from hass.tests.test_editor import repo_status
+from hass.tests.test_editor import git
 from hass.tests.test_preview import PNG_SIGNATURE, BrowserCase
 from hass import conversation
 
@@ -77,7 +77,7 @@ class FixtureChatPreviewTests(BrowserCase):
 
     @unittest.skipUnless(os.environ.get("PLAYWRIGHT_MODULE"), "PLAYWRIGHT_MODULE is not set")
     def test_browser_preview_attaches_private_screenshots(self):
-        before = repo_status(REPO_ROOT)
+        before = git(REPO_ROOT, "status", "--porcelain")
         run, rows = self.run_cli("--preview")
         self.assertEqual((run.returncode, run.stderr), (0, ""))
         [row] = self.drafts()
@@ -91,7 +91,7 @@ class FixtureChatPreviewTests(BrowserCase):
             self.assertEqual(png.read_bytes()[:8], PNG_SIGNATURE)
             self.assertEqual(stat.S_IMODE(png.stat().st_mode), 0o600)
         self.assertEqual((row["state"], self.commits()), ("verified", 1))
-        self.assertEqual(repo_status(REPO_ROOT), before)
+        self.assertEqual(git(REPO_ROOT, "status", "--porcelain"), before)
 
 
 if __name__ == "__main__":

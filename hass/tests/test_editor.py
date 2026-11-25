@@ -12,7 +12,6 @@ import http.client
 import io
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -21,7 +20,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from hass import editor, migration_check, sitegen, template_compat
 from hass.content_model import REPO_ROOT, SITE_DIR, load_and_validate
@@ -39,18 +37,6 @@ def _req(*ops):
 
 def git(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
-
-
-SIBLING_SCRATCH = re.compile(r"\?\? (?:\S+/)?(?:tmp[a-z0-9_]{8}|\.nl-corpus-[a-z0-9_]{8})/")
-
-
-def repo_status(cwd):
-    """`git status --porcelain` without the default-named scratch dirs that sibling test modules make inside the checkout.
-
-    Contract: "this run left the checkout as it found it" must still fail for a stray file or edit of the run's own, but
-    not for another module's transient tempfile dir while `ci_shards.py --workers 2` runs both at once.
-    """
-    return "\n".join(line for line in git(cwd, "status", "--porcelain").splitlines() if not SIBLING_SCRATCH.fullmatch(line))
 
 
 def _journal(repo, change_id, base_commit):
@@ -373,19 +359,6 @@ class NoPublicWriteRouteTests(EditorTestCase):
             self.fail("community server did not start")
         self.assertEqual(status, 404)
         self.assertEqual((editor.content_revision(repo.main), editor.content_revision(repo.wt)), before)
-
-
-class RepoStatusTests(unittest.TestCase):
-    """repo_status protects the "run left the checkout clean" asserts in the --preview tests when `ci_shards.py --workers 2`
-    runs a module that makes a default-named tempfile dir inside the checkout beside them. A change that hid every untracked
-    path (or only matched the exact name) would let a real stray file pass, or the sibling dir fail the shard again."""
-
-    def test_only_sibling_tempfile_dirs_are_hidden(self):
-        porcelain = "\n".join(["?? tmpmlzpnstk/", "?? hass/tests/tmpab_12345/", "?? .nl-corpus-abcd1234/",
-                               "?? stray.txt", "?? tmpshort/", "?? tmpmlzpnstk.txt", " M hass/content/store.json"])
-        with mock.patch(f"{__name__}.git", return_value=porcelain):
-            self.assertEqual(repo_status("."), "\n".join(["?? stray.txt", "?? tmpshort/", "?? tmpmlzpnstk.txt",
-                                                          " M hass/content/store.json"]))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from hass import conversation, preview
 from hass.content_model import REPO_ROOT
-from hass.tests.test_editor import git, repo_status
+from hass.tests.test_editor import git
 from hass.tests.test_undo import H06TestCase
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -47,7 +47,7 @@ class BrowserCase(H06TestCase):
 @unittest.skipUnless(os.environ.get("PLAYWRIGHT_MODULE"), "PLAYWRIGHT_MODULE is not set")
 class PreviewTests(BrowserCase):
     def snapshot(self):
-        return repo_status(REPO_ROOT), self.repo.status(), self.repo.head()
+        return git(REPO_ROOT, "status", "--porcelain"), self.repo.status(), self.repo.head()
 
     def test_proposal_preview_is_private_and_isolated(self):
         before = self.snapshot()

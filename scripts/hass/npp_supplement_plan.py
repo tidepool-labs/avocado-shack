@@ -23,6 +23,8 @@ from pathlib import Path
 
 
 CEILINGS = {'codex': 40, 'images': 4}
+# Emitted with every result, WITHIN_CAPS included, so the output alone never reads as a go-ahead.
+AUTHORITY = 'none: counts of submitted metadata only; not a census, replay pass or authority to record'
 OP_KEY = re.compile(r'(copy|image|s2):[0-9a-f]{64}:[0-9a-f]{64}:(?:0|[1-9][0-9]*)')
 CASE = re.compile(r'[0-9]{2}[a-z]?')
 
@@ -104,14 +106,12 @@ def main():
         args = parser.parse_args()
         data = json.loads(args.metadata.read_bytes(), object_pairs_hook=unique_object)
         result = plan(data, args.case)
-        output = json.dumps(result, sort_keys=True)
     except Hold as error:
         result = {'status': 'HOLD', 'reason': str(error)}
-        output = json.dumps(result, sort_keys=True)
     except (OSError, ValueError, RecursionError):
         result = {'status': 'HOLD', 'reason': 'invalid_metadata'}
-        output = json.dumps(result, sort_keys=True)
-    print(output)
+    result['recording_authority'] = AUTHORITY
+    print(json.dumps(result, sort_keys=True))
     return 2 if result['status'] == 'HOLD' else 0
 
 

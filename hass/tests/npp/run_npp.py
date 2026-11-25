@@ -519,6 +519,38 @@ def stub_body(stage, *payload):
     return json.dumps({'stage': stage, 'input': payload}, default=str)
 
 
+def golden_listing_absent(wt, view, git):
+    """A golden case replays the owner's first listing of a product that is live today, so its sandbox catalog must be
+    the catalog from before that listing: the golden's own row (its ``photo-product-NNN`` id) is removed from
+    products.json and from the sandbox's frozen migration baseline, and committed before the conversation starts.
+    Without this the real duplicate guard rightly asks 'add another?' whenever the owner names the product exactly
+    as it is listed (case 7). Only that one row goes; every other product, maker, the golden expectations and all
+    production code are unchanged. Returns the removed id, or None for a case without a golden."""
+    golden = view.get('golden')
+    if not golden:
+        return None
+    pid = Path(golden).stem
+    path = Path(wt) / 'hass' / 'content' / 'products.json'
+    data = json.loads(path.read_text('utf-8'))
+    kept = [p for p in data['products'] if p.get('id') != pid]
+    if len(kept) != len(data['products']) - 1:
+        raise ValueError(f'golden {golden}: expected exactly one catalog row with id {pid}')
+    path.write_text(json.dumps({**data, 'products': kept}, indent=2, ensure_ascii=False) + '\n', 'utf-8')
+    base_path = Path(wt) / 'hass' / 'content' / 'migration-baseline.json'
+    base = json.loads(base_path.read_text('utf-8'))
+    ids = [i for i in base['listings']['ids'] if i != pid]
+    base['listings'] = {**base['listings'], 'ids': ids, 'count': len(ids)}
+    base_path.write_text(json.dumps(base, indent=2, ensure_ascii=False) + '\n', 'utf-8')
+    from hass import sitegen
+    from hass.content_model import load_and_validate
+    content = load_and_validate(Path(wt) / 'hass' / 'content', Path(wt) / 'storefront-mockup')
+    stale = sitegen.stale_paths(content, Path(wt))  # the generated site files follow the catalog, as the editor's do
+    sitegen.write_files(sitegen.render(content, Path(wt) / 'hass' / 'templates'), Path(wt), only=stale)
+    git(wt, 'add', '--', 'hass/content/products.json', 'hass/content/migration-baseline.json', *stale)
+    git(wt, 'commit', '-q', '-s', '-m', f'npp fixture: catalog before golden {pid} was listed')
+    return pid
+
+
 def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
     """Real stages, Conversation and writer, with fixture-only I/O in replay."""
     from unittest.mock import patch
@@ -608,6 +640,7 @@ def run_conversation(view, tapes, pinned=None, *, preview=False, recorder=None):
         if preview or recorder:
             BrowserCase.make_previewer(SimpleNamespace(repo=fx.repo, env=None))
             browser = renderer.Previewer(fx.repo.wt, viewports=('phone',))
+        golden_listing_absent(fx.repo.wt, view, git)
         fx.base = fx.repo.head()
         gate = sandbox.Gate(lambda: {'approvals': 'private'}, lambda: {('site', 'sandbox'): str(fx.repo.wt)})
         render_asset = sha256((REPO / 'hass' / 'screenshot.cjs').read_bytes())

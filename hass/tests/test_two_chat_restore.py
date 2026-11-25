@@ -212,19 +212,18 @@ class TwoChatRestoreTests(journey.NppUndoJourneyTests):
             wt, state, conv, restored_media = self.restore(tmp)
             self.conv = conv
             base = (git(wt, "rev-parse", "HEAD"), self.catalog_in(wt), self.commits_in(wt))
-            # the saved conversation: each chat's rows carry its own code and its own pictures, never the other's
+            # the saved conversation: each chat has exactly its own two rows, each naming its own code and its own picture
             with transcript.read(state) as db:
-                rows = db.execute("SELECT chat, draft_code, attachments, direction FROM events ORDER BY id").fetchall()
-            seen = {MCHAT: set(), GCHAT: set()}
-            for chat, code, attachments, _direction in rows:
-                if chat in seen:
-                    seen[chat].update(json.loads(attachments))
-                    if code:
-                        other = GCHAT if chat == MCHAT else MCHAT
-                        self.assertTrue(code.startswith(jobs[chat]), (chat, code))
-                        self.assertFalse(code.startswith(jobs[other]), (chat, code))
-            self.assertEqual({c for c, *_ in rows} & {MCHAT, GCHAT}, {MCHAT, GCHAT})
-            self.assertFalse(seen[MCHAT] & seen[GCHAT])
+                rows = db.execute("SELECT chat, direction, draft_code, attachments FROM events ORDER BY id").fetchall()
+            for chat, other in ((MCHAT, GCHAT), (GCHAT, MCHAT)):
+                mine = [(d, code, json.loads(att)) for c, d, code, att in rows if c == chat]
+                self.assertEqual(mine, [("in", jobs[chat], [sha(LISTINGS[chat]["photo"])]),
+                                        ("out", f"{jobs[chat]}-1", [sha(LISTINGS[chat]["card"])])], chat)
+                text = json.dumps(mine)
+                self.assertNotIn(jobs[other], text)
+                self.assertNotIn(sha(LISTINGS[other]["photo"]), text)
+                self.assertNotIn(sha(LISTINGS[other]["card"]), text)
+            self.assertEqual(len(rows), 4)
             # both owners' photo originals came along in the restored media
             files = {sha(p.read_bytes()) for p in restored_media.rglob("*") if p.is_file()}
             for chat in (MCHAT, GCHAT):
@@ -232,7 +231,12 @@ class TwoChatRestoreTests(journey.NppUndoJourneyTests):
             self.assertEqual(self.talk(MCHAT, "resume changes"), "resume")
             for chat, other in ((MCHAT, GCHAT), (GCHAT, MCHAT)):  # a wrong-chat code after the restore: refused, nothing posts
                 for text in (f"yes {jobs[other]}-1", f"yes {jobs[other]}"):
+                    heard = len(self.transport.to[chat])
                     self.assertIn(self.talk(chat, text), REFUSED, (chat, text))
+                    answers = self.transport.to[chat][heard:]
+                    self.assertTrue(answers, (chat, text))  # the chat is answered, not ignored
+                    self.assertFalse([a for a, _ in answers if jobs[other] in a], (chat, text))  # and the answer never repeats the other code
+                    self.assertEqual(self.conv.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0, (chat, text))
             self.assertEqual((git(wt, "rev-parse", "HEAD"), self.catalog_in(wt), self.commits_in(wt)), base)
             # Mike's own yes posts Mike's listing, once, with Mike's price and Mike's photo
             self.assertEqual(self.talk(MCHAT, f"yes {jobs[MCHAT]}-1"), "approved")

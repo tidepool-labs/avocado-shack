@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from hashlib import sha256
 import re
+import unicodedata
 
 from hass import claims, live_policy, publish_live
 from hass.content_model import CATEGORIES, ID_RE, TEXT_LIMITS, iso_day, shop_today, valid_supplier
@@ -89,7 +90,7 @@ def captured_dom(evidence, png, product_id):
 
 
 def dom_problem(nodes, price_index, price, name, approved=(), private=(), allowed=None, required=(), *,
-                maker=None, maker_count=None, organic=False):
+                maker=None, maker_count=None, organic=False, once=()):
     """`nodes` are visible DOM text fragments in order, with the exact price element identified.
 
     Keep numbers licensed in copy only in exact, already checked fields; no numeric-value
@@ -97,6 +98,7 @@ def dom_problem(nodes, price_index, price, name, approved=(), private=(), allowe
     When `allowed` is given, every other public fragment must equal one of those approved
     strings (whitespace-folded) and every `required` string must be rendered, so a swapped
     description or any extra claim fails even if it has no contact or number in it.
+    Each string in `once` may be rendered at most once (an exempted catalog fragment cannot be repeated).
     """
     if not isinstance(nodes, (tuple, list)):
         return 'card-text'
@@ -140,6 +142,8 @@ def dom_problem(nodes, price_index, price, name, approved=(), private=(), allowe
     # Also inspect adjacent fragments for OCR-like/spoken splits of numbers and money.
     if numbers.problem(' '.join(scan), private):
         return 'card-number'
+    if any(shown.count(_flat(text)) > 1 for text in once):
+        return 'card-copy'
     if allowed is not None:
         if any(text and text not in allowed for text in shown):
             return 'card-copy'
@@ -155,6 +159,40 @@ def _panel_clean(value):
     skeleton = claims.skeleton(value)
     names = (claims._pattern(skeleton),) if skeleton and live_policy._plain_name(skeleton) else ()
     return not live_policy._protected(value, 'makers', names)[1]
+
+
+# The shop's own published maker stories narrate where and how a maker works ("a family farm in Cambria", "an organic
+# orchard", "raw and unfiltered"); 17 of the 26 catalog stories trip the origin/organic class. That class exists to stop
+# a draft from adding an origin or organic claim the owner never made. An existing maker's catalog story is not written
+# by the draft (a draft can only add a new maker), it is the same text every other card of that maker already shows.
+# Every other claim kind (health/awards/endorsements, superlatives, mixed script, contacts, ...) still keeps it off.
+_CATALOG_STORY_KINDS = frozenset({'origin/organic'})
+
+
+def _catalog_story_shown(story):
+    """An existing maker's unchanged catalog story may be shown when its only protected claims are origin narration."""
+    if not isinstance(story, str) or not story.strip():
+        return False
+    return live_policy._protected(story, 'makers')[1] <= _CATALOG_STORY_KINDS
+
+
+def _catalog_story_numbers_ok(story, private):
+    """Published catalog text may carry a founded year or the bare word "point" ("The point is the fruit"), never a
+    money amount, a contact or a reading that equals one of this listing's private values (cost, quantity).
+
+    Fail closed: 'number-unclear' is tolerated only when its sole cause is "point" in a story with no number reading or
+    numeric character at all (so it cannot be a decimal separator). Any other unclear reading ("twelve hundred",
+    "a couple", Unicode numerals, NFKC changes) keeps the story off."""
+    if not isinstance(story, str) or _contact(story):
+        return False
+    found = numbers.problem(story, private, digits_allowed=True)
+    if found is None:
+        return True  # problem() already refuses money and any private reading
+    if found != 'number-unclear':
+        return False
+    if unicodedata.normalize('NFKC', story) != story or any(c.isnumeric() for c in story) or numbers.values(story):
+        return False
+    return numbers.problem(re.sub(r'\bpoint\b', ' ', story, flags=re.I), private, digits_allowed=True) is None
 
 
 @dataclass(frozen=True)
@@ -236,7 +274,12 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
     for key, value in maker.items():
         if key == 'story' and new_makers:
             continue  # conforming story, including a typed founded year
-        if isinstance(value, str) and (_contact(value) or numbers.problem(value, private, digits_allowed=not new_makers and key == 'story')):
+        if key == 'story' and isinstance(value, str):
+            # The existing maker's published catalog story (this draft cannot change it): same rule as its card fragment.
+            if not _catalog_story_numbers_ok(value, private):
+                problems.append('public-text')
+            continue
+        if isinstance(value, str) and (_contact(value) or numbers.problem(value, private)):
             problems.append('public-text')
     image, alt = product.get('image'), product.get('imageAlt')
     if (not isinstance(image, str) or not OWNER_IMAGE_RE.fullmatch(image)
@@ -253,13 +296,15 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
     # an existing maker's catalog name, place and story are not part of this copy, so each is shown only when it carries
     # no protected claim (health/awards/endorsements, superlatives, ...).
     panel = [maker.get(key) for key in ('name', 'place') if _panel_clean(maker.get(key))]
-    # An existing maker's catalog story is already published text. The record check above already lets it carry digits
-    # (a founded year) but no private number or contact. Give the card scan the same exemption for that exact fragment.
-    # Without it, every new product from a known maker whose story has a year failed as 'card-number'.
-    catalog_story = ()
-    if not new_makers and _panel_clean(maker.get('story')):
+    # An existing maker's catalog story is already published text. Its exact fragment is shown when its only protected
+    # claim is origin narration (_catalog_story_shown) and it carries no money, contact or private reading; a founded
+    # year or "the point is" is fine. Without this every new product from most known makers failed as 'card-copy' or
+    # 'card-number' (private replay, golden cases 5, 6 and 11).
+    catalog_story, once = (), ()
+    if not new_makers and _catalog_story_shown(maker.get('story')):
         panel.append(maker.get('story'))
-        if not _contact(maker['story']) and not numbers.problem(maker['story'], private, digits_allowed=True):
+        once = (maker['story'],)  # the maker panel shows it once; a repeated copy is an extra claim line
+        if _catalog_story_numbers_ok(maker['story'], private):
             catalog_story = (maker['story'],)
     # The computed origin line is derived from the maker's place ("Based in <place>"), so it is bound the same way: it is
     # shown only when its source is clean (an owner-said supplier, no place, or a place with no protected claim).
@@ -276,6 +321,7 @@ def listing(writer, ctx, copy, draft, *, finance, origin, makers, live_site, pho
                                         maker=maker['name'] if _panel_clean(maker.get('name')) else None,
                                         maker_count=maker_count,
                                         organic=claims_passed and bool(re.search(r'\borganic\b', product.get('name') or '', re.I)),
+                                        once=once,
                                         required=tuple(text[k] for k in ('name', 'description', 'story') if text.get(k)))):
         problems.append(problem)
     if not claims_passed:

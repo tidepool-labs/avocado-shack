@@ -88,7 +88,7 @@
       }
     ],
     "state": "published",
-    "calls": {"copy": 2},
+    "calls": {"copy": 1},
     "description_equals": "Pick up Ridge Roast Dark Coffee for the kitchen. Set Ridge Roast Dark Coffee out on the table.",
     "preview_description_equals_applied": true,
     "public_lacks": [

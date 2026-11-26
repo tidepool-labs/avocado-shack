@@ -1,7 +1,9 @@
 """Production NPP composition. Workers build evidence; only Jobs may retain a draft."""
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 import hashlib
+import json
 from pathlib import Path
 import re
 import time
@@ -100,6 +102,61 @@ def _site_words(phrase, texts):
     return (next(iter(towns)) if len(towns) == 1 and phrase else '', next(iter(urls)) if len(urls) == 1 else '')
 
 
+class _Wording:
+    """The copy selector for ONE render of a job, and what that render shows of it.
+
+    The first wording outcome for an identical selector input (pins and public IDs) is kept for the whole job, so a later
+    version (a price-only edit, a retry, after a restart) shows the wording the owner already saw:
+    - a held choice is replayed without asking again; the hold is read from the job's durable rows (`held`, a snapshot),
+      and this object never writes it: a render only reports (`keep`) what its own card shows, and Jobs commits that
+      with the card, so a worker finishing after the segment cap cannot replace what the cap card showed;
+    - a render without remote time (the segment cap) shows the default wording, which is kept as "no choice";
+    - a reply is kept for what the Writer actually rendered from it: each field it applied, field by field. A reply
+      nothing of which was applied (wrong shape, an unknown field, IDs that were not offered, a handled selector error)
+      showed the default wording, which is kept as "no choice" like the cap's, so a later version never asks for another."""
+
+    def __init__(self, ask, held, remote):
+        self.ask, self.held, self.remote = ask, held, remote
+        self.digest, self.reply, self.asked = None, None, False
+
+    def __call__(self, step, prompt, schema, options):
+        self.digest = hashlib.sha256(json.dumps([step, prompt, schema, options], sort_keys=True).encode()).hexdigest()
+        if self.digest in self.held:
+            return deepcopy(self.held[self.digest])
+        if not self.remote:
+            return None
+        self.asked, self.reply = True, None
+        self.reply = self.ask(step, prompt, schema, options)
+        return deepcopy(self.reply)
+
+    def keep(self, rendered):
+        """{digest: choice or None} to hold for what `rendered` (the Writer's selections) shows, or {} when nothing is new.
+
+        None is the default wording: a render that had no remote time, or whose reply (wrong shape, an unknown field, an
+        unoffered ID, prose, empty, or no answer at all after a handled selector error) the Writer did not apply, so the
+        card shows the reviewed default and a later version shows that same default."""
+        if self.digest is None or self.digest in self.held:
+            return {}
+        reply = self.reply
+        if not self.asked or not isinstance(reply, dict) or reply.keys() - set(copy.FIELDS):
+            return {self.digest: None}  # the Writer ignores a reply with an unknown field altogether
+        applied = {key: deepcopy(choice) for key, choice in reply.items() if self._applied(key, choice, rendered.get(key))}
+        return {self.digest: applied or None}
+
+    @staticmethod
+    def _applied(key, choice, shown):
+        if choice is None:
+            return key == 'story'  # a declined story is an answer the Writer honours
+        if not isinstance(choice, dict) or not isinstance(shown, dict):
+            return False
+        if choice == shown:
+            return True
+        # a copied description is re-rendered with other phrases of the same banks: same template, same IDs elsewhere
+        return (key == 'description' and choice.get('template_id') == shown.get('template_id')
+                and choice.get('fact_ids') == shown.get('fact_ids')
+                and len(choice.get('phrase_ids') or ()) == len(shown.get('phrase_ids') or ()))
+
+
 class ProductionStages(Stages):
     def __init__(self, conversation, pinned):
         super().__init__(pinned, start=self.start_plan, render=self.render_listing, mapper=edits.codex_mapper(step=pinned[0]['steps']['edit_map']))
@@ -110,6 +167,10 @@ class ProductionStages(Stages):
         self.missing = missing.MissingInfo(pinned)
         self.writer = copy.Writer(pinned)
         self.selector = copy.codex_selector()
+
+    def _job_selector(self, work, *, remote):
+        """This render's copy selector (None when there is no selector): it replays the wording the job already showed."""
+        return None if self.selector is None else _Wording(self.selector, getattr(work, 'wording', None) or {}, remote)
 
     def catalog(self):
         return load_content(editor._load(str(self.c.sdir))[2] / 'hass' / 'content')
@@ -257,7 +318,7 @@ class ProductionStages(Stages):
                                size_text=(listing['size'] or '') if sha == listing['photo'] else '', source_read=source or '',
                                facts=facts, private=finance.private, label_claims=tuple(listing.get('labelClaims') or ()),
                                other_descriptions=tuple(p['description'] for p in content.active_products() if p.get('description')))
-        selector = None if local or self._remaining(work) < 26 else self.selector
+        selector = self._job_selector(work, remote=not (local or self._remaining(work) < 26))
         draft, written, origin = self._candidate(context, listing, finance, content.makers, key, fresh, url, sha, selector)
         if draft is None or written is None or not frozen.matches_draft(draft):
             return None
@@ -298,7 +359,7 @@ class ProductionStages(Stages):
             # cap and omit the optional picture annotation if both won't fit.
             note = compose(self.replies, {'maker_left_off_label': {'brand': label}}) or note
         return Card(draft, png, frozen.variant, frozen.image_path, frozen.image_sha256,
-                    note, candidate=True)
+                    note, candidate=True, wording=selector.keep(written.selections) if selector is not None else None)
 
     def _candidate(self, context, listing, finance, makers, key, fresh, url, sha, selector):
         written = self.writer.write(context, selector)

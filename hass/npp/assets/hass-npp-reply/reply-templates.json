@@ -10,6 +10,7 @@
   },
   "questions": {
     "ask_identity": "I can't tell what this is. What is it, or can you send a clearer photo?",
+    "ask_identity_conflict": "Your item name, the label and the photo don't match. What is it? Reply \"it is …\"",
     "ask_price": "What's the selling price?",
     "ask_unit": "Is that price each or per lb?",
     "ask_price_unit": "What's the selling price, and is that each or per lb?",

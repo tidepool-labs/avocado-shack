@@ -270,12 +270,20 @@ class StageTests(unittest.TestCase):
 
     def test_name_and_maker_conflict_asks_what_it_is_before_any_card(self):
         # #634 R5 -> checkpoint 2 option A (t_3eb38fab): a made-by name the confident photo disagrees with, and a
-        # confident label that contradicts his maker. No card or draft; the existing identity question is the reply.
-        # His "it is ..." answer names it and the card carries the case-31b label explanation, so nothing is silent.
+        # confident label that contradicts his maker. No card or draft; the identity question is the reply, in its
+        # conflict form, which tells him to reply "it is ..." (R6 -> checkpoint 3 option A, t_d61dc2c1). A plain reply
+        # is not read as the item: the same question, naming the form again, comes back (the second of two asks). His
+        # "it is ..." answer names it and the card carries the case-31b label explanation, so nothing is silent.
+        question = self.conv.npp.replies['questions']['ask_identity_conflict']
+        self.assertIn('Reply "it is …"', question)
         self.reading.update(brand_on_label='Quarry Lane', confidence=dict(item=1, category=1, brand=1))
         self.case.say('made by Miners, Miners Brussels sprouts, $8 each', photos=1)
         self.case.work()
-        self.assertEqual(self.case.transport.texts, [self.conv.npp.replies['questions']['ask_identity']])
+        self.assertEqual(self.case.transport.texts, [question])
+        self.no_draft()
+        self.case.say('Brussels sprouts')
+        self.case.work()
+        self.assertEqual(self.case.transport.texts, [question, question])
         self.no_draft()
         self.case.say('it is Brussels sprouts')
         self.case.work()

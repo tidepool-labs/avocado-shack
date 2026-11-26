@@ -286,7 +286,8 @@ class DualConflictTests(_Decide):
 
     def setUp(self):
         super().setUp()
-        self.ask_identity = self.rules.replies["questions"]["ask_identity"]
+        self.ask_identity = self.rules.replies["questions"]["ask_identity_conflict"]
+        self.assertIn('Reply "it is …"', self.ask_identity)  # checkpoint 3 A: the question names the form that works
         self.dual = dict(self.reading, item="Wild Plum Jam", brand_on_label="Quarry Lane",
                          confidence=dict(self.reading["confidence"], item=1, brand=1))
 

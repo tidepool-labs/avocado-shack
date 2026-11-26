@@ -270,6 +270,8 @@ class MissingInfoTest(unittest.TestCase):
             self.assertIn(e["question"], replies["questions"])
             if "question_when_unit_said" in e:
                 self.assertIn(e["question_when_unit_said"], replies["questions"])
+            if "question_when_conflict" in e:
+                self.assertIn(e["question_when_conflict"], replies["questions"])
         self.assertIn(rules["maker_resolution"]["near_match"]["question"], replies["questions"])
 
     def test_price_is_never_read_from_a_photo_model_or_web_page(self):

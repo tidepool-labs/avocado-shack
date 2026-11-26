@@ -293,7 +293,8 @@ class MissingInfo:
         no confident photo read or when it agrees with that read; against a confident photo it does not agree with,
         the photo read is kept and `name_from_photo` tells the composer to say so (on the card he corrects it with
         "call it ...", the card-out name edit; before a card, an "it is ..." line outranks the photo). When the label also
-        contradicts the maker he named, no name is used and the identity question is asked instead (checkpoint 2, A).
+        contradicts the maker he named, no name is used and the identity question is asked in its conflict form, which
+        names the "it is ..." reply (checkpoints 2 and 3, option A).
         History inputs are durable question IDs supplied by the composer.
         `near_maker_confirmed` is the owner's answer to the near_maker question: True reuses the matched record,
         False keeps the owner-named maker as new, None (unanswered) asks once.
@@ -312,8 +313,9 @@ class MissingInfo:
         if identity_conflict:
             # Checkpoint 2 option A (t_3eb38fab): his made-by name disagrees with the confident photo read AND the label
             # contradicts the maker he named. The one bracket cannot carry both explanations, and the photo and the
-            # caption disagree on item and maker alike, so no card yet: neither name is used and the existing identity
-            # question is asked. His "it is ..." answer then names it and the card carries only the label explanation.
+            # caption disagree on item and maker alike, so no card yet: neither name is used and the identity question is
+            # asked in its conflict form, which tells him to reply "it is ..." (checkpoint 3 A, t_d61dc2c1). That answer
+            # names it and the card carries only the label explanation.
             photo_item, name_from_photo = None, False
         typed = owner_item or (None if name_from_photo or identity_conflict else owner_named)
         item = label_reader.identity_text("name", typed, title=True) or photo_item
@@ -348,6 +350,8 @@ class MissingInfo:
                 break  # first find out what it is; no price read-back or extra ask on a non-product
             rule = self.essentials[qid]
             template = rule["question_when_unit_said"] if qid == "selling_price" and unit else rule["question"]
+            if qid == "identity" and identity_conflict:
+                template = rule["question_when_conflict"]  # checkpoint 3 A (t_d61dc2c1): tell him the form that works
             add(qid, templates[template], self.rules["max_asks_per_essential"])
 
         duplicates = _duplicates(item, products, makers, clover)

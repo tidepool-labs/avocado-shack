@@ -1,7 +1,8 @@
 """H67: the product name the owner typed right after naming its maker outranks the photo read, like an "it is ..." line."""
 import unittest
 
-from hass.npp.missing import MissingInfo, OwnerPrice, owner_named_item
+from hass.npp.job import owner_item
+from hass.npp.missing import MissingInfo, OwnerPrice, owner_named_item, owner_typed_item
 from hass.skills.item_intake import caption_answers, unresolved_finance
 from hass.tests.test_npp_identify import EXAMPLES, PINNED
 
@@ -48,6 +49,40 @@ class OwnerNamedItemTests(unittest.TestCase):
         self.assertEqual(owner_named_item(texts), "dark maple syrup")
         self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley maple syrup", "make it $16")), "maple syrup")
 
+    def test_a_clause_that_describes_the_maker_is_not_an_item_name(self):
+        # Contract: only an item name counts. Bug: "Maple Valley is based in Vermont" gave "is based in Vermont" as owner_item.
+        for rest in ("is based in Vermont", "are a family farm", "was founded in 1990", "has been around a while",
+                     "in Vermont", "from Vermont", "and Sons", "makes syrup", "located in Vermont", "that sells honey"):
+            with self.subTest(rest=rest):
+                self.assertIsNone(owner_named_item((f"made by Maple Valley, Maple Valley {rest}",)))
+
+    def test_item_names_with_plain_connecting_words_still_count(self):
+        self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley peaches in syrup",)), "peaches in syrup")
+        self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley dark and robust maple syrup",)),
+                         "dark and robust maple syrup")
+
+
+class OrderedOwnerItemTests(unittest.TestCase):
+    # Contract: of the two owner-item forms, the one typed last wins. Bug: any "it is ..." line beat a later made-by name.
+    def test_a_later_made_by_name_beats_an_earlier_it_is_line(self):
+        texts = ("it is honey", "made by Maple Valley, Maple Valley maple syrup")
+        self.assertEqual(owner_typed_item(texts, owner_item), "maple syrup")
+
+    def test_a_later_it_is_line_beats_an_earlier_made_by_name(self):
+        texts = ("made by Maple Valley, Maple Valley maple syrup", "it is honey")
+        self.assertEqual(owner_typed_item(texts, owner_item), "honey")
+
+    def test_a_later_message_with_neither_form_keeps_the_earlier_one(self):
+        self.assertEqual(owner_typed_item(("it is honey", "make it $16"), owner_item), "honey")
+        self.assertEqual(owner_typed_item(("made by Maple Valley, Maple Valley maple syrup", "thanks"), owner_item), "maple syrup")
+
+    def test_an_unusable_later_made_by_clause_does_not_erase_an_earlier_it_is_line(self):
+        texts = ("it is honey", "made by Maple Valley, Maple Valley is based in Vermont")
+        self.assertEqual(owner_typed_item(texts, owner_item), "honey")
+
+    def test_no_owner_item_at_all_gives_none(self):
+        self.assertIsNone(owner_typed_item(("made by Maple Valley, $15 each", "hello"), owner_item))
+
 
 class DecidePrecedenceTests(unittest.TestCase):
     def setUp(self):
@@ -60,13 +95,18 @@ class DecidePrecedenceTests(unittest.TestCase):
         reading = Identifier(PINNED, runner=lambda _: runner_output(self.reading)).read((b"fixture",)).evidence
         remainder, fields = caption_answers(caption)
         price = OwnerPrice(fields.get("price"), fields.get("price_unit", fields.get("sold_by")), unresolved_finance(remainder))
-        return self.rules.decide(reading, price=price, owner_item=owner_named_item((remainder,)), owner_texts=(remainder,))
+        return self.rules.decide(reading, price=price, owner_item=owner_typed_item((remainder,), owner_item), owner_texts=(remainder,))
 
     def test_owner_typed_name_outranks_the_photo_read(self):
         decision = self.decide("made by Maple Valley, Maple Valley dark and robust maple syrup, $15 each")
         self.assertEqual(decision.item, "Dark And Robust Maple Syrup")
         self.assertTrue(decision.ready)
         self.assertEqual(decision.maker.phrase, "Maple Valley")
+
+    def test_a_maker_description_clause_keeps_the_photo_read(self):
+        decision = self.decide("made by Maple Valley, Maple Valley is based in Vermont, $15 each")
+        self.assertEqual(decision.item, "Maple Syrup")
+        self.assertTrue(decision.ready)
 
     def test_without_an_owner_typed_name_the_photo_read_is_kept(self):
         decision = self.decide("made by Maple Valley, $15 each")

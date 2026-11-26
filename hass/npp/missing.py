@@ -89,31 +89,44 @@ def _owner_maker(texts, item):
 
 
 _HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|but|or|like|similar)\b|[?$0-9]", re.I)
+# A clause about the maker, not a product name: it opens with a preposition, conjunction or relative word ("in Vermont",
+# "and Sons", "that sells honey") or carries a verb ("is based in Vermont", "makes syrup", "was founded in 1990").
+_NOT_ITEM = re.compile(r"^(?:in|from|at|near|on|of|by|for|to|with|and|since|who|that|which|where|when)\b"
+                       r"|\b(?:is|are|was|were|am|be|been|has|have|had|does|did|based|located|founded|established|"
+                       r"makes|sells|owns|lives|grows|ships|started|began)\b", re.I)
+
+
+def _named_in(text):
+    clauses = [clause.strip() for clause in re.split(r"[;\n,]", text)]
+    makers = [match[1].strip().rstrip(".!") for clause in clauses
+              if (match := re.fullmatch(r"made by\s+(.+?)\s*", clause, re.I))]
+    if len(makers) != 1 or not makers[0]:
+        return None
+    lead = re.compile(re.escape(makers[0]) + r"\s+(.+)", re.I)
+    found = []
+    for clause in clauses:
+        match = lead.fullmatch(clause)
+        if not match:
+            continue
+        rest = match[1].strip().rstrip(".!").strip()
+        found.append(None if not rest or _HEDGE.search(rest) or _NOT_ITEM.search(rest) else label_reader.identity_text("name", rest))
+    return found[0] if len(found) == 1 else None
 
 
 def owner_named_item(texts):
     """The product name the owner typed right after naming its maker: "made by Maple Valley, Maple Valley dark and robust
     maple syrup" -> "dark and robust maple syrup". Only a clause of the same message that starts with the exact made-by
-    phrase (a word boundary after it) and adds plain words counts; a hedge, question, price or digit gives None, as
-    does a clause that only repeats the maker. Like an "it is ..." line, the result is the owner's own field and so
-    outranks the photo read; the latest message wins."""
-    for text in reversed(list(texts)):
-        clauses = [clause.strip() for clause in re.split(r"[;\n,]", text)]
-        makers = [match[1].strip().rstrip(".!") for clause in clauses
-                  if (match := re.fullmatch(r"made by\s+(.+?)\s*", clause, re.I))]
-        if len(makers) != 1 or not makers[0]:
-            continue
-        lead = re.compile(re.escape(makers[0]) + r"\s+(.+)", re.I)
-        found = []
-        for clause in clauses:
-            match = lead.fullmatch(clause)
-            if not match:
-                continue
-            rest = match[1].strip().rstrip(".!").strip()
-            found.append(None if not rest or _HEDGE.search(rest) else label_reader.identity_text("name", rest))
-        if len(found) == 1 and found[0]:
-            return found[0]
-    return None
+    phrase (a word boundary after it) and adds plain item words counts; a hedge, question, price, digit or a clause that
+    describes the maker ("Maple Valley is based in Vermont") gives None, as does a clause that only repeats the maker.
+    Like an "it is ..." line, the result is the owner's own field and so outranks the photo read; the latest message wins."""
+    return next((name for text in reversed(list(texts)) if (name := _named_in(text))), None)
+
+
+def owner_typed_item(texts, plain):
+    """The owner's own item name from either form, the one typed last winning: `plain` is the "it is ..." reader
+    (job.owner_item) and the made-by form is owner_named_item's. A later message that gives neither keeps the earlier
+    one; inside one message the made-by clause follows the "it is" opening, so it wins there."""
+    return next((name for text in reversed(list(texts)) if (name := _named_in(text) or plain(text))), None)
 
 
 def _maker(phrase, evidence, makers):

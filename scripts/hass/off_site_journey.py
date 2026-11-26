@@ -144,7 +144,13 @@ def serve(root, scratch):
     if spec is None or spec.loader is None:
         raise Refused('sandbox-server-loader-missing')
     module = module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Loading the sandbox server must not write storefront-mockup/__pycache__ into the sandbox worktree
+    # (it would show as untracked there); some other test module may have flipped this flag, so pin it here.
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     vars(module).update(CONFIG=scratch / 'unused-community.json', DB=scratch / 'unused-community.sqlite3')
 
     class MarketOnly(module.Handler):

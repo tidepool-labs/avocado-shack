@@ -55,6 +55,7 @@ class Decision:
     missing: tuple
     questions: tuple  # tuples of (durable question id, rendered sentence)
     note: str = ""
+    name_from_photo: bool = False  # a made-by name that disagreed with a confident photo read was not used
 
     @property
     def ready(self):
@@ -92,8 +93,10 @@ _HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|
 # A clause after the maker is either an item name ("dark and robust maple syrup", "Brussels sprouts") or a sentence
 # about the maker ("is based in Vermont", "works in Vermont", "produces honey"). A sentence needs a verb; a name is a
 # noun phrase. English third-person verbs and plural nouns share one shape ("works"/"sprouts"), so no single word list
-# or shape rule separates them (three returns on #634). _maker_sentence() therefore uses four independent tests, each
-# failing closed (None keeps the photo read and the identity question):
+# or shape rule separates them (four returns on #634). _maker_sentence() therefore uses four independent tests, each
+# failing closed (None keeps the photo read and the identity question). They are a first layer only: a gap in them
+# cannot silently replace a confident photo read, because decide() uses a made-by name only when it agrees with that
+# read (rule-29 disposition A, t_8bbd055e):
 #  1. it opens with a word that cannot start an item name: preposition, conjunction, relative word or pronoun
 #     ("in Vermont", "and Sons", "that sells honey", "we make honey");
 #  2. it carries a copula, auxiliary or a past participle that only describes a business ("is based", "was founded",
@@ -177,15 +180,43 @@ def owner_named_item(texts):
     maple syrup" -> "dark and robust maple syrup". Only a clause of the same message that starts with the exact made-by
     phrase (a word boundary after it) and adds plain item words counts; a hedge, question, price, digit or a clause that
     describes the maker ("Maple Valley is based in Vermont") gives None, as does a clause that only repeats the maker.
-    Like an "it is ..." line, the result is the owner's own field and so outranks the photo read; the latest message wins."""
+    Unlike an "it is ..." line it is read out of a sentence, so decide() (owner_named) uses it only when no confident
+    photo read disagrees with it; the latest message wins."""
     return next((name for text in reversed(list(texts)) if (name := _named_in(text))), None)
 
 
+def owner_typed_form(texts, plain):
+    """("it_is" | "made_by", name) for the owner's own item name, the form typed last winning, or (None, None):
+    `plain` is the "it is ..." reader (job.owner_item) and the made-by form is owner_named_item's. A later message that
+    gives neither keeps the earlier one; inside one message the made-by clause follows the "it is" opening, so it wins
+    there. The two forms differ in weight: an "it is ..." line is the owner's item field and always outranks the photo;
+    a made-by name is read out of a sentence, so decide() lets it replace only a photo read it agrees with."""
+    for text in reversed(list(texts)):
+        if name := _named_in(text):
+            return "made_by", name
+        if name := plain(text):
+            return "it_is", name
+    return None, None
+
+
 def owner_typed_item(texts, plain):
-    """The owner's own item name from either form, the one typed last winning: `plain` is the "it is ..." reader
-    (job.owner_item) and the made-by form is owner_named_item's. A later message that gives neither keeps the earlier
-    one; inside one message the made-by clause follows the "it is" opening, so it wins there."""
-    return next((name for text in reversed(list(texts)) if (name := _named_in(text) or plain(text))), None)
+    """The owner's own item name from either form, the one typed last winning (see owner_typed_form)."""
+    return owner_typed_form(texts, plain)[1]
+
+
+_FILLER = frozenset("and & n of the with a an in".split())
+
+
+def _name_words(value):
+    words = re.findall(r"[^\W\d_]+", claims.fold(value or ""))
+    return {word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+            for word in words} - _FILLER
+
+
+def agrees_with_photo(name, photo_item):
+    """A made-by name agrees with a confident photo read when they share a content word (one plural s folded):
+    "dark and robust maple syrup" / "maple syrup", "Calabrese salamini" / "Calabrese Mini Salami"."""
+    return bool(_name_words(name) & _name_words(photo_item))
 
 
 def _maker(phrase, evidence, makers):
@@ -230,13 +261,16 @@ class MissingInfo:
         self.rules = json.loads(files[RULES])
         self.essentials = {rule["id"]: rule for rule in self.rules["essentials"]}
 
-    def decide(self, reading=None, *, price=OwnerPrice(), owner_item=None, owner_texts=(), products=(), makers=None,
-               clover=None, ask_counts=None, answered=(), duplicate_confirmed=False, near_maker_confirmed=None):
+    def decide(self, reading=None, *, price=OwnerPrice(), owner_item=None, owner_named=None, owner_texts=(), products=(),
+               makers=None, clover=None, ask_counts=None, answered=(), duplicate_confirmed=False, near_maker_confirmed=None):
         """Return a pure decision over S2 evidence and projected inputs.
 
         `clover` is an optional already-loaded local Snapshot, not a client; only
         names are inspected. Receipts can use rule IDs, not finance or till rows.
         `owner_item` is a field explicitly set by the owner, not a caption dump.
+        `owner_named` is the name he typed after its maker (owner_typed_form "made_by"): it names the item when there is
+        no confident photo read or when it agrees with that read; against a confident photo it does not agree with,
+        the photo read is kept and `name_from_photo` tells the composer to say so (he corrects it with "it is ...").
         History inputs are durable question IDs supplied by the composer.
         `near_maker_confirmed` is the owner's answer to the near_maker question: True reuses the matched record,
         False keeps the owner-named maker as new, None (unanswered) asks once.
@@ -248,7 +282,10 @@ class MissingInfo:
         minimum = self.essentials["identity"]["min_confidence"]
         confidence = evidence.get("confidence", {})
         photo_item = evidence.get("item") if evidence.get("is_product") is True and confidence.get("item", 0) >= minimum else None
-        item = label_reader.identity_text("name", owner_item, title=True) or photo_item
+        name_from_photo = bool(not owner_item and owner_named and photo_item
+                               and not agrees_with_photo(owner_named, photo_item))
+        typed = owner_item or (None if name_from_photo else owner_named)
+        item = label_reader.identity_text("name", typed, title=True) or photo_item
         kind = evidence.get("kind") if photo_item else None
         defaults = self.rules["kind_default_category"]
         guess = evidence.get("category_guess") if kind and confidence.get("category", 0) >= minimum else None
@@ -300,4 +337,4 @@ class MissingInfo:
         if maker.state == "contradictory":
             note = self.replies["brackets"]["parts"]["maker_left_off_label"].format(brand=evidence["brand_on_label"])
         return Decision(bool(item), item, category, OwnerPrice(amount, unit, price.unresolved), maker, duplicates,
-                        missing, tuple(questions), note)
+                        missing, tuple(questions), note, name_from_photo)

@@ -2,7 +2,7 @@
 import unittest
 
 from hass.npp.job import owner_item
-from hass.npp.missing import MissingInfo, OwnerPrice, owner_named_item, owner_typed_item
+from hass.npp.missing import MissingInfo, OwnerPrice, owner_named_item, owner_typed_form, owner_typed_item
 from hass.skills.item_intake import caption_answers, unresolved_finance
 from hass.tests.test_npp_identify import EXAMPLES, PINNED
 
@@ -108,13 +108,15 @@ class _Decide(unittest.TestCase):
         self.rules = MissingInfo(PINNED)
         self.reading = dict(EXAMPLES[1], item="maple syrup", kind="food", category_guess="pantry")
 
-    def decide(self, caption):
+    def decide(self, caption, reading=None):
         from hass.npp.identify import Identifier
         from hass.tests.test_npp_identify import runner_output
-        reading = Identifier(PINNED, runner=lambda _: runner_output(self.reading)).read((b"fixture",)).evidence
+        reading = Identifier(PINNED, runner=lambda _: runner_output(reading or self.reading)).read((b"fixture",)).evidence
         remainder, fields = caption_answers(caption)
         price = OwnerPrice(fields.get("price"), fields.get("price_unit", fields.get("sold_by")), unresolved_finance(remainder))
-        return self.rules.decide(reading, price=price, owner_item=owner_typed_item((remainder,), owner_item), owner_texts=(remainder,))
+        form, typed = owner_typed_form((remainder,), owner_item)  # exactly as ProductionStages.start_plan passes it
+        return self.rules.decide(reading, price=price, owner_item=typed if form == "it_is" else None,
+                                 owner_named=typed if form == "made_by" else None, owner_texts=(remainder,))
 
 
 class DecidePrecedenceTests(_Decide):
@@ -136,8 +138,9 @@ class DecidePrecedenceTests(_Decide):
 
 
 class MakerSentenceOrItemNameTests(unittest.TestCase):
-    """#634 rule-29 disposition. Paired decision controls, both required: a sentence about the maker never overrides a
-    confident photo, and a genuine item name the owner typed after its maker does, even when the photo disagrees."""
+    """#634 rule-29 checkpoint. The filter: a sentence about the maker gives None, a genuine item name keeps its typed
+    shape. The filter is a first layer only; PairedDecisionControlTests show why a gap in it cannot silently replace a
+    confident photo read (disposition A, t_8bbd055e)."""
 
     MAKER_SENTENCES = (
         # R2.1: a third-person verb followed by a connector and a place
@@ -182,7 +185,10 @@ class MakerSentenceOrItemNameTests(unittest.TestCase):
 
 
 class PairedDecisionControlTests(_Decide):
-    """The two controls exercised through decide() with a confident photo read of "maple syrup"."""
+    """Rule-29 disposition A (t_8bbd055e). With a confident photo read of "maple syrup": a maker sentence never replaces
+    it; a made-by name that agrees with it does (cases 8 and 10); a made-by name that disagrees with it is not used
+    silently, the photo read is kept and the card says so, and the owner's "it is ..." line then wins. Without a
+    confident photo read the made-by name names the item. So no filter gap can silently swap a confident identity."""
 
     def test_a_maker_sentence_never_overrides_the_confident_photo(self):
         self.assertGreaterEqual(self.reading["confidence"]["item"], 0.8)
@@ -193,13 +199,76 @@ class PairedDecisionControlTests(_Decide):
                 self.assertEqual(decision.item, "Maple Syrup")
                 self.assertEqual(decision.maker.phrase, "Maple Valley")
 
-    def test_a_genuine_item_name_overrides_the_conflicting_photo(self):
-        for rest, item in (("Brussels sprouts", "Brussels Sprouts"), ("peaches in syrup", "Peaches In Syrup"),
-                           ("smoked salmon", "Smoked Salmon")):
+    def test_a_filter_gap_against_a_confident_photo_keeps_the_photo_and_says_so(self):
+        # The class R0-R3 kept finding: a maker sentence no test names ("whittles with care" passes the filter).
+        self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley whittles with care",)), "whittles with care")
+        decision = self.decide("made by Maple Valley, Maple Valley whittles with care, $15 each")
+        self.assertEqual(decision.item, "Maple Syrup")
+        self.assertTrue(decision.name_from_photo)
+        self.assertTrue(decision.ready)
+
+    def test_a_made_by_name_that_agrees_with_the_photo_names_the_item(self):
+        for rest, item in (("dark and robust maple syrup", "Dark And Robust Maple Syrup"), ("maple syrups", "Maple Syrups"),
+                           ("Grade A syrup", "Grade A Syrup")):
             with self.subTest(rest=rest):
                 decision = self.decide(f"made by Maple Valley, Maple Valley {rest}, $15 each")
                 self.assertEqual(decision.item, item)
-                self.assertEqual(decision.maker.phrase, "Maple Valley")
+                self.assertFalse(decision.name_from_photo)
+
+    def test_a_conflicting_genuine_name_is_shown_not_silently_used_and_it_is_wins(self):
+        for rest in ("Brussels sprouts", "dates and figs", "smoked salmon"):
+            with self.subTest(rest=rest):
+                decision = self.decide(f"made by Maple Valley, Maple Valley {rest}, $15 each")
+                self.assertEqual(decision.item, "Maple Syrup")
+                self.assertTrue(decision.name_from_photo)
+        # His one-message correction after seeing the note is the "it is ..." field, which outranks the photo.
+        self.assertEqual(owner_typed_form(("made by Maple Valley, Maple Valley Brussels sprouts", "it is Brussels sprouts"),
+                                          owner_item), ("it_is", "Brussels sprouts"))
+        decision = self.decide("it is Brussels sprouts, $15 each")
+        self.assertEqual(decision.item, "Brussels Sprouts")
+        self.assertFalse(decision.name_from_photo)
+
+    def test_without_a_confident_photo_read_the_made_by_name_names_the_item(self):
+        unsure = dict(self.reading, confidence=dict(self.reading["confidence"], item=0.3))
+        decision = self.decide("made by Maple Valley, Maple Valley Brussels sprouts, $15 each", unsure)
+        self.assertEqual(decision.item, "Brussels Sprouts")
+        self.assertFalse(decision.name_from_photo)
+
+    def test_the_card_note_fits_the_one_bracket(self):
+        from hass.npp.reply import compose
+        note = compose(self.rules.replies, {"name_from_photo": {}})
+        self.assertEqual(note, 'name from the photo: say "it is …" to use yours')
+        self.assertLessEqual(len(note) + 2, self.rules.replies["caps"]["bracket_max_chars"])
+        both = compose(self.rules.replies, {"name_from_photo": {}, "basic_wording": {}})
+        self.assertEqual(both, note)  # the lower-priority part is dropped, never this one
+
+
+class StartPlanNameFromPhotoTests(unittest.TestCase):
+    """Through the real caption intake and ProductionStages.start_plan (photo read "Fixture product", confidence 1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from hass.npp import assets
+        cls.pinned = assets()
+
+    def plan(self, caption):
+        from hass.tests.test_npp_caption_table import replay
+        return replay(caption, "food", self.pinned)[2]
+
+    def test_a_conflicting_made_by_name_keeps_the_photo_and_flags_the_card(self):
+        listing = self.plan("made by Maple Valley, Maple Valley Brussels sprouts, $15 each").listing
+        self.assertEqual(listing["name"], "Fixture Product")
+        self.assertIs(listing.get("nameFromPhoto"), True)
+
+    def test_an_agreeing_made_by_name_names_the_listing_without_a_flag(self):
+        listing = self.plan("made by Maple Valley, Maple Valley smoked fixture product, $15 each").listing
+        self.assertEqual(listing["name"], "Smoked Fixture Product")
+        self.assertNotIn("nameFromPhoto", listing)
+
+    def test_an_it_is_line_names_the_listing_without_a_flag(self):
+        listing = self.plan("it is Brussels sprouts, $15 each").listing
+        self.assertEqual(listing["name"], "Brussels Sprouts")
+        self.assertNotIn("nameFromPhoto", listing)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@
     "ready_note": "A card PNG is attached to every ready prompt. {n} is the version number, so an edit gives a new tag such as 4ed1-2."
   },
   "brackets": {
-    "compose": {"open": "(", "close": ")", "separator": "; ", "drop_order": ["basic_wording", "story_not_found", "maker_left_off", "maker_left_off_label", "claim_left_off", "picture_own_photo", "picture_house"],
+    "compose": {"open": "(", "close": ")", "separator": "; ", "drop_order": ["basic_wording", "story_not_found", "maker_left_off", "maker_left_off_label", "name_from_photo", "claim_left_off", "picture_own_photo", "picture_house"],
                 "rule": "Join the parts that apply in priority order (the reverse of drop_order) into one bracket appended to the line; when the bracket would pass bracket_max_chars drop parts from the front of drop_order until it fits."},
     "parts": {
       "picture_own_photo": "picture: your own photo",
@@ -31,7 +31,8 @@
       "story_not_found": "maker story not found",
       "maker_left_off": "maker left off: say \"made by …\" to add it",
       "maker_left_off_label": "maker left off: label says {brand}",
-      "claim_left_off": "left off: {claim}"
+      "claim_left_off": "left off: {claim}",
+      "name_from_photo": "name from the photo: say \"it is …\" to use yours"
     }
   },
   "guards": {

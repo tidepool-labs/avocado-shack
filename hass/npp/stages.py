@@ -210,9 +210,11 @@ class ProductionStages(Stages):
         reading = {} if local else self.identifier.read(self._photo(s) for s in shas).evidence or {}
         slot = work.request['slots'].get('intake', {})
         amount = slot.get('price') if slot.get('price_span') else None
-        named_item = missing.owner_typed_item(texts, owner_item)
+        form, typed = missing.owner_typed_form(texts, owner_item)
         decision = self.missing.decide(reading, price=missing.OwnerPrice(amount, slot.get('sold_by')),
-                                       owner_item=named_item, owner_texts=texts, products=content.products, makers=content.makers,
+                                       owner_item=typed if form == 'it_is' else None,
+                                       owner_named=typed if form == 'made_by' else None,
+                                       owner_texts=texts, products=content.products, makers=content.makers,
                                        clover=self.clover(), ask_counts=work.ask_counts, answered=work.answered,
                                        duplicate_confirmed=work.answers.get('duplicate') is True,
                                        near_maker_confirmed=work.answers.get('near_maker'))
@@ -251,6 +253,7 @@ class ProductionStages(Stages):
             'photo': shas[0], 'personOrScreen': reading.get('has_person_or_screen'),
             'size': reading.get('size_text'), 'labelWords': label_words, 'labelClaims': label_claims,
             **({'supplier': supplier} if supplier else {}),
+            **({'nameFromPhoto': True} if decision.name_from_photo else {}),
         }, identified=True)
 
     def _owner_supplier(self, texts):
@@ -351,6 +354,8 @@ class ProductionStages(Stages):
             parts['claim_left_off'] = {'claim': ', '.join(written.dropped)}
         if fresh and 'story' not in written.text:
             parts['story_not_found'] = {}
+        if listing.get('nameFromPhoto'):
+            parts['name_from_photo'] = {}
         label = None
         if not key and not brand:
             label = listing.get('contradictoryLabel')

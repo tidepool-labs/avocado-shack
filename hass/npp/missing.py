@@ -247,6 +247,21 @@ def _verb_shaped(word):
     return len(word) >= 4 and word.endswith("s") and not word.endswith(("ss", "us", "is"))
 
 
+def _photo_compounds(words, photo):
+    """A hyphenated word made only of the photo's own words and "and"/"n" is the photo's name in another spelling:
+    "half-and-half" for a "Half & Half" label (golden case 3), so it is read as its parts. Any other hyphenated word
+    stays whole, so it still counts as one added word that must be a plain modifier ("hand-poured" is not split)."""
+    out = []
+    for word in words:
+        parts = word.split("-")
+        if len(parts) > 1 and all(_fold_plural(part) in photo or part in ("and", "n") for part in parts) \
+                and any(_fold_plural(part) in photo for part in parts):
+            out.extend(parts)
+        else:
+            out.append(word)
+    return out
+
+
 def agrees_with_photo(name, photo_item):
     """A made-by name agrees with a confident photo read when it repeats at least one of the photo's content words (one
     plural s folded) and every word it adds is a plain modifier: no function word other than "and", no verb and no
@@ -257,7 +272,7 @@ def agrees_with_photo(name, photo_item):
     must also name the same product as the photo's last word (_same_head): "maple sugar" shares "maple" with "maple
     syrup" but is another product, so it does not agree (R7, checkpoint 4)."""
     photo = _name_words(photo_item)
-    words = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", claims.fold(name or ""))
+    words = _photo_compounds(re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", claims.fold(name or "")), photo)
     if not photo or not words or not {_fold_plural(word) for word in words} & photo:
         return False
     if not _same_head(words[-1], re.findall(r"[^\W\d_]+", claims.fold(photo_item))[-1]):

@@ -15,6 +15,26 @@ _NUMBER = re.compile(
 _MONEY = re.compile(r'[$¢€£¥]|\b(?:cents?|dollars?|bucks?|usd)\b|(?<!\d)\d+\.\d{2}(?!\d)', re.I)
 _UNCLEAR = re.compile(r'\b(?:or|maybe|about|around|roughly|approximately)\b', re.I)
 _UNPLACED = re.compile(r'\b(?:half|halves|quarters?|couple|hundred|thousand|million|billion|trillion|point|grand|score|gross|pair)\b', re.I)
+# A picture read is OCR of a printed label: its "Half & Half" ampersand also comes back as a guillemet (golden case 3
+# reads "Half » Half" on the polished card). Only picture_problem accepts these marks, and only as the one character
+# between the two halves; a slash, a math sign or a loose "half" still fails closed.
+_OCR_HALF_AND_HALF = re.compile(r'(?<!\w)half\s*[»«]\s*half(?!\w)', re.I)
+
+
+def _normalization_changes_numbers(text, normalized):
+    """NFKC can shift offsets (ligatures, "™" -> "TM"), so permits are never carried through it. It is harmless only when
+    it changes no number reading: no single character normalizes into a numeral (superscript, circled or fullwidth
+    digit) and the normalized text reads the same amounts, unplaced number words and hedges as the original. It is
+    read twice: as NFKC gives it, and with each expanded symbol set apart ("ﬁve™" is "five TM", not "fiveTM")."""
+    if any(c != (n := unicodedata.normalize('NFKC', c)) and any(d.isnumeric() for d in n) for c in text):
+        return True
+    spaced = ''.join(f' {n} ' if n != c and not unicodedata.category(c).startswith('L') else n
+                     for c in text for n in (unicodedata.normalize('NFKC', c),))
+
+    def reading(value):
+        return ([x.amounts for x in values(value)], [m[0].lower() for m in _UNPLACED.finditer(value)],
+                [m[0].lower() for m in _UNCLEAR.finditer(value)])
+    return reading(normalized) != reading(text) or reading(spaced) != reading(text)
 
 
 @dataclass(frozen=True)
@@ -50,16 +70,19 @@ def values(text, *, finance_clause=False):
     return tuple(found)
 
 
-def problem(text, private=(), *, permitted=(), digits_allowed=False):
-    """Return a fixed reason, never the detected text or amount. Permits are exact character ranges."""
+def problem(text, private=(), *, permitted=(), digits_allowed=False, idioms=()):
+    """Return a fixed reason, never the detected text or amount. Permits and extra `idioms` are exact character ranges
+    of `text` (picture_problem passes its OCR spellings of "Half & Half" as idioms)."""
     normalized = unicodedata.normalize('NFKC', text)
     if _MONEY.search(normalized):
         return 'money'
-    # Do not transfer character offsets through normalization (ligatures etc.).
-    if normalized != text and any(c.isnumeric() for c in normalized):
+    # Do not transfer character offsets through normalization (ligatures etc.): it may only differ where it changes no
+    # number reading. "™" next to a printed digit is no longer refused; a superscript, fullwidth or ligature-hidden
+    # number still is.
+    if normalized != text and _normalization_changes_numbers(text, normalized):
         return 'number-unclear'
     numbers = values(text)
-    idioms = tuple(m.span() for m in intake.HALF_AND_HALF.finditer(text))
+    idioms = (*idioms, *(m.span() for m in intake.HALF_AND_HALF.finditer(text)))
     if ((numbers and _UNCLEAR.search(text)) or any(not n.amounts for n in numbers)
             or any(not any(a <= m.start() < b for a, b in (*idioms, *((n.start, n.end) for n in numbers)))
                    for m in _UNPLACED.finditer(text))
@@ -88,7 +111,8 @@ def picture_problem(read, source_read, label_words, private=()):
     read, source_read = (' '.join(text.split()) for text in (read, source_read))
     confirmed = [' '.join(word.split()) for word in label_words if isinstance(word, str)
                  and literal_spans(source_read, [' '.join(word.split())])]
-    return problem(read, private, permitted=literal_spans(read, confirmed), digits_allowed=True)
+    return problem(read, private, permitted=literal_spans(read, confirmed), digits_allowed=True,
+                   idioms=tuple(m.span() for m in _OCR_HALF_AND_HALF.finditer(read)))
 
 
 @dataclass(frozen=True)

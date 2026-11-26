@@ -107,7 +107,10 @@ class OrderedOwnerItemTests(unittest.TestCase):
 class _Decide(unittest.TestCase):
     def setUp(self):
         self.rules = MissingInfo(PINNED)
-        self.reading = dict(EXAMPLES[1], item="maple syrup", kind="food", category_guess="pantry")
+        # A maple syrup photo whose label agrees with the maker the captions name, so each test here has at most the
+        # name conflict; DualConflictTests adds the contradicting label (EXAMPLES[1] alone reads "Hillside Kitchen").
+        self.reading = dict(EXAMPLES[1], item="maple syrup", kind="food", category_guess="pantry",
+                            brand_on_label="Maple Valley")
 
     def decide(self, caption, reading=None):
         from hass.npp.identify import Identifier
@@ -272,6 +275,81 @@ class PairedDecisionControlTests(_Decide):
                 self.assertTrue(compose(self.rules.replies, {"name_from_photo": {}, **other}).startswith(note))
         self.assertEqual(compose(self.rules.replies, {"name_from_photo": {}, "picture_own_photo": {}}),
                          'name from photo: say "call it …"; picture: your own photo')
+
+
+class DualConflictTests(_Decide):
+    """R5 (t_99dbc297 @be76379f) -> checkpoint 2 option A (t_3eb38fab). A made-by name that conflicts with a confident
+    photo AND a confident label that contradicts the maker he named: both explanations cannot fit the one bracket, so
+    no card is made; the existing identity question is asked. Either conflict alone keeps its card and its own note."""
+
+    CAPTION = "made by Miners, Miners Brussels sprouts, $8 each"  # the reviewer's probe
+
+    def setUp(self):
+        super().setUp()
+        self.ask_identity = self.rules.replies["questions"]["ask_identity"]
+        self.dual = dict(self.reading, item="Wild Plum Jam", brand_on_label="Quarry Lane",
+                         confidence=dict(self.reading["confidence"], item=1, brand=1))
+
+    def test_both_conflicts_ask_what_it_is_and_make_no_card(self):
+        decision = self.decide(self.CAPTION, self.dual)
+        self.assertFalse(decision.ready)
+        self.assertFalse(decision.identified)
+        self.assertIsNone(decision.item)
+        self.assertEqual(decision.missing, ("identity",))
+        self.assertEqual(decision.questions, (("identity", self.ask_identity),))
+        self.assertFalse(decision.name_from_photo)
+        self.assertEqual(decision.note, "")  # neither disclosure can be silently dropped from a card that is not sent
+
+    def test_his_it_is_answer_names_it_and_only_the_label_explanation_remains(self):
+        # His answer is its own message after the question, read over both texts exactly as start_plan does.
+        from hass.npp.identify import Identifier
+        from hass.tests.test_npp_identify import runner_output
+        reading = Identifier(PINNED, runner=lambda _: runner_output(self.dual)).read((b"fixture",)).evidence
+        remainder, fields = caption_answers(self.CAPTION)
+        texts = (remainder, "it is Brussels sprouts")
+        form, typed = owner_typed_form(texts, owner_item)
+        self.assertEqual((form, typed), ("it_is", "Brussels sprouts"))
+        decision = self.rules.decide(reading, price=OwnerPrice(fields.get("price"), fields.get("sold_by")),
+                                     owner_item=typed, owner_texts=texts)
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.item, "Brussels Sprouts")
+        self.assertFalse(decision.name_from_photo)
+        self.assertEqual(decision.maker.state, "contradictory")
+        self.assertEqual(decision.note, "maker left off: label says Quarry Lane")
+
+    def test_only_the_name_conflict_keeps_the_photo_card_with_the_warning(self):
+        for brand in (None, "Miners"):  # no label, or a label that agrees with his maker
+            with self.subTest(brand=brand):
+                decision = self.decide(self.CAPTION, dict(self.dual, brand_on_label=brand))
+                self.assertTrue(decision.ready)
+                self.assertEqual(decision.item, "Wild Plum Jam")
+                self.assertTrue(decision.name_from_photo)
+                self.assertNotEqual(decision.maker.state, "contradictory")
+
+    def test_an_unsure_label_is_not_a_maker_conflict(self):
+        unsure = dict(self.dual, confidence=dict(self.dual["confidence"], brand=0.3))
+        decision = self.decide(self.CAPTION, unsure)
+        self.assertTrue(decision.ready)
+        self.assertTrue(decision.name_from_photo)
+
+    def test_only_the_label_conflict_keeps_its_card_and_explanation(self):
+        # An agreeing made-by name (case 31b shape): the name is used, the label explanation is the note.
+        decision = self.decide("made by Miners, Miners wild plum jam, $8 each", self.dual)
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.item, "Wild Plum Jam")
+        self.assertFalse(decision.name_from_photo)
+        self.assertEqual(decision.note, "maker left off: label says Quarry Lane")
+        # No typed name at all: the photo names it and the label explanation is the note.
+        decision = self.decide("made by Miners, $8 each", self.dual)
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.note, "maker left off: label says Quarry Lane")
+
+    def test_without_a_confident_photo_read_his_made_by_name_still_names_it(self):
+        unsure = dict(self.dual, confidence=dict(self.dual["confidence"], item=0.3))
+        decision = self.decide(self.CAPTION, unsure)
+        self.assertTrue(decision.ready)
+        self.assertEqual(decision.item, "Brussels Sprouts")
+        self.assertEqual(decision.note, "maker left off: label says Quarry Lane")
 
 
 class CardNoteTests(unittest.TestCase):

@@ -292,7 +292,8 @@ class MissingInfo:
         `owner_named` is the name he typed after its maker (owner_typed_form "made_by"): it names the item when there is
         no confident photo read or when it agrees with that read; against a confident photo it does not agree with,
         the photo read is kept and `name_from_photo` tells the composer to say so (on the card he corrects it with
-        "call it ...", the card-out name edit; before a card, an "it is ..." line outranks the photo).
+        "call it ...", the card-out name edit; before a card, an "it is ..." line outranks the photo). When the label also
+        contradicts the maker he named, no name is used and the identity question is asked instead (checkpoint 2, A).
         History inputs are durable question IDs supplied by the composer.
         `near_maker_confirmed` is the owner's answer to the near_maker question: True reuses the matched record,
         False keeps the owner-named maker as new, None (unanswered) asks once.
@@ -306,7 +307,15 @@ class MissingInfo:
         photo_item = evidence.get("item") if evidence.get("is_product") is True and confidence.get("item", 0) >= minimum else None
         name_from_photo = bool(not owner_item and owner_named and photo_item
                                and not agrees_with_photo(owner_named, photo_item))
-        typed = owner_item or (None if name_from_photo else owner_named)
+        identity_conflict = bool(name_from_photo and _maker(_owner_maker(owner_texts, photo_item), evidence,
+                                                             makers).state == "contradictory")
+        if identity_conflict:
+            # Checkpoint 2 option A (t_3eb38fab): his made-by name disagrees with the confident photo read AND the label
+            # contradicts the maker he named. The one bracket cannot carry both explanations, and the photo and the
+            # caption disagree on item and maker alike, so no card yet: neither name is used and the existing identity
+            # question is asked. His "it is ..." answer then names it and the card carries only the label explanation.
+            photo_item, name_from_photo = None, False
+        typed = owner_item or (None if name_from_photo or identity_conflict else owner_named)
         item = label_reader.identity_text("name", typed, title=True) or photo_item
         kind = evidence.get("kind") if photo_item else None
         defaults = self.rules["kind_default_category"]

@@ -41,6 +41,15 @@ def decode(raw):
     return result
 
 
+def delivered_versions(expect):
+    """The card versions a case expects to reach chat: every `versions` row marked delivered, plus v1 when the case
+    expects it to be delivered only after a failed send is retried (case 34's `v1_delivered_after_retry`)."""
+    found = {row['n'] for row in expect.get('versions', []) if row.get('delivered') is True}
+    if expect.get('v1_delivered_after_retry') is True:
+        found.add(1)
+    return found
+
+
 def expected():
     rows, deliveries = {}, set()
     for case_id, case in run_npp.load_cases().items():
@@ -55,10 +64,9 @@ def expected():
                 if seed['maker'] and (seed['town'] or seed['url']) and view['expect'].get('research'):
                     layers.add('seed')
             rows[key] = (view['path'], view['terminal'], layers)
-            deliveries.update((*key, row['n']) for row in view['expect'].get('versions', [])
-                              if row.get('delivered') is True)
+            deliveries.update((*key, n) for n in delivered_versions(view['expect']))
     if ({key[0] for key in rows} != set(range(1, 39)) or len(rows) != 49
-            or len(deliveries) != 78 or len(set(CASE_IDS)) != 12):
+            or len(deliveries) != 79 or len(set(CASE_IDS)) != 12):
         raise ValueError('unexpected versioned corpus')
     return rows, deliveries
 

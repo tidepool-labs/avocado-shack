@@ -28,7 +28,10 @@ def synthetic_receipts():
                 if seed['maker'] and (seed['town'] or seed['url']) and view['expect'].get('research'):
                     layers['seed'] = 'pass'
             rows.append(dict(identity, path=view['path'], terminal=view['terminal'], result='pass', layers=layers))
-            for version in view['expect'].get('versions', []):
+            listed = list(view['expect'].get('versions', []))
+            if view['expect'].get('v1_delivered_after_retry') is True and not any(v['n'] == 1 for v in listed):
+                listed.append({'n': 1, 'delivered': True})  # case 34: v1 reaches chat after the failed send is retried
+            for version in listed:
                 if version.get('delivered') is True:
                     deliveries.append(dict(identity, n=version['n'], state='confirmed',
                                            png_sha256=PNG, attachment_sha256=PNG))
@@ -71,7 +74,7 @@ class DemoAcceptanceTests(unittest.TestCase):
         report, evidence = synthetic_receipts()
         self.assertEqual(self.invoke(report, evidence), (0, {
             'status': 'pass', 'reasons': [], 'cases': 38, 'variants': 49, 'required_variants': 49,
-            'deliveries': 78, 'required_deliveries': 78, 'reference_cards': 12,
+            'deliveries': 79, 'required_deliveries': 79, 'reference_cards': 12,
         }))
 
     def test_missing_variant_holds_even_when_summary_claims_everything_passed(self):
@@ -110,6 +113,21 @@ class DemoAcceptanceTests(unittest.TestCase):
                 else:
                     rows.append(dict(next(row for row in rows if row['id'] == 25 and row['n'] == 1), n=2))
                 self.assert_hold(report, evidence, 'delivery-coverage')
+
+    def test_retried_v1_of_the_failed_send_case_is_a_required_delivery(self):
+        # Case 34 declares its v1 delivery only as v1_delivered_after_retry. The real bundle sees that v1 confirmed in
+        # chat; the checker must require it (not count it as an unexpected extra) and must hold when it is missing.
+        _rows, deliveries = npp_demo_acceptance.expected()
+        self.assertIn((34, None, 1), deliveries)
+        self.assertEqual(len(deliveries), 79)
+        report, evidence = synthetic_receipts()
+        self.assertEqual(self.invoke(report, evidence)[0], 0)
+        evidence['deliveries'] = [row for row in evidence['deliveries'] if (row['id'], row['n']) != (34, 1)]
+        self.assertEqual(self.assert_hold(report, evidence, 'delivery-coverage')['deliveries'], 78)
+        self.assertEqual(npp_demo_acceptance.delivered_versions({'v1_delivered_after_retry': False}), set())
+        self.assertEqual(npp_demo_acceptance.delivered_versions(
+            {'versions': [{'n': 1, 'delivered': True}, {'n': 2, 'delivered': False}], 'v1_delivered_after_retry': True}),
+            {1})
 
     def test_reference_id_cannot_be_replaced_by_duplicate(self):
         # Twelve rows do not prove that twelve distinct expected cards were rendered.

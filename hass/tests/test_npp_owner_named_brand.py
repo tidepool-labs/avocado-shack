@@ -8,7 +8,8 @@ twin only when both slots are bound and the owner's own words say "<brand> <item
 import unittest
 
 from hass.npp import assets
-from hass.npp.copy import Context, Writer
+from hass.npp.copy import Context, Writer, brand_twin
+from hass.npp.stages import _Wording
 from hass.npp.validate import field_problem
 
 FAIR_HILLS = 'made by Fair Hills Farm, Fair Hills Farm apple juice, $6 each'
@@ -92,6 +93,26 @@ class OwnerNamedBrandTests(unittest.TestCase):
         again = self.writer.write(ctx, lambda *_: dict(first.selections), proposed=dict(first.text))
         self.assertEqual(again.text, first.text)
         self.assertEqual(again.selections, first.selections)
+
+    def test_held_wording_shows_the_same_brand_name_on_the_next_version(self):
+        # Price-only edit (cases 4, 5, 6, 11): the job holds the selector's item-only choice as applied, because the card
+        # showed its brand twin; the next version replays it without asking and shows the same name and alt text.
+        ctx = self.ctx()
+        reply = {'name': {'template_id': 'name-item'}, 'imageAlt': {'template_id': 'alt-name'}}
+        first = _Wording(lambda *_: dict(reply), {}, True)
+        v1 = self.writer.write(ctx, first)
+        held = first.keep(v1.selections)
+        self.assertEqual(list(held.values()), [reply])
+        second = _Wording(lambda *_: self.fail('asked again'), held, True)
+        v2 = self.writer.write(ctx, second)
+        self.assertEqual((v2.text['name'], v2.text['imageAlt']), (v1.text['name'], v1.text['imageAlt']))
+        self.assertEqual(v2.text['name'], 'Fair Hills Farm apple juice')
+
+    def test_only_the_item_only_templates_have_a_brand_twin(self):
+        self.assertEqual(brand_twin({'template_id': 'name-item-size'}), {'template_id': 'name-brand-item-size'})
+        for value in ({'template_id': 'name-brand-item'}, {'template_id': 'alt-name'}, None, 'name-item', {}):
+            with self.subTest(value=value):
+                self.assertIsNone(brand_twin(value))
 
     def test_size_variant_upgrades_to_its_brand_twin(self):
         ctx = self.ctx(size_text='12 fl oz', source_read='Fair Hills Farm apple juice 12 fl oz')

@@ -1,9 +1,12 @@
 """L22 owns the actual writer → HTTP → Market DOM boundary, not draft correctness."""
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.hass import off_site_journey as off
 
@@ -63,6 +66,24 @@ class TrackedInputsOnlyTests(unittest.TestCase):
         self.refused()
         with self.assertRaisesRegex(off.Refused, '^input-tree-unverified$'):
             off.tracked_inputs_only(self.root / 'missing')
+
+
+class ServeLeavesNoBytecodeTests(unittest.TestCase):
+    # Contract: loading the sandbox community-server must leave the sandbox worktree clean whatever the
+    # process-wide bytecode flag is. Believable bug: with the flag off (test order/shard dependent) the
+    # loader writes <sandbox>/storefront-mockup/__pycache__ and the journey's clean-status check fails.
+    def test_serving_does_not_write_a_pycache_even_when_bytecode_writing_is_on(self):
+        tmp = tempfile.TemporaryDirectory(prefix='hass-l22-serve-')
+        self.addCleanup(tmp.cleanup)
+        scratch = Path(tmp.name).resolve()
+        root = scratch / 'site'
+        root.mkdir()
+        shutil.copyfile(off.ROOT / 'storefront-mockup' / off.SERVER, root / off.SERVER)
+        with mock.patch.object(sys, 'dont_write_bytecode', False):
+            with off.serve(root, scratch):
+                pass
+            self.assertFalse(sys.dont_write_bytecode)  # the caller's setting is restored
+        self.assertEqual(list(scratch.rglob('__pycache__')), [])
 
 
 @unittest.skipUnless(off.Previewer(off.ROOT).env.get('PLAYWRIGHT_MODULE'), 'local Playwright runtime unavailable')

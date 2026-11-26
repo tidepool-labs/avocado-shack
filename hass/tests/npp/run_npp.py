@@ -1087,6 +1087,20 @@ def public_holds(text, term):
     return bool(term) and re.search(r'(?<!\w)' + re.escape(term), text.casefold()) is not None
 
 
+def description_lacks_findings(texts, terms):
+    """Case 14's `description_lacks`: no listed word starts a word in any of `texts` (label -> description).
+
+    Same word-start match as public_lacks ('eat' finds 'eating', not 'great'). A missing or empty description is a
+    finding, never a pass: an absent field cannot prove the candle was not described as food."""
+    found = []
+    for label, text in texts.items():
+        if not isinstance(text, str) or not text.strip():
+            found.append(f'description_lacks: {label} description is missing')
+            continue
+        found.extend(f'description_lacks: {label} description holds {term!r}' for term in terms if public_holds(text, term))
+    return found
+
+
 def public_text(records, card_dom=(), makers=None):
     """What a visitor can read: the product's visible fields, its resolved maker panel, and the card's DOM text.
 
@@ -1482,6 +1496,13 @@ def check_card(view, fx, state, versions, decision, gaps, attempts, late, observ
         if 'story_equals' in want:
             same('story_equals', story, want['story_equals'])
             newly_covered.add('story_equals')
+        if 'description_lacks' in want:
+            # The shown listing and every delivered version's description: a word the owner could have approved counts.
+            texts = {'shown': seen.get('description')}
+            texts.update({f'v{n}': product_record(v).get('description')
+                          for n, v in sorted(versions.items()) if v.get('delivered_at')})
+            bad.extend(description_lacks_findings(texts, want['description_lacks']))
+            newly_covered.add('description_lacks')
         if 'description_equals' in want and 'description_equals' not in newly_covered:
             same('description_equals', seen.get('description'), want['description_equals'])
             newly_covered.add('description_equals')

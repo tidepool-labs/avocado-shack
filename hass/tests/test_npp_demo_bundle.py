@@ -33,7 +33,10 @@ def synthetic_run(report, *, attachment=None, skip=()):
         for case in run_npp.load_cases().values():
             for variant, view in run_npp.case_views(case):
                 versions, cards = [], {}
-                for version in view['expect'].get('versions', []):
+                listed = list(view['expect'].get('versions', []))
+                if view['expect'].get('v1_delivered_after_retry') is True and not any(v['n'] == 1 for v in listed):
+                    listed.append({'n': 1, 'delivered': True})  # case 34: v1 reaches chat after the failed send is retried
+                for version in listed:
                     row = view['id'] * 100 + version['n']
                     png = f'card {view["id"]} {variant} {version["n"]}'.encode()
                     delivered = version.get('delivered') is True and (view['id'], variant, version['n']) not in skip
@@ -112,7 +115,7 @@ class ReplayTests(unittest.TestCase):
         report, _ = synthetic_receipts()
         raw, rows = self.run_replay(synthetic_run(report))
         self.assertEqual(raw, (json.dumps(report, sort_keys=True) + '\n').encode())
-        self.assertEqual(len(rows.rows), 78)
+        self.assertEqual(len(rows.rows), 79)
         # The hooks were scoped to the run.
         self.assertIs(run_npp.case_views.__module__, run_npp.__name__)
 
@@ -163,7 +166,7 @@ class ProducerConsumerJoinTests(unittest.TestCase):
         report, _ = synthetic_receipts()
         result, _, _ = self.produce(report)
         self.assertEqual(result, {'status': 'pass', 'reasons': [], 'cases': 38, 'variants': 49, 'required_variants': 49,
-                                  'deliveries': 78, 'required_deliveries': 78, 'reference_cards': 12})
+                                  'deliveries': 79, 'required_deliveries': 79, 'reference_cards': 12})
 
     def test_missing_or_wrong_chat_bytes_hold_delivery_coverage(self):
         report, _ = synthetic_receipts()
@@ -175,13 +178,13 @@ class ProducerConsumerJoinTests(unittest.TestCase):
                     run = synthetic_run(report, attachment={(1, 1): b'another card'})
                 result, _, _ = self.produce(report, run=run)
                 self.assertEqual(result['reasons'], ['delivery-coverage'])
-                self.assertEqual(result['deliveries'], 77)
+                self.assertEqual(result['deliveries'], 78)
 
     def test_gallery_cannot_stand_in_for_deliveries_or_vice_versa(self):
         report, _ = synthetic_receipts()
         result, _, _ = self.produce(report, cards=[{'id': '01', 'png_sha256': 'c' * 64}])
         self.assertEqual((result['reasons'], result['reference_cards'], result['deliveries']),
-                         (['reference-coverage'], 1, 78))
+                         (['reference-coverage'], 1, 79))
 
     def test_mixed_run_or_stale_checkout_holds(self):
         report, _ = synthetic_receipts()

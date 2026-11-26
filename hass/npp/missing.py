@@ -94,9 +94,10 @@ _HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|
 # about the maker ("is based in Vermont", "works in Vermont", "produces honey"). A sentence needs a verb; a name is a
 # noun phrase. English third-person verbs and plural nouns share one shape ("works"/"sprouts"), so no single word list
 # or shape rule separates them (four returns on #634). _maker_sentence() therefore uses four independent tests, each
-# failing closed (None keeps the photo read and the identity question). They are a first layer only: a gap in them
-# cannot silently replace a confident photo read, because decide() uses a made-by name only when it agrees with that
-# read (rule-29 disposition A, t_8bbd055e):
+# failing closed (None keeps the photo read and the identity question). They are a first layer only: against a
+# confident photo read, decide() uses a made-by name only when agrees_with_photo() holds, i.e. it repeats a photo word
+# and adds only plain modifiers (no connector, verb or verb-shaped word); otherwise the photo name stays and the card
+# says so (rule-29 disposition A, t_8bbd055e):
 #  1. it opens with a word that cannot start an item name: preposition, conjunction, relative word or pronoun
 #     ("in Vermont", "and Sons", "that sells honey", "we make honey");
 #  2. it carries a copula, auxiliary or a past participle that only describes a business ("is based", "was founded",
@@ -205,18 +206,38 @@ def owner_typed_item(texts, plain):
 
 
 _FILLER = frozenset("and & n of the with a an in".split())
+# Words a modifier of the photo's own name never needs. A made-by name that adds one of them to the photo words is a
+# sentence about the maker ("whittles with maple syrup", "sells maple syrup in Vermont"), not a fuller item name.
+_NOT_MODIFIER = ((_OPENER | _PLACE_PREPOSITION | _CONNECTOR | _STATEMENT | _TIME | _FIRST_VERB | _THIRD_PERSON
+                  | {"of", "the", "a", "an", "or", "but", "so", "than", "via"}) - {"and", "&", "n"})
+
+
+def _fold_plural(word):
+    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
 
 
 def _name_words(value):
-    words = re.findall(r"[^\W\d_]+", claims.fold(value or ""))
-    return {word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
-            for word in words} - _FILLER
+    return {_fold_plural(word) for word in re.findall(r"[^\W\d_]+", claims.fold(value or ""))} - _FILLER
+
+
+def _verb_shaped(word):
+    # A third-person verb and a plural noun share this shape ("whittles"/"sprouts"); as an added word it is not trusted.
+    return len(word) >= 4 and word.endswith("s") and not word.endswith(("ss", "us", "is"))
 
 
 def agrees_with_photo(name, photo_item):
-    """A made-by name agrees with a confident photo read when they share a content word (one plural s folded):
-    "dark and robust maple syrup" / "maple syrup", "Calabrese salamini" / "Calabrese Mini Salami"."""
-    return bool(_name_words(name) & _name_words(photo_item))
+    """A made-by name agrees with a confident photo read when it repeats at least one of the photo's content words (one
+    plural s folded) and every word it adds is a plain modifier: no function word other than "and", no verb and no
+    verb-shaped word. "dark and robust maple syrup", "maple syrups" and "Grade A syrup" agree with "maple syrup",
+    "Calabrese salamini" with "Calabrese Mini Salami". "whittles with maple syrup", "sells maple syrup in Vermont" and
+    "Pours maple syrup" do not: decide() then keeps the photo read and the card says so. This is structural, not a
+    vocabulary of maker sentences: an added word that could be a verb or a connector is never trusted."""
+    photo = _name_words(photo_item)
+    words = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", claims.fold(name or ""))
+    if not photo or not words or not {_fold_plural(word) for word in words} & photo:
+        return False
+    added = [word for word in words if _fold_plural(word) not in photo and word not in ("and", "&", "n", "a")]
+    return not any(word in _NOT_MODIFIER or _verb_shaped(word) for word in added)
 
 
 def _maker(phrase, evidence, makers):
@@ -270,7 +291,8 @@ class MissingInfo:
         `owner_item` is a field explicitly set by the owner, not a caption dump.
         `owner_named` is the name he typed after its maker (owner_typed_form "made_by"): it names the item when there is
         no confident photo read or when it agrees with that read; against a confident photo it does not agree with,
-        the photo read is kept and `name_from_photo` tells the composer to say so (he corrects it with "it is ...").
+        the photo read is kept and `name_from_photo` tells the composer to say so (on the card he corrects it with
+        "call it ...", the card-out name edit; before a card, an "it is ..." line outranks the photo).
         History inputs are durable question IDs supplied by the composer.
         `near_maker_confirmed` is the owner's answer to the near_maker question: True reuses the matched record,
         False keeps the owner-named maker as new, None (unanswered) asks once.

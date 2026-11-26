@@ -1,5 +1,5 @@
 {
-  "assets_sha256": "41612bc2db13092bf75999d7be514eb6f402f8c91293b8ceac92e1bcea572777",
+  "assets_sha256": "55a089e8f941663440bcc420dd11d2d4bea912d7fe70822b0c6bfe06862c87a0",
   "cases_sha256": "4a47682ec28277ebb7817e3f382ae9b5d7a57a3594ff4d631fc277a8c54cc688",
   "models": {
     "copy_select": [
@@ -31,7 +31,7 @@
       "low"
     ]
   },
-  "pins_sha256": "545d4692ecd22fccf3cd137a6f805a517a08543aae5e7fa75a666e4ef4e543ae",
+  "pins_sha256": "a93a9b8412168844d296be909d72ba2291e196df5a37b9c43804a28d2d72d347",
   "renderer_commit": null,
   "renderer_sha256": "c813f584fec9d9e19289fd069219dda4b206abc319e9d0549951a8bd087d73dd",
   "runner_version": 2,

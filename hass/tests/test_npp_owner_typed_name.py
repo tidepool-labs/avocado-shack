@@ -2,7 +2,8 @@
 import unittest
 
 from hass.npp.job import owner_item
-from hass.npp.missing import MissingInfo, OwnerPrice, owner_named_item, owner_typed_form, owner_typed_item
+from hass.npp.missing import (MissingInfo, OwnerPrice, agrees_with_photo, owner_named_item, owner_typed_form,
+                               owner_typed_item)
 from hass.skills.item_intake import caption_answers, unresolved_finance
 from hass.tests.test_npp_identify import EXAMPLES, PINNED
 
@@ -207,6 +208,29 @@ class PairedDecisionControlTests(_Decide):
         self.assertTrue(decision.name_from_photo)
         self.assertTrue(decision.ready)
 
+    def test_a_maker_sentence_that_repeats_photo_words_does_not_agree(self):
+        # R4.2 (t_4e69bc17 @504859ae): "whittles with maple syrup" passes the filter and shares maple/syrup; a shared
+        # word alone is not agreement. Every word it adds must be a plain modifier, so it keeps the photo and says so.
+        for rest in ("whittles with maple syrup", "whittles and sells maple syrup", "Pours maple syrup",
+                     "Taps their maple syrup", "maple syrup by the case"):
+            with self.subTest(rest=rest):
+                self.assertIsNotNone(owner_named_item((f"made by Maple Valley, Maple Valley {rest}",)))
+                self.assertFalse(agrees_with_photo(rest, "maple syrup"))
+                decision = self.decide(f"made by Maple Valley, Maple Valley {rest}, $15 each")
+                self.assertEqual(decision.item, "Maple Syrup")
+                self.assertTrue(decision.name_from_photo)
+
+    def test_agreement_is_photo_words_plus_plain_modifiers(self):
+        for name, photo in (("dark and robust maple syrup", "maple syrup"), ("maple syrups", "maple syrup"),
+                            ("Grade A syrup", "maple syrup"), ("pure Vermont maple syrup", "maple syrup"),
+                            ("smoked maple syrup", "Maple Syrup"), ("Calabrese salamini", "Calabrese Mini Salami")):
+            with self.subTest(name=name):
+                self.assertTrue(agrees_with_photo(name, photo))
+        for name, photo in (("Brussels sprouts", "maple syrup"), ("syrup", ""), ("", "maple syrup"),
+                            ("maple syrup by the case", "maple syrup"), ("works maple syrup", "maple syrup")):
+            with self.subTest(name=name):
+                self.assertFalse(agrees_with_photo(name, photo))
+
     def test_a_made_by_name_that_agrees_with_the_photo_names_the_item(self):
         for rest, item in (("dark and robust maple syrup", "Dark And Robust Maple Syrup"), ("maple syrups", "Maple Syrups"),
                            ("Grade A syrup", "Grade A Syrup")):
@@ -237,10 +261,95 @@ class PairedDecisionControlTests(_Decide):
     def test_the_card_note_fits_the_one_bracket(self):
         from hass.npp.reply import compose
         note = compose(self.rules.replies, {"name_from_photo": {}})
-        self.assertEqual(note, 'name from the photo: say "it is …" to use yours')
+        self.assertEqual(note, 'name from photo: say "call it …"')
         self.assertLessEqual(len(note) + 2, self.rules.replies["caps"]["bracket_max_chars"])
-        both = compose(self.rules.replies, {"name_from_photo": {}, "basic_wording": {}})
-        self.assertEqual(both, note)  # the lower-priority part is dropped, never this one
+        self.assertEqual(self.rules.replies["brackets"]["compose"]["drop_order"][-1], "name_from_photo")  # dropped last
+        # R4.3: it survives every other part (they are dropped first), and still fits beside a picture note.
+        for other in ({"basic_wording": {}}, {"picture_house": {}}, {"picture_own_photo": {}},
+                      {"claim_left_off": {"claim": "organic, gluten free"}, "picture_own_photo": {}},
+                      {"maker_left_off_label": {"brand": "Northern Woods Sugarhouse"}, "picture_house": {}}):
+            with self.subTest(other=sorted(other)):
+                self.assertTrue(compose(self.rules.replies, {"name_from_photo": {}, **other}).startswith(note))
+        self.assertEqual(compose(self.rules.replies, {"name_from_photo": {}, "picture_own_photo": {}}),
+                         'name from photo: say "call it …"; picture: your own photo')
+
+
+class CardNoteTests(unittest.TestCase):
+    """R4.3 at the stage level: ProductionStages.render_listing builds its one bracket with stages.card_note."""
+
+    def setUp(self):
+        from hass import npp
+        self.replies = npp.assets()[2]
+        self.cap = self.replies["caps"]["bracket_max_chars"]
+
+    def note(self, parts, label=None):
+        from hass.npp.stages import card_note
+        note = card_note(self.replies, parts, label)
+        self.assertLessEqual(len(note) + 2, self.cap)
+        return note
+
+    def test_the_warning_survives_realistic_simultaneous_notes(self):
+        flagged = {"name_from_photo": {}}
+        for parts in ({"picture_house": {}}, {"picture_own_photo": {}},
+                      {"picture_own_photo": {}, "claim_left_off": {"claim": "organic"}, "basic_wording": {}},
+                      {"picture_house": {}, "story_not_found": {}, "claim_left_off": {"claim": "gluten free, vegan"}}):
+            with self.subTest(parts=sorted(parts)):
+                self.assertIn('name from photo: say "call it …"', self.note({**flagged, **parts}))
+
+    def test_the_contradictory_label_fallback_keeps_the_warning(self):
+        label = {"maker_left_off_label": {"brand": "Northern Woods"}, "picture_house": {}}
+        note = self.note({"name_from_photo": {}, **label}, "Northern Woods")
+        self.assertIn('name from photo: say "call it …"', note)
+        # Without the warning, case 31b's label explanation is unchanged (the picture part does not fit beside it).
+        self.assertEqual(self.note(label, "Northern Woods"), "maker left off: label says Northern Woods")
+
+    def test_no_flag_no_warning(self):
+        self.assertEqual(self.note({"picture_house": {}}), "picture: house style")
+
+    def test_render_listing_flags_the_part_from_the_listing(self):
+        # The part comes from the listing flag start_plan set (and an accepted "call it ..." edit clears).
+        import inspect
+        from hass.npp import stages
+        source = inspect.getsource(stages.ProductionStages.render_listing)
+        self.assertIn("if listing.get(NAME_FROM_PHOTO):\n            parts['name_from_photo'] = {}", source)
+        self.assertIn("note = card_note(self.replies, parts, label)", source)
+
+
+class CardOutNameCorrectionTests(unittest.TestCase):
+    """R4.1: the correction the note offers works through the real card-out edit route and clears the warning."""
+
+    PARENT = {"name": "Maple Syrup", "category": "pantry", "sellingPrice": "15.00", "image_variant": "raw",
+              "image_sha256": "a" * 64, "nameFromPhoto": True, "_texts": 1}
+
+    def stages(self):
+        from hass import npp
+        from hass.npp import reply
+        from hass.npp.job import Plan
+        return reply.Stages(npp.assets(), start=lambda work: Plan(listing={"name": "x"}), render=lambda work, listing: None)
+
+    def edit(self, text):
+        import json
+        from hass.npp.job import Work
+        work = Work("4ed1", {"texts": ["made by Maple Valley, Maple Valley Brussels sprouts, $15 each", text],
+                             "slots": {"intake": {"price": "15.00"}}, "attachments": []},
+                    {"listing_json": json.dumps(self.PARENT)}, None)
+        return self.stages().plan(work)
+
+    def test_the_offered_call_it_correction_is_taken_and_parsed(self):
+        stages = self.stages()
+        for text in ("call it Brussels sprouts", "call it brussels sprouts", "change the name to Brussels sprouts",
+                     "rename it to Brussels sprouts"):
+            with self.subTest(text=text):
+                self.assertTrue(stages.takes_turn(text, "card_out"))
+                plan = self.edit(text)
+                self.assertEqual(plan.patch.get("name", "").lower(), "brussels sprouts")
+                self.assertEqual(plan.listing["name"].lower(), "brussels sprouts")
+                self.assertNotIn("nameFromPhoto", plan.listing)  # the re-rendered card has no warning
+
+    def test_an_edit_that_keeps_the_photo_name_keeps_the_warning(self):
+        plan = self.edit("put it in drinks")
+        self.assertEqual(plan.listing["category"], "drinks")
+        self.assertIs(plan.listing["nameFromPhoto"], True)
 
 
 class StartPlanNameFromPhotoTests(unittest.TestCase):

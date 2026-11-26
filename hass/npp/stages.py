@@ -12,7 +12,7 @@ from hass import claims, editor, live_policy, maker_site, media, photo_polish
 from hass.content_model import load_content
 from hass.npp import copy, edits, identify, missing, picture, private_numbers, research, research_hermes, validate
 from hass.npp.job import Card, Plan, owner_item
-from hass.npp.reply import Stages, compose
+from hass.npp.reply import NAME_FROM_PHOTO, Stages, compose
 from hass.ops import photos
 
 
@@ -100,6 +100,22 @@ def _site_words(phrase, texts):
                 urls.add(url)
             follows_maker = bool(phrase and maker_clause.fullmatch(clause))
     return (next(iter(towns)) if len(towns) == 1 and phrase else '', next(iter(urls)) if len(urls) == 1 else '')
+
+
+def card_note(replies, parts, label=None):
+    """The one bracket of the ready prompt for the parts render_listing collected (<= bracket_max_chars).
+
+    name_from_photo is last in drop_order, so the name-from-photo warning and its correction survive every other part,
+    including the contradictory-label fallback below.
+    """
+    note = compose(replies, parts)
+    if label and label not in note:
+        # Case 31b explicitly explains the omission. Keep the one-bracket
+        # cap and omit the optional picture annotation if both won't fit.
+        # The name-from-photo warning outranks every other part, so it is kept here too.
+        keep = {'name_from_photo': {}} if 'name_from_photo' in parts else {}
+        note = compose(replies, {'maker_left_off_label': {'brand': label}, **keep}) or note
+    return note
 
 
 class _Wording:
@@ -253,7 +269,7 @@ class ProductionStages(Stages):
             'photo': shas[0], 'personOrScreen': reading.get('has_person_or_screen'),
             'size': reading.get('size_text'), 'labelWords': label_words, 'labelClaims': label_claims,
             **({'supplier': supplier} if supplier else {}),
-            **({'nameFromPhoto': True} if decision.name_from_photo else {}),
+            **({NAME_FROM_PHOTO: True} if decision.name_from_photo else {}),
         }, identified=True)
 
     def _owner_supplier(self, texts):
@@ -354,17 +370,13 @@ class ProductionStages(Stages):
             parts['claim_left_off'] = {'claim': ', '.join(written.dropped)}
         if fresh and 'story' not in written.text:
             parts['story_not_found'] = {}
-        if listing.get('nameFromPhoto'):
+        if listing.get(NAME_FROM_PHOTO):
             parts['name_from_photo'] = {}
         label = None
         if not key and not brand:
             label = listing.get('contradictoryLabel')
             parts['maker_left_off_label' if label else 'maker_left_off'] = {'brand': label} if label else {}
-        note = compose(self.replies, parts)
-        if label and label not in note:
-            # Case 31b explicitly explains the omission. Keep the one-bracket
-            # cap and omit the optional picture annotation if both won't fit.
-            note = compose(self.replies, {'maker_left_off_label': {'brand': label}}) or note
+        note = card_note(self.replies, parts, label)
         return Card(draft, png, frozen.variant, frozen.image_path, frozen.image_sha256,
                     note, candidate=True, wording=selector.keep(written.selections) if selector is not None else None)
 

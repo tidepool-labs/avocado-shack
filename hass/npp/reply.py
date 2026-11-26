@@ -18,6 +18,7 @@ from hass.skills import intake_simple
 SITE = "https://theavocadoman.com"
 PRODUCT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 SEEN = "_texts"  # how many request texts a version has consumed (job-private, never published)
+NAME_FROM_PHOTO = "nameFromPhoto"  # the listing kept the photo's name over a made-by name that disagreed with it
 QUESTION_STATES = ("asking",)
 EDIT_STATES = ("working", "card_out", "editing")
 
@@ -132,6 +133,10 @@ class Stages:
             found.append(edits.Edit(patch=edits.price_patch(finance)))
         listing, patch = edits.apply(parent, found)
         listing[SEEN] = len(texts)
+        if "name" in patch:
+            # He named the item himself ("call it ...", the correction the name-from-photo note offers): the card no
+            # longer carries the photo's name, so the note goes with it.
+            listing.pop(NAME_FROM_PHOTO, None)
         if not patch or all(parent.get(k) == v for k, v in patch.items() if k != "rewrite") and "rewrite" not in patch:
             return Plan(questions=(("ask_edit_unclear", self.replies["questions"]["ask_edit_unclear"]),), identified=True)
         return Plan(listing=listing, patch=patch, identified=True)

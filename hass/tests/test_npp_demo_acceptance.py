@@ -74,7 +74,7 @@ class DemoAcceptanceTests(unittest.TestCase):
         report, evidence = synthetic_receipts()
         self.assertEqual(self.invoke(report, evidence), (0, {
             'status': 'pass', 'reasons': [], 'cases': 38, 'variants': 49, 'required_variants': 49,
-            'deliveries': 79, 'required_deliveries': 79, 'reference_cards': 12,
+            'deliveries': 77, 'required_deliveries': 77, 'reference_cards': 12,
         }))
 
     def test_missing_variant_holds_even_when_summary_claims_everything_passed(self):
@@ -119,11 +119,11 @@ class DemoAcceptanceTests(unittest.TestCase):
         # chat; the checker must require it (not count it as an unexpected extra) and must hold when it is missing.
         _rows, deliveries = npp_demo_acceptance.expected()
         self.assertIn((34, None, 1), deliveries)
-        self.assertEqual(len(deliveries), 79)
+        self.assertEqual(len(deliveries), 77)
         report, evidence = synthetic_receipts()
         self.assertEqual(self.invoke(report, evidence)[0], 0)
         evidence['deliveries'] = [row for row in evidence['deliveries'] if (row['id'], row['n']) != (34, 1)]
-        self.assertEqual(self.assert_hold(report, evidence, 'delivery-coverage')['deliveries'], 78)
+        self.assertEqual(self.assert_hold(report, evidence, 'delivery-coverage')['deliveries'], 76)
         self.assertEqual(npp_demo_acceptance.delivered_versions({'v1_delivered_after_retry': False}), set())
         self.assertEqual(npp_demo_acceptance.delivered_versions(
             {'versions': [{'n': 1, 'delivered': True}, {'n': 2, 'delivered': False}], 'v1_delivered_after_retry': True}),

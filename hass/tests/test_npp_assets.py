@@ -24,6 +24,11 @@ PINS = ROOT / "hass" / "npp" / "pins.json"
 ORDINARY_OWNER_ADDRESS = {30: "https://minersfigs.com/about"}
 # Case 1 expects Hass's shelf for the tortilla chips (pantry) instead of the live card's (vegetables).
 GOLDEN_CATEGORY_DECISIONS = {1: ("vegetables", "pantry")}
+# SAFEFALLBACK option on the Hass "last 3 tests" card (local candidate; ship only if G chooses it): the saved polish
+# edits for cases 1, 2 and 9 redraw the product,
+# so the likeness gate refuses them. Cases 1 and 2 expect the owner's own photo (raw); case 9's cluttered-counter photo
+# also fails the raw style check, so it expects a retake and no card. The gate and its thresholds are unchanged.
+GOLDEN_SAFE_FALLBACK = {1: "raw", 2: "raw", 9: "retake"}
 CATEGORIES = ("fruit", "vegetables", "dairy", "eggs", "meat", "pantry", "drinks", "bread", "flowers", "general")
 KINDS = ("food", "drink", "fresh", "non-food")
 NUMBER_WORDS = set("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "
@@ -750,14 +755,14 @@ class CaseInputsTest(unittest.TestCase):
             self.assertIn(case["terminal"], allowed, case["id"])
 
     def test_paths_match_the_design_table(self):
-        """Contract: the path of each case is the design's (listing 1-17,19,21,23,24,26,27,29-32,36-38; question 18,20,22,28,33; contract 25,34,35). Bug: a case moved to a path with weaker checks."""
+        """Contract: the path of each case is the design's (listing 1-8,10-17,19,21,23,24,26,27,29-32,36-38; question 9,18,20,22,28,33; contract 25,34,35; 9 is the SAFEFALLBACK retake). Bug: a case moved to a path with weaker checks."""
         by = {c["id"]: c["path"] for c in self.cases}
-        question = {18, 20, 22, 28, 33}
+        question = {9, 18, 20, 22, 28, 33}
         contract = {25, 34, 35}
         for i in range(1, 39):
             self.assertEqual(by[i], "question" if i in question else "contract" if i in contract else "listing", i)
-        self.assertEqual({c["id"]: c["terminal"] for c in self.cases if c["id"] in (18, 20, 22, 28, 33, 34, 35)},
-                         {18: "asking", 20: "expired", 22: "asking", 28: "retake", 33: "asking", 34: "card_out", 35: "card_out"})
+        self.assertEqual({c["id"]: c["terminal"] for c in self.cases if c["id"] in (9, 18, 20, 22, 28, 33, 34, 35)},
+                         {9: "retake", 18: "asking", 20: "expired", 22: "asking", 28: "retake", 33: "asking", 34: "card_out", 35: "card_out"})
 
     def test_listing_cases_run_v1_edit_v2_tagged_yes_then_undo(self):
         """Contract: design 3.1 listing path: delivered card v1, an edit, delivered card v2, `yes <code>-2`, one commit, then `undo` drafts the hide; only the two spec rows that fix a restart or sole-delivered control (23, 24) skip the edit and keep their v1 approval. Bug: a fixture that ends at `yes <code>-1`, so the replay can never test the edit, the re-approval of the new tag or the undo."""
@@ -847,6 +852,18 @@ class CaseInputsTest(unittest.TestCase):
         for case in self.cases[:12]:
             g = load(ASSETS / case["golden"])
             used.append(g["product_id"])
+            self.assertEqual(case["expect"]["calls"], {"image_edit": 1, "search": 0, "fetch": 0, "extract": 0, "verify": 0}, case["id"])
+            self.assertEqual(case["turns"][0]["photos"], [f"npp:golden-{g['product_id'].split('-')[-1]}.jpg"])
+            fallback = GOLDEN_SAFE_FALLBACK.get(case["id"])
+            if fallback == "retake":
+                # no card is drawn, so there is no listing to compare; the case must still refuse to draft anything
+                self.assertEqual((case["path"], case["terminal"], case["expect"]["state"], case["expect"]["commits"],
+                                  case["expect"]["draft_rows"], len(case["turns"])),
+                                 ("question", "retake", "retake", 0, "none", 1), case["id"])
+                self.assertEqual(g["card"]["brand"], "From the market", case["id"])  # still one of the two no-maker goldens
+                continue
+            self.assertEqual((case["path"], case["terminal"], case["expect"]["variant"]),
+                             ("listing", "published", fallback or "polished"), case["id"])
             listing = case["expect"]["listing"]
             category = g["category"]
             if case["id"] in GOLDEN_CATEGORY_DECISIONS:
@@ -855,10 +872,12 @@ class CaseInputsTest(unittest.TestCase):
                 category = decided
             self.assertEqual((listing["brand"], listing["origin"], listing["category"], listing["maker_panel"]),
                              (g["card"]["brand"], g["card"]["origin"], category, g["card"]["meet_the_maker"] is not None), case["id"])
-            self.assertEqual(case["expect"]["calls"], {"image_edit": 1, "search": 0, "fetch": 0, "extract": 0, "verify": 0}, case["id"])
-            self.assertEqual(case["turns"][0]["photos"], [f"npp:golden-{g['product_id'].split('-')[-1]}.jpg"])
         self.assertEqual(sorted(used), sorted(load(p)["product_id"] for p in goldens))
-        self.assertEqual([c["id"] for c in self.cases[:12] if c["expect"]["listing"]["brand"] == "From the market"], [9, 12])
+        no_maker = [c["id"] for c in self.cases[:12]
+                    if load(ASSETS / c["golden"])["card"]["brand"] == "From the market"]
+        self.assertEqual(no_maker, [9, 12])
+        self.assertEqual([c["id"] for c in self.cases[:12] if "listing" in c["expect"]
+                          and c["expect"]["listing"]["brand"] == "From the market"], [12])  # 9 is the retake fallback
 
     def test_research_cases_use_a_synthetic_web_and_follow_the_g_decision(self):
         """Contract: G 2026-11-18 14:00: official site by search or owner URL, search only to locate, queries without digits, no story unless confident, never an extraction for an unverified page. Bug: a case that encodes the superseded 'zero search' rule, or a query carrying the owner's price."""

@@ -146,9 +146,10 @@ def _draw(case, golden, session, writer, media_root, now, catalog):
     finance = private_numbers.finance(price_clause, answer_unit='each')
     if not finance.price_span:
         raise ValueError('no fixture price')
-    # Golden cases supply a category and known-maker hint; do not run S2 or S4.
-    fields = case['expect']['listing']
-    category = fields['category']
+    # Golden cases supply a category and known-maker hint; do not run S2 or S4. A golden case that
+    # expects a retake (case 9 under SAFEFALLBACK) has no listing, so its saved golden card's shelf is used.
+    listing = case['expect'].get('listing')
+    category = listing['category'] if listing else _json(GOLDENS / Path(case['golden']).name)['category']
     kind = {'flowers': 'non-food', 'drinks': 'drink'}.get(category, 'food')
     maker = missing._maker(case['inputs']['known_maker'], {}, catalog.makers)
     brand = (maker.phrase or '') if maker.state == 'known' else ''

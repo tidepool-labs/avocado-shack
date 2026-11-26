@@ -2,10 +2,10 @@
   "id": 9,
   "slug": "golden-crimson-lentils",
   "title": "Golden product 9: Crimson lentils",
-  "contract": "R1.1 polished variant and gallery fidelity: a known maker is reused with no web, public fields match the live golden card, every section 3.2 check holds",
-  "bug": "pipeline invents a maker for a no-maker listing, researches a known maker, or drifts from the golden card fields (origin, category, panel)",
-  "path": "listing",
-  "terminal": "published",
+  "contract": "R1.1 golden refusal: the saved polish edit redraws the product, so the likeness gate refuses it; the owner's cluttered-counter photo fails the raw style check, so Hass asks for a new photo and drafts nothing",
+  "bug": "pipeline posts a refused polish edit or an off-style raw photo instead of asking for a retake, or drafts a card anyway",
+  "path": "question",
+  "terminal": "retake",
   "settings": {
     "npp": true,
     "houseRender": true,
@@ -24,24 +24,6 @@
       "photos": [
         "npp:golden-138.jpg"
       ]
-    },
-    {
-      "at_s": 60,
-      "from": "mike",
-      "text": "make it $5",
-      "photos": []
-    },
-    {
-      "at_s": 120,
-      "from": "mike",
-      "text": "yes {code}-2",
-      "photos": []
-    },
-    {
-      "at_s": 180,
-      "from": "mike",
-      "text": "undo",
-      "photos": []
     }
   ],
   "inputs": {
@@ -59,55 +41,15 @@
       {
         "turn": 0,
         "count": 1,
-        "kind": "card",
-        "has_all": [
-          "Post this? Reply yes <code>-1, or tell me what to change."
-        ],
-        "lacks": [
-          "picture: your own photo",
-          "picture: house style"
-        ]
-      },
-      {
-        "turn": 1,
-        "count": 1,
-        "kind": "card",
-        "has_all": [
-          "Post this? Reply yes <code>-2, or tell me what to change."
-        ],
-        "note": "the edit builds v2; every other field is copied from v1"
-      },
-      {
-        "turn": 2,
-        "count": 1,
-        "kind": "posted"
-      },
-      {
-        "turn": 3,
-        "count": 1,
-        "kind": "undo_draft",
-        "note": "undo drafts the hide of the posted listing; nothing is hidden until its own yes"
+        "kind": "retake",
+        "source": "hass.ops.photos.RETAKE"
       }
     ],
-    "state": "published",
-    "variant": "polished",
-    "picture_line": null,
-    "listing": {
-      "name_close_to": "Crimson lentils",
-      "name_tolerance_words": 1,
-      "brand": "From the market",
-      "origin": "Ask us about the source in store.",
-      "category": "pantry",
-      "price": "$5.00",
-      "maker_panel": false,
-      "description_sentences": [
-        2,
-        3
-      ],
-      "description_max_chars": 200,
-      "note": "no maker said: brand is From the market, origin is the renderer's own source line, no maker panel, no research call"
-    },
-    "commits": 1,
+    "total_replies": 1,
+    "state": "retake",
+    "draft_rows": "none",
+    "approval_rows": 0,
+    "commits": 0,
     "calls": {
       "image_edit": 1,
       "search": 0,
@@ -116,45 +58,9 @@
       "verify": 0
     },
     "checks": [
-      "fields_present",
-      "length",
-      "no_private_values",
-      "source_provenance",
-      "template_conformance",
-      "no_owner_chatter",
-      "no_copying",
       "picture",
-      "render",
       "reply",
-      "delivery_approval",
-      "existing_gates"
-    ],
-    "frozen_sha_equals_committed_file": true,
-    "versions": [
-      {
-        "n": 1,
-        "delivered": true
-      },
-      {
-        "n": 2,
-        "delivered": true,
-        "approved": true
-      }
-    ],
-    "undo": {
-      "draft": "hide",
-      "commits": 1
-    },
-    "edit_keeps": [
-      "name",
-      "brand",
-      "origin",
-      "category",
-      "imageAlt",
-      "picture_bytes",
-      "description",
-      "maker_panel",
-      "story"
+      "no_draft"
     ]
   }
 }

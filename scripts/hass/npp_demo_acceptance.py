@@ -66,7 +66,7 @@ def expected():
             rows[key] = (view['path'], view['terminal'], layers)
             deliveries.update((*key, n) for n in delivered_versions(view['expect']))
     if ({key[0] for key in rows} != set(range(1, 39)) or len(rows) != 49
-            or len(deliveries) != 79 or len(set(CASE_IDS)) != 12):
+            or len(deliveries) != 77 or len(set(CASE_IDS)) != 12):
         raise ValueError('unexpected versioned corpus')
     return rows, deliveries
 

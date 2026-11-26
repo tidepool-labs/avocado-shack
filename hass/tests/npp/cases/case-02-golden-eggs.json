@@ -2,8 +2,8 @@
   "id": 2,
   "slug": "golden-eggs",
   "title": "Golden product 2: Cal Poly eggs",
-  "contract": "R1.1 polished variant and gallery fidelity: a known maker is reused with no web, public fields match the live golden card, every section 3.2 check holds",
-  "bug": "pipeline invents a maker for a no-maker listing, researches a known maker, or drifts from the golden card fields (origin, category, panel)",
+  "contract": "R1.1 golden fidelity with the safe own-photo fallback: the saved polish edit redraws the product, so the likeness gate refuses it and the owner's own photo is used; a known maker is reused with no web, public fields match the live golden card, every section 3.2 check holds",
+  "bug": "pipeline invents a maker for a no-maker listing, researches a known maker, or drifts from the golden card fields (origin, category, panel); or posts a polish edit the likeness gate refused instead of the owner's photo",
   "path": "listing",
   "terminal": "published",
   "settings": {
@@ -61,10 +61,10 @@
         "count": 1,
         "kind": "card",
         "has_all": [
-          "Post this? Reply yes <code>-1, or tell me what to change."
+          "Post this? Reply yes <code>-1, or tell me what to change.",
+          "(picture: your own photo)"
         ],
         "lacks": [
-          "picture: your own photo",
           "picture: house style"
         ]
       },
@@ -90,8 +90,8 @@
       }
     ],
     "state": "published",
-    "variant": "polished",
-    "picture_line": null,
+    "variant": "raw",
+    "picture_line": "picture: your own photo",
     "listing": {
       "name_close_to": "Cal Poly eggs",
       "name_tolerance_words": 1,

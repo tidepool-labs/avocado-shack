@@ -89,18 +89,56 @@ def _owner_maker(texts, item):
 
 
 _HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|but|or|like|similar)\b|[?$0-9]", re.I)
-# A clause about the maker, not a product name. Fail closed (None keeps the photo and the identity question), so this is
-# deliberately broad: it opens with a preposition, conjunction, relative word or pronoun ("in Vermont", "and Sons",
-# "that sells honey", "we make honey"); it carries a verb from the list below ("is based in Vermont", "was founded");
-# or its first word is a third-person verb form, a plural-looking word ending in "s" that is followed by more item
-# words other than a connector ("produces honey", "bottles syrup", "supplies farms"). "peaches in syrup", "dates and
-# figs" and one-word names ("pickles") still count; a plural-noun-first name such as "Brussels sprouts" is lost.
-_NOT_ITEM = re.compile(r"^(?:in|from|at|near|on|of|by|for|to|with|and|since|who|that|which|where|when|"
-                       r"i|we|they|he|she|it|its|our|their|his|her|this|these|those|there|"
-                       r"make|produce|sell|grow|own|ship|bottle|supply|offer|run|operate)\b"
-                       r"|\b(?:is|are|was|were|am|be|been|has|have|had|does|did|based|located|founded|established|"
-                       r"makes|sells|owns|lives|grows|ships|produces|started|began)\b", re.I)
-_VERB_FIRST = re.compile(r"^(?!(?:\w*(?:ss|us|is)\b))\w{3,}s\s+(?!(?:and|in|with|of|n|&)\b)\S", re.I)
+# A clause after the maker is either an item name ("dark and robust maple syrup", "Brussels sprouts") or a sentence
+# about the maker ("is based in Vermont", "works in Vermont", "produces honey"). A sentence needs a verb; a name is a
+# noun phrase. English third-person verbs and plural nouns share one shape ("works"/"sprouts"), so no single word list
+# or shape rule separates them (three returns on #634). _maker_sentence() therefore uses four independent tests, each
+# failing closed (None keeps the photo read and the identity question):
+#  1. it opens with a word that cannot start an item name: preposition, conjunction, relative word or pronoun
+#     ("in Vermont", "and Sons", "that sells honey", "we make honey");
+#  2. it carries a copula, auxiliary or a past participle that only describes a business ("is based", "was founded",
+#     "located in", "family owned"), anywhere in the clause;
+#  3. its first word is a finite maker verb: a closed set of base forms that are not also food words ("make honey",
+#     "produce honey"), or the third-person form of any maker activity verb, including ones that double as nouns
+#     ("works", "lives", "bakes", "crafts", "roasts");
+#  4. structure, not vocabulary, for verbs no list names: (a) a lowercase first word shaped like a third-person verb
+#     (ends in "s", not "ss"/"us"/"is") followed by an object rather than a connector ("whittles spoons", "bottles
+#     syrup"); (b) a lowercase preposition followed by a capitalized word, i.e. a place or a business ("whittles in
+#     Vermont", "sold at Costco").
+# Item names keep their typed shape: a capitalized origin word ("Brussels sprouts", "Swiss cheese"), connectors
+# ("peaches in syrup", "dates and figs"), one plural word ("pickles"), participle adjectives ("smoked", "cured",
+# "pressed"). A lowercase plural-first name followed by a noun ("greens mix") falls back to the photo read.
+_OPENER = frozenset("in from at near on of by for to with and since who that which where when whose "
+                    "i we they he she it its it's our their his her my this these those there here".split())
+_STATEMENT = frozenset("is are was were am be been being has have had having does did will would could should shall "
+                       "might based located founded established started began begun owned operated headquartered "
+                       "situated family-owned".split())
+_FIRST_VERB = frozenset("make produce sell grow own operate supply offer manufacture create provide deliver distribute "
+                        "import specialize specialise".split())
+# Third-person forms only, as the first word. Verbs whose plural noun is a common one-word product ("rolls",
+# "blends", "mixes", "preserves", "spreads") are left to test 4.
+_ACTIVITY = ("make produce sell grow own operate supply offer manufacture create provide deliver distribute import "
+             "export specialize specialise work live run ship bottle bake brew craft roast raise cook harvest farm "
+             "source ferment smoke cure press pick serve design build hand-make hand-craft hand-pour").split()
+_THIRD_PERSON = frozenset(word + ("es" if re.search(r"(?:s|x|z|ch|sh|o)$", word) else "s") if not word.endswith("y")
+                          or word[-2] in "aeiou" else word[:-1] + "ies" for word in _ACTIVITY)
+_CONNECTOR = frozenset("and & n with in of".split())
+_PLACE_PREPOSITION = frozenset("in at from near outside around across throughout since".split())
+
+
+def _maker_sentence(rest):
+    words = re.findall(r"[^\W\d_][\w'’-]*|&", rest)
+    if not words:
+        return True
+    low = [word.lower().replace("’", "'") for word in words]
+    first = low[0]
+    if first in _OPENER or first in _FIRST_VERB or first in _THIRD_PERSON or _STATEMENT.intersection(low):
+        return True
+    if (words[0].islower() and len(first) >= 4 and first.endswith("s") and not first.endswith(("ss", "us", "is"))
+            and len(low) > 1 and low[1] not in _CONNECTOR):
+        return True
+    return any(word in _PLACE_PREPOSITION and words[at].islower() and words[at + 1][:1].isupper()
+               for at, word in enumerate(low[:-1]))
 
 
 def _named_in(text):
@@ -119,7 +157,7 @@ def _named_in(text):
         if not match:
             continue
         rest = match[1].strip().rstrip(".!").strip()
-        bad = not rest or _HEDGE.search(rest) or _NOT_ITEM.search(rest) or _VERB_FIRST.search(rest)
+        bad = not rest or _HEDGE.search(rest) or _maker_sentence(rest)
         found.append((at, None if bad else label_reader.identity_text("name", rest)))
     return found[0][1] if len(found) == 1 and found[0][0] > made_at else None
 

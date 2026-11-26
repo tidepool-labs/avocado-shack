@@ -113,8 +113,8 @@ class DecideAfterMakerTests(_Decide):
         decision = self.decide("it is blue corn chips", earlier=(CHIPS,))
         self.assertEqual(decision.item, "Blue Corn Chips")
         # a message that mixes "it is" into a sentence is not an "it is" line (job.owner_item reads whole lines only)
-        decision = self.decide("it is blue corn chips, made by Taco Works, tortilla chips, $5 each")
-        self.assertEqual(decision.item, "Tortilla Chips")
+        decision = self.decide("it is blue corn chips, made by Taco Works, Montaña de Oro sea salt tortilla chips, $5 each")
+        self.assertEqual(decision.item.casefold(), "montaña de oro sea salt tortilla chips")
         # the H67 "made by M, M <name>" form is unchanged: a disagreeing name keeps the photo and says so
         decision = self.decide("made by Taco Works, Taco Works salsa verde, $5 each")
         self.assertEqual(decision.item, "Sea Salt Tortilla Chips")

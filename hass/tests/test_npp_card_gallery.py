@@ -3,7 +3,7 @@ from base64 import b64decode
 from contextlib import ExitStack, redirect_stdout
 from hashlib import sha256
 from html import escape
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 import stat
 import subprocess
@@ -147,3 +147,54 @@ class CardGalleryTests(unittest.TestCase):
         self.assertTrue(all(not box.exists() for box in self.sandboxes))
         self.assertEqual(snapshot(), before)
         self.assertEqual({p.name for p in self.out.iterdir()}, {'card-09.png', 'index.html'})
+
+    def test_c5_reference_picture_sources(self):
+        # C5 (H73): catches a run-time picture swap, a widened site-picture list, a changed screen
+        # input, or a page that hides which picture a card was drawn from.
+        self.assertEqual(gallery.SITE_PICTURE_CASES, frozenset({'03', '08', '09'}))
+        stored, checked = [], []
+        store, listing = gallery.media.store_original, gallery.validate.listing
+
+        def keep(root, data, **kwargs):
+            stored.append(data)
+            return store(root, data, **kwargs)
+
+        def check(*args, **kwargs):
+            checked.append(kwargs)
+            return listing(*args, **kwargs)
+
+        with (patch.object(gallery.media, 'store_original', side_effect=keep),
+              patch.object(gallery.validate, 'listing', side_effect=check)):
+            code, lines = self.run_gallery('--strict')
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(len(stored), 12)
+        page = (self.out / 'index.html').read_text(encoding='utf-8')
+        sections = page.split('<section>')[1:]
+        for case_id, data, kwargs, section in zip(gallery.CASE_IDS, stored, checked, sections, strict=True):
+            with self.subTest(case=case_id):
+                case = gallery._json(next(gallery.CASES.glob(f'case-{case_id}-golden-*.json')))
+                golden = gallery._json(gallery.GOLDENS / Path(case['golden']).name)
+                photo = gallery.CASES / 'photos' / case['turns'][0]['photos'][0].removeprefix('npp:')
+                site = case_id in gallery.SITE_PICTURE_CASES
+                self.assertEqual(data, gallery._reference_photo(golden) if site else photo.read_bytes())
+                self.assertEqual(kwargs['photo_sha'], sha256(data).hexdigest())
+                # The screen gets no extra label evidence or permits: only the gallery's own arguments.
+                self.assertNotIn('label_words', kwargs)
+                note = gallery.SITE_PICTURE_NOTE if site else gallery.CASE_PHOTO_NOTE
+                self.assertIn(f'<p>{escape(note)}</p>', section)
+
+    def test_c6_saved_picture_is_a_fixed_intake_jpeg(self):
+        # C6 (H73): catches a non-intake format, a resized picture, or bytes that vary per run.
+        from PIL import Image
+
+        for case_id in sorted(gallery.SITE_PICTURE_CASES):
+            with self.subTest(case=case_id):
+                case = gallery._json(next(gallery.CASES.glob(f'case-{case_id}-golden-*.json')))
+                golden = gallery._json(gallery.GOLDENS / Path(case['golden']).name)
+                data = gallery._reference_photo(golden)
+                self.assertEqual(gallery.media.sniff(data), 'jpeg')
+                self.assertEqual(data, gallery._reference_photo(golden))
+                site = gallery.ROOT / gallery.preview.SITE / golden['photo_path']
+                with Image.open(site) as original, Image.open(BytesIO(data)) as drawn:
+                    self.assertEqual(drawn.size, original.size)
+                    self.assertEqual(drawn.mode, 'RGB')

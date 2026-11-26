@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from functools import partial
 from hashlib import sha256
 from html import escape
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,11 @@ from hass.npp import assets, copy, missing, picture, private_numbers, validate  
 CASES = ROOT / 'hass/tests/npp/cases'
 GOLDENS = ROOT / 'hass/npp/assets/hass-gallery-style/golden'
 CASE_IDS = tuple(f'{i:02}' for i in range(1, 13))
+# H73: golden cases whose replay photo (product pasted on a cluttered counter) the picture number
+# screen refuses from OCR noise: 03 and 08 'number-unclear', 09 'money'. See _photo.
+SITE_PICTURE_CASES = frozenset({'03', '08', '09'})
+CASE_PHOTO_NOTE = 'Picture: the case photo from the replay'
+SITE_PICTURE_NOTE = "Picture: the shop's saved photo (the case photo's counter clutter reads as numbers)"
 
 
 def _json(path):
@@ -98,7 +104,41 @@ def _sandbox(box):
     return sandbox_editor.SiteEditor(state, gate, None, clock=lambda: now), media_root, now, load_content(worktree / 'hass/content')
 
 
-def _draw(case, session, writer, media_root, now, catalog):
+def _reference_photo(golden):
+    """The golden product's own saved site picture, re-encoded as the JPEG the intake accepts.
+
+    Transparent pixels are laid on white; the encoding is fixed so the same picture gives the same bytes.
+    """
+    from PIL import Image  # the same Pillow the polish and house-style checks use
+
+    with Image.open(BytesIO((ROOT / preview.SITE / golden['photo_path']).read_bytes())) as image:
+        image.load()
+        rgba = image.convert('RGBA')
+    flat = Image.new('RGB', rgba.size, (255, 255, 255))
+    flat.paste(rgba, mask=rgba.getchannel('A'))
+    out = BytesIO()
+    flat.save(out, 'JPEG', quality=92, optimize=False, progressive=False)
+    return out.getvalue()
+
+
+def _picture_note(case_id):
+    return SITE_PICTURE_NOTE if case_id in SITE_PICTURE_CASES else CASE_PHOTO_NOTE
+
+
+def _photo(case_id, case, golden):
+    """The picture a reference card starts from.
+
+    Normally the case photo Mike sends in the replay. For SITE_PICTURE_CASES that photo's counter
+    clutter reads as numbers or money, so the unchanged picture screen refuses the card, as it should
+    (live, Hass asks for a retake). Those cards are drawn from the product's saved site picture
+    instead, as after a clean retake. The list is fixed and reviewed; nothing is chosen at run time.
+    """
+    if case_id in SITE_PICTURE_CASES:
+        return _reference_photo(golden)
+    return (CASES / 'photos' / case['turns'][0]['photos'][0].removeprefix('npp:')).read_bytes()
+
+
+def _draw(case, golden, session, writer, media_root, now, catalog):
     turn = case['turns'][0]
     # These fixtures supply a separate, already answered price clause. Parse it as
     # such so item wording (e.g. half-and-half) cannot be mistaken for finance.
@@ -112,7 +152,7 @@ def _draw(case, session, writer, media_root, now, catalog):
     kind = {'flowers': 'non-food', 'drinks': 'drink'}.get(category, 'food')
     maker = missing._maker(case['inputs']['known_maker'], {}, catalog.makers)
     brand = (maker.phrase or '') if maker.state == 'known' else ''
-    photo = (CASES / 'photos' / turn['photos'][0].removeprefix('npp:')).read_bytes()
+    photo = _photo(f"{case['id']:02}", case, golden)
     ident = media.store_original(media_root, photo, received_at=now.isoformat(), source='gallery-fixture')['sha256']
     web = media.web_copy(media_root, ident)
     source_read = picture.read_text(Path(web['path']).read_bytes())
@@ -160,7 +200,8 @@ def _section(case_id, golden, product=None, digest=None, status=''):
         f'<p>Category: {escape(product["category"])}</p>')
     receipt = f'<p>PNG SHA-256: <code>{digest}</code></p>' if digest else ''
     return (f'<section><h2>Case {case_id}</h2><div class="pair"><article><h3>Drawn listing</h3>{image}{details}'
-            f'<p>{escape(status)}</p>{receipt}</article><article><h3>Golden reference (saved fixture)</h3>'
+            f'<p>{escape(_picture_note(case_id))}</p><p>{escape(status)}</p>{receipt}</article>'
+            f'<article><h3>Golden reference (saved fixture)</h3>'
             f'<img src="{ref_src}" alt="{escape(card["photo_alt"])}"><p>Name: {escape(card["name"])}</p>'
             f'<p>Category: {escape(golden["category"])}</p><p>{escape(card["description"])}</p></article></div></section>')
 
@@ -207,7 +248,7 @@ def main(argv=None):
                 product, png, verdict = None, None, ''
                 if not dep and draw is not None:
                     try:
-                        product, png, verdict = draw(case)
+                        product, png, verdict = draw(case, golden)
                     except (OSError, ValueError, media.Refused):
                         verdict = 'fixture-refused'
                     if png is None and verdict in ('playwright-missing', 'browser-missing', 'node-too-old', 'node-missing'):

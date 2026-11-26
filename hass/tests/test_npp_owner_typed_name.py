@@ -229,10 +229,35 @@ class PairedDecisionControlTests(_Decide):
                             ("smoked maple syrup", "Maple Syrup"), ("Calabrese salamini", "Calabrese Mini Salami")):
             with self.subTest(name=name):
                 self.assertTrue(agrees_with_photo(name, photo))
+        # The head-noun check itself folds one plural and allows only a diminutive ending (checkpoint 4 A).
+        from hass.npp.missing import _same_head
+        for word, photo_word in (("syrups", "syrup"), ("tomatoes", "tomato"), ("berries", "berry"),
+                                 ("salamini", "salami"), ("salami", "salamini")):
+            with self.subTest(word=word):
+                self.assertTrue(_same_head(word, photo_word))
+        for word, photo_word in (("sugar", "syrup"), ("honeydew", "honey"), ("creamer", "cream"),
+                                 ("pepperoni", "pepper"), ("cheesecake", "cheese"), ("honeycomb", "honey")):
+            with self.subTest(word=word):
+                self.assertFalse(_same_head(word, photo_word))
         for name, photo in (("Brussels sprouts", "maple syrup"), ("syrup", ""), ("", "maple syrup"),
-                            ("maple syrup by the case", "maple syrup"), ("works maple syrup", "maple syrup")):
+                            ("maple syrup by the case", "maple syrup"), ("works maple syrup", "maple syrup"),
+                            # R7 (t_eaa6c500 @91f7f896) -> checkpoint 4 A: a shared modifier, a different product
+                            ("maple sugar", "maple syrup"), ("maple candy", "Maple Syrup"), ("Swiss cheesecake", "Swiss cheese"),
+                            ("raw honeycomb", "raw honey"), ("Calabrese salami", "Calabrese salamini sandwich"),
+                            # a longer word that only starts with the photo's word is another product too
+                            ("raw honeydew", "raw honey"), ("vanilla creamer", "vanilla cream"),
+                            ("spicy pepperoni", "spicy pepper")):
             with self.subTest(name=name):
                 self.assertFalse(agrees_with_photo(name, photo))
+
+    def test_a_shared_modifier_on_a_different_product_keeps_the_photo_and_says_so(self):
+        # R7: "maple sugar" shares "maple" with the confident "maple syrup" read; it must not silently replace it.
+        for rest in ("maple sugar", "maple candy", "Grade A maple sugar"):
+            with self.subTest(rest=rest):
+                decision = self.decide(f"made by Maple Valley, Maple Valley {rest}, $15 each")
+                self.assertEqual(decision.item, "Maple Syrup")
+                self.assertTrue(decision.name_from_photo)
+                self.assertTrue(decision.ready)
 
     def test_a_made_by_name_that_agrees_with_the_photo_names_the_item(self):
         for rest, item in (("dark and robust maple syrup", "Dark And Robust Maple Syrup"), ("maple syrups", "Maple Syrups"),
@@ -300,6 +325,24 @@ class DualConflictTests(_Decide):
         self.assertEqual(decision.questions, (("identity", self.ask_identity),))
         self.assertFalse(decision.name_from_photo)
         self.assertEqual(decision.note, "")  # neither disclosure can be silently dropped from a card that is not sent
+
+    def test_a_shared_modifier_on_a_different_product_is_a_dual_conflict_too(self):
+        # R7 paired control: confident "maple syrup" photo, label "Quarry Lane", caption naming "maple sugar".
+        syrup = dict(self.dual, item="maple syrup")
+        decision = self.decide("made by Maple Valley, Maple Valley maple sugar, $15 each", syrup)
+        self.assertFalse(decision.ready)
+        self.assertIsNone(decision.item)
+        self.assertEqual(decision.questions, (("identity", self.ask_identity),))
+        # The approved agreeing names still agree under the same contradicting label: the card names them and the
+        # label explanation is its note (cases 8 and 10 shape).
+        for rest, photo, item in (("dark and robust maple syrup", "maple syrup", "Dark And Robust Maple Syrup"),
+                                  ("Calabrese salamini", "Calabrese Mini Salami", "Calabrese Salamini")):
+            with self.subTest(rest=rest):
+                decision = self.decide(f"made by Maple Valley, Maple Valley {rest}, $15 each", dict(self.dual, item=photo))
+                self.assertTrue(decision.ready)
+                self.assertEqual(decision.item, item)
+                self.assertFalse(decision.name_from_photo)
+                self.assertEqual(decision.note, "maker left off: label says Quarry Lane")
 
     def test_his_it_is_answer_names_it_and_only_the_label_explanation_remains(self):
         # His answer is its own message after the question, read over both texts exactly as start_plan does.

@@ -231,13 +231,47 @@ def agrees_with_photo(name, photo_item):
     verb-shaped word. "dark and robust maple syrup", "maple syrups" and "Grade A syrup" agree with "maple syrup",
     "Calabrese salamini" with "Calabrese Mini Salami". "whittles with maple syrup", "sells maple syrup in Vermont" and
     "Pours maple syrup" do not: decide() then keeps the photo read and the card says so. This is structural, not a
-    vocabulary of maker sentences: an added word that could be a verb or a connector is never trusted."""
+    vocabulary of maker sentences: an added word that could be a verb or a connector is never trusted. The last word
+    must also name the same product as the photo's last word (_same_head): "maple sugar" shares "maple" with "maple
+    syrup" but is another product, so it does not agree (R7, checkpoint 4)."""
     photo = _name_words(photo_item)
     words = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", claims.fold(name or ""))
     if not photo or not words or not {_fold_plural(word) for word in words} & photo:
         return False
+    if not _same_head(words[-1], re.findall(r"[^\W\d_]+", claims.fold(photo_item))[-1]):
+        return False  # R7 / checkpoint 4 A: "maple sugar" shares "maple" with "maple syrup" but is another product
     added = [word for word in words if _fold_plural(word) not in photo and word not in ("and", "&", "n", "a")]
     return not any(word in _NOT_MODIFIER or _verb_shaped(word) for word in added)
+
+
+_DIMINUTIVE_TAILS = frozenset(("ni", "ini", "ino", "ina", "ito", "ita"))
+
+
+def _head_forms(word):
+    forms = {word}
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        forms.add(word[:-1])
+        if len(word) > 4 and word.endswith("es"):
+            forms.add(word[:-2])  # "tomatoes", "peaches"
+        if len(word) > 4 and word.endswith("ies"):
+            forms.add(word[:-3] + "y")  # "berries"
+    return forms
+
+
+def _same_head(word, photo_word):
+    """The last word names the product (its head noun): it must be the photo's last word with one plural folded
+    ("syrups", "berries", "tomatoes"), or a diminutive of a word of at least 5 letters ("salamini" / "salami": the
+    longer adds only ni, ini, ino, ina, ito or ita). Anything else ("sugar" / "syrup", "cheesecake" / "cheese",
+    "honeycomb" / "honey", "honeydew" / "honey", "creamer" / "cream", "pepperoni" / "pepper") is a different
+    product, so the name does not agree (fail closed: photo kept and the card says so, never a silent swap)."""
+    mine, theirs = _head_forms(word), _head_forms(photo_word)
+    if mine & theirs:
+        return True
+    for a in mine | theirs:
+        for b in mine | theirs:
+            if len(a) >= 5 and b.startswith(a) and b[len(a):] in _DIMINUTIVE_TAILS and ((a in mine) != (b in mine)):
+                return True
+    return False
 
 
 def _maker(phrase, evidence, makers):

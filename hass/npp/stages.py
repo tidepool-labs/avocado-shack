@@ -151,6 +151,8 @@ class _Wording:
             return False
         if choice == shown:
             return True
+        if key == 'name' and copy.brand_twin(choice) == shown:
+            return True  # the owner named the brand with the item: the Writer showed this choice's brand twin
         # a copied description is re-rendered with other phrases of the same banks: same template, same IDs elsewhere
         return (key == 'description' and choice.get('template_id') == shown.get('template_id')
                 and choice.get('fact_ids') == shown.get('fact_ids')

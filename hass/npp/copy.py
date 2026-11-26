@@ -98,6 +98,14 @@ def eligible(row, ctx):
             and ('variants' not in row or ctx.variant in row['variants']))
 
 
+def brand_twin(choice):
+    """The brand-carrying twin of an item-only name choice ({'template_id': 'name-item'} -> 'name-brand-item', and the
+    -size pair), or None for any other value. Pure; Writer._owner_named decides whether it applies."""
+    if not isinstance(choice, dict) or choice.get('template_id') not in ('name-item', 'name-item-size'):
+        return None
+    return {**choice, 'template_id': 'name-brand-' + choice['template_id'].removeprefix('name-')}
+
+
 def _meets_fact_requirements(row, bound):
     evidenced = {slot for slot in row['slots'].keys() & bound.keys() if bound[slot][1]}
     any_required = row.get('requires_facts_any', ())
@@ -234,6 +242,26 @@ class Writer:
         from hass.npp.validate import field_problem
         return rendered is not None and not field_problem(self, key, rendered[0], rendered[1], ctx)
 
+    def _owner_named(self, choices, ctx):
+        """The owner wrote the brand and the item together as the product's name ("Fair Hills Farm apple juice"): the
+        public name keeps that identity even when the selector picked the item-only template. The selector sees template
+        IDs only, never his words, so it cannot tell "Dried mushrooms" by Mighty Cap from "Fair Hills Farm apple juice".
+        Only ever an upgrade of an explicit item-only choice to its brand twin; both slots must be bound and the owner's own
+        words must say "<brand> <item>" (same affirmative-mention test as the brand binding). Anything else is unchanged."""
+        choice = choices.get('name')
+        twin = brand_twin(choice)
+        if twin is None or twin['template_id'] not in self.templates:
+            return choices
+        bound = self.bindings(ctx, 'name')
+        if 'brand' not in bound or 'item' not in bound:
+            return choices
+        lines = '\n'.join(map(claims.fold, ctx.owner_words.splitlines()))
+        if not live_policy._owner_said(f"{bound['brand'][0]} {bound['item'][0]}", lines):
+            return choices
+        if not self._usable('name', self._render('name', twin, ctx), ctx):
+            return choices
+        return {**choices, 'name': twin}
+
     def _alt_name(self, choices, ctx):
         # Alt copy has no digit permit. Re-render the same identity without the label-size slot.
         name_choice = choices['name'].copy()
@@ -255,6 +283,7 @@ class Writer:
             choices = None
         if not isinstance(choices, dict) or choices.keys() - set(FIELDS):
             choices = {}
+        choices = self._owner_named(choices, ctx)
         if proposed is not None and (not isinstance(proposed, dict) or proposed.keys() - set(FIELDS)):
             choices, proposed = {}, None
         basic, text, used = False, {}, {}

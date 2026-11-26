@@ -8,7 +8,7 @@ from hass import claims, live_policy, publish_live
 from hass.content_model import CATEGORIES, ID_RE, TEXT_LIMITS, iso_day, shop_today, valid_supplier
 from hass.house_style import OWNER_IMAGE_RE
 from hass.npp import private_numbers as numbers
-from hass.npp.copy import words
+from hass.npp.copy import TOKEN, words
 from hass.ops import catalog
 from hass.ops.photos import MAX_ALT, _alt_problem
 
@@ -53,8 +53,15 @@ def field_problem(writer, key, text, permits, ctx):
         return 'hype'
     if 'health/awards/endorsements' in live_policy._protected(text)[1]:
         return 'unsupported-claim'
-    # Only the exact typed slot value can excuse a shared four-word owner span.
-    spans = _spans(text, 4) - {span for value, _ in writer.bindings(ctx, key).values() for span in _spans(value, 4)}
+    # Only the exact typed slot value can excuse a shared four-word owner span. A name template is typed slots joined by
+    # spaces with no reviewed words of its own, so its rendering is the product's identity - for "made by Fair Hills Farm,
+    # Fair Hills Farm apple juice" the owner's own name for it - not chatter, in the name and in the alt text that carries it.
+    excused = {span for value, _ in writer.bindings(ctx, key).values() for span in _spans(value, 4)}
+    if key in ('name', 'imageAlt'):
+        excused |= {span for row in writer.templates.values() if row['field'] == 'name' and not TOKEN.sub('', row['text']).strip()
+                    for rendered in [writer._render('name', {'template_id': row['id']}, ctx)] if rendered
+                    for span in _spans(rendered[0], 4)}
+    spans = _spans(text, 4) - excused
     if any(spans & _spans(turn, 4) for turn in ctx.owner_words.splitlines()):
         return 'owner-chatter'
     if key == 'description':

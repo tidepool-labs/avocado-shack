@@ -98,6 +98,14 @@ def eligible(row, ctx):
             and ('variants' not in row or ctx.variant in row['variants']))
 
 
+def brand_twin(choice):
+    """The brand-carrying twin of an item-only name choice ({'template_id': 'name-item'} -> 'name-brand-item', and the
+    -size pair), or None for any other value. Pure; Writer._owner_named decides whether it applies."""
+    if not isinstance(choice, dict) or choice.get('template_id') not in ('name-item', 'name-item-size'):
+        return None
+    return {**choice, 'template_id': 'name-brand-' + choice['template_id'].removeprefix('name-')}
+
+
 def _meets_fact_requirements(row, bound):
     evidenced = {slot for slot in row['slots'].keys() & bound.keys() if bound[slot][1]}
     any_required = row.get('requires_facts_any', ())
@@ -241,7 +249,8 @@ class Writer:
         Only ever an upgrade of an explicit item-only choice to its brand twin; both slots must be bound and the owner's own
         words must say "<brand> <item>" (same affirmative-mention test as the brand binding). Anything else is unchanged."""
         choice = choices.get('name')
-        if not isinstance(choice, dict) or choice.get('template_id') not in ('name-item', 'name-item-size'):
+        twin = brand_twin(choice)
+        if twin is None or twin['template_id'] not in self.templates:
             return choices
         bound = self.bindings(ctx, 'name')
         if 'brand' not in bound or 'item' not in bound:
@@ -249,9 +258,7 @@ class Writer:
         lines = '\n'.join(map(claims.fold, ctx.owner_words.splitlines()))
         if not live_policy._owner_said(f"{bound['brand'][0]} {bound['item'][0]}", lines):
             return choices
-        twin = {**choice, 'template_id': 'name-brand-' + choice['template_id'].removeprefix('name-')}
-        rendered = self._render('name', twin, ctx)
-        if twin['template_id'] not in self.templates or not self._usable('name', rendered, ctx):
+        if not self._usable('name', self._render('name', twin, ctx), ctx):
             return choices
         return {**choices, 'name': twin}
 

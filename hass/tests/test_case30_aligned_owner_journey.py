@@ -1,10 +1,9 @@
-"""Case 30 owner journey with the maker's identity kept and an ordinary-looking address (plan H52).
+"""Case 30 owner journey with an ordinary-looking maker address, and its reserved-address control (plans H52, FIX2).
 
-Separate, non-scoring regression: strict NPP case 30 keeps its reserved `minersfigs.example` address, goldens, manifest
-and recordings unchanged and is still refused; this module never adds to a replay score. The aligned view changes only
-the owner-typed address (and the same address in the case's own page map, extract stubs and the two expectations that
-name it), adds a hand-authored S2 reading of the public figs photo, and expects the label casing in the description.
-Pages come from the case's own local file through the harness's fake host; Python sockets are loopback-only.
+Strict NPP case 30 now names the ordinary-looking `minersfigs.com` address (served only by the harness's local fake
+host from the case's own page file) and expects the label casing in the description (G decision FIX2). The reserved
+`minersfigs.example` address that the strict case used before stays covered here as its own negative control: the
+same view with only the address swapped back must still be refused. Python sockets are loopback-only.
 
 Fixtures only: no model, network, live Hass, host.json, Clover or recording.
 """
@@ -62,23 +61,29 @@ def strict_view():
     return view
 
 
-def aligned_view(url=OWNER_URL):
-    """The same view with only the owner's address swapped everywhere the case names it."""
+def aligned_view():
+    """The owner journey with the ordinary-looking address: since FIX2 this is the strict case itself."""
+    view = strict_view()
+    assert RESERVED not in json.dumps(view), 'the reserved address survived somewhere'
+    return view
+
+
+def reserved_view(url=RESERVED):
+    """The strict view with only the owner's address swapped back to the reserved one everywhere the case names it."""
     view = strict_view()
     first = view['turns'][0]
-    assert first['text'].count(RESERVED) == 1, first['text']
-    first['text'] = first['text'].replace(RESERVED, url)
+    assert first['text'].count(OWNER_URL) == 1, first['text']
+    first['text'] = first['text'].replace(OWNER_URL, url)
     pages = view['inputs']['web']['pages']
-    pages[url] = pages.pop(RESERVED)
+    pages[url] = pages.pop(OWNER_URL)
     for row in view['inputs']['stubs']['extract']:
-        assert row['url'] == RESERVED, row
+        assert row['url'] == OWNER_URL, row
         row['url'] = url
     expect = view['expect']
-    assert expect['research']['owner_stated_url'] == RESERVED and expect['listing']['maker_url'] == RESERVED
+    assert expect['research']['owner_stated_url'] == OWNER_URL and expect['listing']['maker_url'] == OWNER_URL
     expect['research']['owner_stated_url'] = url
     expect['listing']['maker_url'] = url
-    expect['description_equals'] = FIXTURE['description_equals']
-    assert RESERVED not in json.dumps(view), 'the reserved address survived somewhere'
+    assert OWNER_URL not in json.dumps(view), 'the ordinary address survived somewhere'
     return view
 
 
@@ -101,30 +106,29 @@ def renderer_ready():
 
 
 class AlignedFixtureShapeTests(unittest.TestCase):
-    def test_strict_case_30_still_names_the_reserved_address(self):
-        # Contract: the strict corpus is not edited by this regression; case 30 keeps its reserved address and the
-        # lower-case golden. Bug caught: "fixing" case 30 by editing the strict fixture instead of adding this one.
+    def test_strict_case_30_names_the_ordinary_address_and_the_label_casing(self):
+        # Contract (FIX2): strict case 30 is the owner journey with an ordinary-looking address and the description in
+        # the label casing of the saved S2 reading. Bug caught: the strict case drifting back to the reserved address
+        # (which the guard refuses at every turn, so the case could never reach a card).
         case = run_npp.load_cases()[30]
-        self.assertIn(RESERVED, case['turns'][0]['text'])
-        self.assertEqual(case['expect']['research']['owner_stated_url'], RESERVED)
-        self.assertNotIn(OWNER_URL, json.dumps(case))
-        self.assertEqual(case['expect']['description_equals'],
-                         'Pick up dried figs for the kitchen. Set dried figs out on the table.')
+        self.assertIn(OWNER_URL, case['turns'][0]['text'])
+        self.assertEqual(case['expect']['research']['owner_stated_url'], OWNER_URL)
+        self.assertNotIn(RESERVED, json.dumps(case))
+        self.assertEqual(case['expect']['description_equals'], FIXTURE['description_equals'])
 
-    def test_only_the_address_and_description_golden_differ_from_the_strict_case(self):
+    def test_the_reserved_control_differs_from_the_strict_case_only_at_the_address(self):
         # Contract: same maker, town, photo, page file, quote controls, price, edit, yes and undo.
-        # Bug caught: a "regression" that quietly drops a negated or past quote control or changes the owner's words.
-        strict, aligned = strict_view(), aligned_view()
-        self.assertEqual(aligned['turns'][0]['text'],
-                         strict['turns'][0]['text'].replace(RESERVED, OWNER_URL))
-        self.assertEqual(aligned['inputs']['web']['pages'][OWNER_URL], strict['inputs']['web']['pages'][RESERVED])
-        paths = {p for p in changed_paths(strict, aligned)}
+        # Bug caught: a control that quietly drops a negated or past quote control or changes the owner's words.
+        strict, reserved = strict_view(), reserved_view()
+        self.assertEqual(reserved['turns'][0]['text'],
+                         strict['turns'][0]['text'].replace(OWNER_URL, RESERVED))
+        self.assertEqual(reserved['inputs']['web']['pages'][RESERVED], strict['inputs']['web']['pages'][OWNER_URL])
+        paths = {p for p in changed_paths(strict, reserved)}
         allowed = {('turns', 0, 'text'), ('inputs', 'web', 'pages', RESERVED), ('inputs', 'web', 'pages', OWNER_URL),
-                   ('expect', 'research', 'owner_stated_url'), ('expect', 'listing', 'maker_url'),
-                   ('expect', 'description_equals')}
+                   ('expect', 'research', 'owner_stated_url'), ('expect', 'listing', 'maker_url')}
         allowed |= {('inputs', 'stubs', 'extract', i, 'url') for i in range(len(strict['inputs']['stubs']['extract']))}
         self.assertEqual(paths - allowed, set())
-        quotes = [(r['slot'], r['value'], r['quote']) for r in aligned['inputs']['stubs']['extract']]
+        quotes = [(r['slot'], r['value'], r['quote']) for r in reserved['inputs']['stubs']['extract']]
         self.assertEqual(quotes, [(r['slot'], r['value'], r['quote']) for r in strict['inputs']['stubs']['extract']])
         self.assertEqual(len(quotes), 4)
 
@@ -159,13 +163,13 @@ class AlignedResearchTests(unittest.TestCase):
 class ReservedAddressTests(unittest.TestCase):
     def test_the_reserved_address_is_still_refused_with_the_same_reading_and_page(self):
         # Contract: strict case 30's reserved .example address never reaches a card, a yes or a commit, even with the
-        # S2 reading and page that make the aligned journey pass.
-        # Bug caught: the aligned regression masking a loosened reserved-domain guard. The two views differ only in
-        # the address (see AlignedFixtureShapeTests), so this pair pins the refusal on the address alone. The guard
-        # refuses before any drawing, so the renderer is not started.
+        # S2 reading and page that make the strict journey pass.
+        # Bug caught: the ordinary-address strict case masking a loosened reserved-domain guard. The two views differ
+        # only in the address (see AlignedFixtureShapeTests), so this pair pins the refusal on the address alone. The
+        # guard refuses before any drawing, so the renderer is not started.
         resolve, connect = loopback_only()
         with resolve, connect:
-            failures, evidence = run_npp.run_conversation(strict_view(), run_npp.Tapes())
+            failures, evidence = run_npp.run_conversation(reserved_view(), run_npp.Tapes())
         state = evidence['state']
         self.assertEqual((state['cards'], state['approvals'], state['commits']), (0, 0, 0))
         self.assertNotEqual(state['state'], 'published')

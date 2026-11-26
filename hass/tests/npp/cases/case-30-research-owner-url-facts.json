@@ -18,7 +18,7 @@
     {
       "at_s": 0,
       "from": "mike",
-      "text": "made by Miners, Paso Robles https://minersfigs.example/about dried figs $7 each",
+      "text": "made by Miners, Paso Robles https://minersfigs.com/about dried figs $7 each",
       "photos": [
         "npp:figs.jpg"
       ]
@@ -51,7 +51,7 @@
     "web": {
       "search": {},
       "pages": {
-        "https://minersfigs.example/about": {
+        "https://minersfigs.com/about": {
           "file": "pages/miners-about-mixed.html",
           "retrieved": "2026-11-18",
           "content_type": "text/html"
@@ -65,25 +65,25 @@
         {
           "slot": "nature",
           "value": "orchard",
-          "url": "https://minersfigs.example/about",
+          "url": "https://minersfigs.com/about",
           "quote": "Miners is an orchard in Paso Robles."
         },
         {
           "slot": "makes",
           "value": "dried figs",
-          "url": "https://minersfigs.example/about",
+          "url": "https://minersfigs.com/about",
           "quote": "Miners makes dried figs."
         },
         {
           "slot": "town",
           "value": "Templeton",
-          "url": "https://minersfigs.example/about",
+          "url": "https://minersfigs.com/about",
           "quote": "Miners was formerly based in Templeton."
         },
         {
           "slot": "makes",
           "value": "certified organic figs",
-          "url": "https://minersfigs.example/about",
+          "url": "https://minersfigs.com/about",
           "quote": "Our figs are not certified organic."
         }
       ],
@@ -93,8 +93,8 @@
         "story": "Miners is a third-generation family orchard that has hand-picked every fig at dawn since 1952."
       }
     },
-    "item": "dried figs",
-    "item_note": "the S2 item slot the default description is anchored on (copy-templates.json defaults.description, rung a, kind food)"
+    "item": "Dried Figs",
+    "item_note": "the S2 item slot the default description is anchored on (copy-templates.json defaults.description, rung a, kind food); label casing, as the saved S2 reading of figs.jpg returns it"
   },
   "expect": {
     "replies": [
@@ -126,7 +126,7 @@
     ],
     "state": "published",
     "research": {
-      "owner_stated_url": "https://minersfigs.example/about",
+      "owner_stated_url": "https://minersfigs.com/about",
       "kept_facts": [
         {
           "slot": "nature",
@@ -156,10 +156,10 @@
       ]
     },
     "story_equals": "Miners is an orchard in Paso Robles, and it makes dried figs.",
-    "description_equals": "Pick up dried figs for the kitchen. Set dried figs out on the table.",
+    "description_equals": "Pick up Dried Figs for the kitchen. Set Dried Figs out on the table.",
     "listing": {
       "maker_panel": true,
-      "maker_url": "https://minersfigs.example/about"
+      "maker_url": "https://minersfigs.com/about"
     },
     "public_lacks": [
       "third-generation",

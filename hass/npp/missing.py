@@ -266,6 +266,18 @@ def agrees_with_photo(name, photo_item):
     return not any(word in _NOT_MODIFIER or _verb_shaped(word) for word in added)
 
 
+def keeps_photo_product(name, photo_item):
+    """The stricter agreement for the weaker after-maker clause (H68): agrees_with_photo, and the name also repeats every
+    word of the photo's name but its last, so it only adds words to what the photo shows and never swaps one. "Montana
+    de Oro Sea Salt tortilla chips" keeps "sea salt tortilla chips"; "almond butter" shares the head "butter" with
+    "peanut butter" but drops "peanut", so it is another product and the photo read stays."""
+    if not agrees_with_photo(name, photo_item):
+        return False
+    photo_words = re.findall(r"[^\W\d_]+", claims.fold(photo_item or ""))
+    name_words = _name_words(name)
+    return all(_fold_plural(word) in name_words for word in photo_words[:-1] if word not in _FILLER)
+
+
 _DIMINUTIVE_TAILS = frozenset(("ni", "ini", "ino", "ina", "ito", "ita"))
 
 
@@ -379,7 +391,7 @@ class MissingInfo:
             photo_item, name_from_photo = None, False
         typed = owner_item or (None if name_from_photo or identity_conflict else owner_named)
         if not typed and not owner_named and photo_item and owner_after_maker \
-                and agrees_with_photo(owner_after_maker, photo_item):
+                and keeps_photo_product(owner_after_maker, photo_item):
             typed = owner_after_maker  # his fuller name for what the photo shows; never a note, never a conflict
         item = label_reader.identity_text("name", typed, title=True) or photo_item
         kind = evidence.get("kind") if photo_item else None

@@ -87,6 +87,19 @@ class DecideAfterMakerTests(_Decide):
                 self.assertFalse(decision.name_from_photo)
                 self.assertTrue(decision.ready)
 
+    def test_a_different_product_sharing_the_head_word_never_replaces_the_photo_read(self):
+        # Contract: the weaker after-maker clause only adds words to the photo's name. Bug it catches: "almond butter"
+        # shares the head "butter" with a confident "peanut butter" read and was promoted as a silent substitution.
+        reading = dict(self.reading, item="peanut butter")
+        for rest in ("almond butter", "cashew butter", "sunflower seed butter"):
+            with self.subTest(rest=rest):
+                decision = self.decide(f"made by Taco Works, {rest}, $5 each", reading)
+                self.assertEqual(decision.item, "Peanut Butter")
+                self.assertFalse(decision.name_from_photo)
+                self.assertTrue(decision.ready)
+        decision = self.decide("made by Taco Works, Crunchy peanut butter, $5 each", reading)
+        self.assertEqual(decision.item, "Crunchy Peanut Butter")
+
     def test_without_a_confident_photo_read_the_clause_is_not_used(self):
         unsure = dict(self.reading, confidence=dict(self.reading["confidence"], item=0.2))
         decision = self.decide(CHIPS, unsure)

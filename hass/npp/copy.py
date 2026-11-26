@@ -260,8 +260,9 @@ class Writer:
         basic, text, used = False, {}, {}
         for key in FIELDS:
             choice = choices.get(key)
-            if key == 'story' and key in choices and choice is None and (not proposed or key not in proposed):
-                continue
+            if key == 'story' and key in choices and choice is None and (not proposed or key not in proposed) and not any(
+                    ref for _value, ref in self.bindings(ctx, 'story').values()):
+                continue  # declined, and no kept fact could support a story: simply absent
             alt = self._alt_name(used, ctx) if key == 'imageAlt' else ''
             rendered = self._render(key, choice, ctx, alt)
             conforms = proposed is None or (rendered is not None and proposed.get(key) == rendered[0])

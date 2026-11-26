@@ -102,6 +102,27 @@ def _site_words(phrase, texts):
     return (next(iter(towns)) if len(towns) == 1 and phrase else '', next(iter(urls)) if len(urls) == 1 else '')
 
 
+def _eligible_choice(answer, options):
+    """True when a copy-selector reply is a choice made only of IDs it was offered (listing.schema.json shape):
+    known fields, each an object naming an eligible template with offered phrase and fact IDs, or a declined story."""
+    if not isinstance(answer, dict) or not answer or answer.keys() - set(copy.FIELDS) or not isinstance(options, dict):
+        return False
+    templates = options.get('templates') if isinstance(options.get('templates'), dict) else {}
+    phrases = set(options.get('phrase_ids') or ())
+    facts = set((options.get('fact_ids') or {}).values()) if isinstance(options.get('fact_ids'), dict) else set()
+    for field, choice in answer.items():
+        if choice is None and field == 'story':
+            continue
+        if not isinstance(choice, dict) or choice.get('template_id') not in (templates.get(field) or ()):
+            return False
+        ids = {k: choice.get(k, []) for k in ('phrase_ids', 'fact_ids')}
+        if not all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in ids.values()):
+            return False
+        if not set(ids['phrase_ids']) <= phrases or not set(ids['fact_ids']) <= facts:
+            return False
+    return True
+
+
 class ProductionStages(Stages):
     def __init__(self, conversation, pinned):
         super().__init__(pinned, start=self.start_plan, render=self.render_listing, mapper=edits.codex_mapper(step=pinned[0]['steps']['edit_map']))
@@ -115,9 +136,14 @@ class ProductionStages(Stages):
         self._choices = {}  # job_id -> {selector input digest: answer}; same question in one job, same answer
 
     def _job_selector(self, job_id, *, remote):
-        """The copy selector for one job. An identical selector input (pins and public IDs) is answered once per job:
-        a later version (a price-only edit, a retry) reuses that answer instead of asking again, so wording the owner
-        did not ask to change does not drift between v1 and v2. Without remote time, only a held answer is used."""
+        """The copy selector for one job. The first wording outcome for an identical selector input (pins and public
+        IDs) is kept for the whole job, so a later version (a price-only edit, a retry) shows the wording the owner
+        already saw instead of a fresh pick:
+        - a choice made only of eligible IDs is held and reused without asking again;
+        - a version built without remote time (the segment cap) holds "no choice", so later versions keep the same
+          default wording even when they have time to ask;
+        - a reply that is not a valid choice (wrong shape, an ID that was not offered) was never shown as a choice: the
+          Writer already gave the reviewed default, and the next version asks again, exactly as before."""
         if self.selector is None:
             return None
         held = self._choices.pop(job_id, {})
@@ -127,11 +153,15 @@ class ProductionStages(Stages):
 
         def select(step, prompt, schema, options):
             digest = hashlib.sha256(json.dumps([step, prompt, schema, options], sort_keys=True).encode()).hexdigest()
-            if digest not in held:
-                if not remote:
-                    return None
-                held[digest] = self.selector(step, prompt, schema, options)
-            return deepcopy(held[digest])
+            if digest in held:
+                return deepcopy(held[digest])
+            if not remote:
+                held[digest] = None
+                return None
+            answer = self.selector(step, prompt, schema, options)
+            if _eligible_choice(answer, options):
+                held[digest] = deepcopy(answer)
+            return answer
         return select
 
     def catalog(self):

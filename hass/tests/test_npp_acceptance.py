@@ -266,7 +266,7 @@ class RunnerTests(unittest.TestCase):
     def test_the_owner_seed_is_only_his_own_words(self):
         # Contract (G 11-18): maker, town and an address come from the owner's words, nothing is inferred.
         self.assertEqual(run_npp.owner_seed(view_of(30)),
-                         {"maker": "Miners", "town": "Paso Robles", "url": "https://minersfigs.example/about"})
+                         {"maker": "Miners", "town": "Paso Robles", "url": "https://minersfigs.com/about"})
         self.assertEqual(run_npp.owner_seed(view_of(13)), {"maker": "", "town": "", "url": ""})
 
     def test_the_production_seed_passes_and_third_party_facts_are_refused(self):

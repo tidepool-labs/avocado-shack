@@ -17,6 +17,13 @@ ASSETS = ROOT / "hass" / "npp" / "assets"
 CASES = ROOT / "hass" / "tests" / "npp" / "cases"
 CHAOS_PHOTOS = ROOT / "hass" / "tests" / "chaos" / "photos"
 PINS = ROOT / "hass" / "npp" / "pins.json"
+# G decision FIX2 (Question B on the Hass "last 5 tests" card): the only two departures from the corpus rules below.
+# Case 30's owner types an ordinary-looking maker address (the reserved .example one is refused by the guard at every
+# turn, so the case could never reach a card); the harness serves it from the case's own page file on a loopback fake
+# host, and test_case30_aligned_owner_journey keeps the reserved-address refusal as its own passing control.
+ORDINARY_OWNER_ADDRESS = {30: "https://minersfigs.com/about"}
+# Case 1 expects Hass's shelf for the tortilla chips (pantry) instead of the live card's (vegetables).
+GOLDEN_CATEGORY_DECISIONS = {1: ("vegetables", "pantry")}
 CATEGORIES = ("fruit", "vegetables", "dairy", "eggs", "meat", "pantry", "drinks", "bread", "flowers", "general")
 KINDS = ("food", "drink", "fresh", "non-food")
 NUMBER_WORDS = set("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "
@@ -827,6 +834,8 @@ class CaseInputsTest(unittest.TestCase):
                     self.assertTrue((CASES / polish["file"].split(":")[1]).exists(), case["id"])
                 for addr, page in unit["inputs"].get("web", {}).get("pages", {}).items():
                     self.assertTrue((CASES / page["file"]).exists(), (case["id"], addr))
+                    if ORDINARY_OWNER_ADDRESS.get(case["id"]) == addr:
+                        continue  # served only by the harness's loopback fake host; see ORDINARY_OWNER_ADDRESS
                     self.assertRegex(addr, r"^https://[a-z0-9.-]+\.example/")
             if "golden" in case:
                 self.assertTrue((ASSETS / case["golden"]).exists(), case["id"])
@@ -839,8 +848,13 @@ class CaseInputsTest(unittest.TestCase):
             g = load(ASSETS / case["golden"])
             used.append(g["product_id"])
             listing = case["expect"]["listing"]
+            category = g["category"]
+            if case["id"] in GOLDEN_CATEGORY_DECISIONS:
+                live, decided = GOLDEN_CATEGORY_DECISIONS[case["id"]]
+                self.assertEqual(category, live, case["id"])  # the live card still says this; a drift is caught
+                category = decided
             self.assertEqual((listing["brand"], listing["origin"], listing["category"], listing["maker_panel"]),
-                             (g["card"]["brand"], g["card"]["origin"], g["category"], g["card"]["meet_the_maker"] is not None), case["id"])
+                             (g["card"]["brand"], g["card"]["origin"], category, g["card"]["meet_the_maker"] is not None), case["id"])
             self.assertEqual(case["expect"]["calls"], {"image_edit": 1, "search": 0, "fetch": 0, "extract": 0, "verify": 0}, case["id"])
             self.assertEqual(case["turns"][0]["photos"], [f"npp:golden-{g['product_id'].split('-')[-1]}.jpg"])
         self.assertEqual(sorted(used), sorted(load(p)["product_id"] for p in goldens))

@@ -1,5 +1,5 @@
 {
-  "about": "Separate, non-scoring regression for the case-30 owner journey (plan H52, adopted from offline proposal H49 option 1). Strict NPP case 30, its goldens, the manifest and every recording stay unchanged and keep refusing the reserved .example address; this file is never a strict case and never adds to a replay score.",
+  "about": "Reserved-address control and S2 reading for strict NPP case 30 (plan H52; FIX2 moved the ordinary address into the strict case). The strict case names owner_url; the same view with only the address swapped back to reserved_url must still be refused. This file is never a strict case and never adds to a replay score.",
   "base_case": 30,
   "reserved_url": "https://minersfigs.example/about",
   "owner_url": "https://minersfigs.com/about",

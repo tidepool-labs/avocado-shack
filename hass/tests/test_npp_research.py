@@ -13,6 +13,8 @@ from hass.npp import assets, research_hermes as adapter
 CASES = Path(__file__).with_name("npp") / "cases"
 HOME = "https://minersfigs.example/"
 ABOUT = HOME + "about"
+OWNER_HOME = "https://minersfigs.com/"  # case 30: the address the owner types (FIX2)
+OWNER_ABOUT = OWNER_HOME + "about"
 DAY = date(2026, 11, 18)
 
 
@@ -104,12 +106,12 @@ class ResearchTests(unittest.TestCase):
     def test_owner_url_checks_quote_then_separately_verifies_typed_fact(self):
         # Case 30: even a source explicitly given by the owner cannot authorize old or negated facts.
         world = World(fixture(30))
-        status, _, body = world.pages[ABOUT]
-        world.pages[ABOUT] = status, "Text/HTML; charset=utf-8", body
-        result = world.maker(owner_url=ABOUT)
+        status, _, body = world.pages[OWNER_ABOUT]
+        world.pages[OWNER_ABOUT] = status, "Text/HTML; charset=utf-8", body
+        result = world.maker(owner_url=OWNER_ABOUT)
         self.assertEqual([(f["slot"], f["value"]) for f in result.story_facts], [("nature", "orchard"), ("makes", "dried figs")])
         self.assertEqual(result.story_facts[0], {"id": "official-nature", "slot": "nature", "value": "orchard",
-                         "quote": "Miners is an orchard in Paso Robles.", "url": ABOUT, "retrieved": DAY.isoformat()})
+                         "quote": "Miners is an orchard in Paso Robles.", "url": OWNER_ABOUT, "retrieved": DAY.isoformat()})
         self.assertEqual(result.receipt["queries"], [])
         self.assertEqual([f["reason"] for f in result.receipt["facts"]].count("negation-past-or-hedge-marker"), 2)
         extract, *verifiers = world.requests
@@ -122,9 +124,9 @@ class ResearchTests(unittest.TestCase):
         # Only a declared HTML media type may supply evidence. A substring check
         # admits this non-HTML response and sends the unchanged body for extraction.
         world = World(fixture(30))
-        world.pages[ABOUT] = status, "application/x-text/html", body
-        result = world.maker(owner_url=ABOUT)
-        self.assertIn(ABOUT, world.urls)
+        world.pages[OWNER_ABOUT] = status, "application/x-text/html", body
+        result = world.maker(owner_url=OWNER_ABOUT)
+        self.assertIn(OWNER_ABOUT, world.urls)
         self.assertFalse(result.story_facts)
         self.assertEqual(world.requests, [])
 
@@ -182,11 +184,11 @@ class ResearchTests(unittest.TestCase):
     def test_conflict_and_refused_entailment_drop_only_unsupported_slots(self):
         # An extractor's highest-ranked value must not win a disagreement or a non-supporting second verdict.
         world = World(fixture(30), verdicts={"orchard": "unclear"})
-        status, kind, body = world.pages[ABOUT]
+        status, kind, body = world.pages[OWNER_ABOUT]
         body = body.replace(b"</body>", b"<p>Miners makes preserves.</p></body>")
-        world.pages[ABOUT] = status, kind, body
-        world.stubs["extract"].append(dict(slot="makes", value="preserves", url=ABOUT, quote="Miners makes preserves."))
-        result = world.maker(owner_url=ABOUT)
+        world.pages[OWNER_ABOUT] = status, kind, body
+        world.stubs["extract"].append(dict(slot="makes", value="preserves", url=OWNER_ABOUT, quote="Miners makes preserves."))
+        result = world.maker(owner_url=OWNER_ABOUT)
         self.assertFalse(result.story_facts)
         self.assertEqual([row["reason"] for row in result.receipt["facts"]].count("conflicting-values"), 2)
         self.assertEqual(result.receipt["facts"][0]["verifier"], "unclear")
@@ -197,9 +199,9 @@ class ResearchTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 world = World(fixture(30))
                 if mode == "robots":
-                    world.pages[HOME + "robots.txt"] = 200, "text/plain", b"User-agent: *\nDisallow: /about"
+                    world.pages[OWNER_HOME + "robots.txt"] = 200, "text/plain", b"User-agent: *\nDisallow: /about"
                 elif mode == "redirect":
-                    world.pages[ABOUT] = 302, "", b"", "https://unrelated.example/about"
+                    world.pages[OWNER_ABOUT] = 302, "", b"", "https://unrelated.example/about"
                 else:
                     orig = world.model
 
@@ -209,25 +211,25 @@ class ResearchTests(unittest.TestCase):
                         return orig(req)
 
                     world.model = late
-                self.assertFalse(world.maker(owner_url=ABOUT).facts)
+                self.assertFalse(world.maker(owner_url=OWNER_ABOUT).facts)
                 self.assertNotIn("https://unrelated.example/about", world.urls)
                 self.assertNotIn("https://unrelated.example/robots.txt", world.urls)
                 if mode == "robots":
-                    self.assertNotIn(ABOUT, world.urls)
+                    self.assertNotIn(OWNER_ABOUT, world.urls)
                 if mode != "late":
                     self.assertEqual(world.requests, [])
 
     def test_same_site_about_link_supplies_evidence_at_final_canonical_url(self):
         # Redirect provenance must agree with the final URL; external about links must not be followed.
         world = World(fixture(30))
-        world.pages[HOME] = 200, "text/html", (CASES / "pages/miners-home-clean.html").read_bytes().replace(
+        world.pages[OWNER_HOME] = 200, "text/html", (CASES / "pages/miners-home-clean.html").read_bytes().replace(
             b"</nav>", b'<a href="https://[broken/about">Broken</a>'
             b'<a href="https://unrelated.example/about">About</a><a href="/about">About</a></nav>')
-        canonical = HOME + "our-story"
-        world.pages[canonical] = world.pages[ABOUT]
-        world.pages[ABOUT] = 301, "", b"", "/our-story"
+        canonical = OWNER_HOME + "our-story"
+        world.pages[canonical] = world.pages[OWNER_ABOUT]
+        world.pages[OWNER_ABOUT] = 301, "", b"", "/our-story"
         world.stubs["extract"] = [dict(world.stubs["extract"][0], url=canonical)]
-        result = world.maker(owner_url=HOME)
+        result = world.maker(owner_url=OWNER_HOME)
         self.assertEqual([f["url"] for f in result.story_facts], [canonical])
         self.assertFalse(any("unrelated.example" in url for url in world.urls))
 

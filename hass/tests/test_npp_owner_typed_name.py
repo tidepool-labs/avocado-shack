@@ -149,7 +149,10 @@ class MakerSentenceOrItemNameTests(unittest.TestCase):
         "bakes", "brews with care", "farms with bees", "smokes with hickory",
         # statements anywhere in the clause
         "is family-owned", "family owned and operated", "headquartered in Vermont", "has bees",
-        "will deliver", "could ship", "situated in Vermont")
+        "will deliver", "could ship", "situated in Vermont",
+        # R3 (t_dd93a1f8 @7dcca5b8): past tense and time phrases
+        "opened last year", "moved here", "relocated to Barre", "expanded recently", "retired", "bakes daily",
+        "for three generations", "started small")
     ITEM_NAMES = (
         # R2.2: plural-noun-first names
         "Brussels sprouts",
@@ -158,7 +161,8 @@ class MakerSentenceOrItemNameTests(unittest.TestCase):
         "dark and robust maple syrup",
         # participle adjectives and verb-like nouns that are food words
         "smoked salmon", "cured salami", "pressed apple juice", "baked beans", "craft beer", "dark roast coffee",
-        "cold brew coffee", "cinnamon rolls", "rolls", "preserves", "spreads", "fruit blends", "Calabrese salamini")
+        "cold brew coffee", "cinnamon rolls", "rolls", "preserves", "spreads", "fruit blends", "Calabrese salamini",
+        "smoked and cured ham", "dried apricots", "whipped honey")
 
     def test_maker_sentences_are_not_item_names(self):
         for rest in self.MAKER_SENTENCES:
@@ -183,7 +187,7 @@ class PairedDecisionControlTests(_Decide):
     def test_a_maker_sentence_never_overrides_the_confident_photo(self):
         self.assertGreaterEqual(self.reading["confidence"]["item"], 0.8)
         for rest in ("works in Vermont", "is based in Vermont", "produces honey", "crafts honey", "whittles in Vermont",
-                     "sold at Costco"):
+                     "sold at Costco", "opened last year", "moved here"):
             with self.subTest(rest=rest):
                 decision = self.decide(f"made by Maple Valley, Maple Valley {rest}, $15 each")
                 self.assertEqual(decision.item, "Maple Syrup")

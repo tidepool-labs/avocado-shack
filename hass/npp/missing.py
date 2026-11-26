@@ -104,15 +104,18 @@ _HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|
 #  4. structure, not vocabulary, for verbs no list names: (a) a lowercase first word shaped like a third-person verb
 #     (ends in "s", not "ss"/"us"/"is") followed by an object rather than a connector ("whittles spoons", "bottles
 #     syrup"); (b) a lowercase preposition followed by a capitalized word, i.e. a place or a business ("whittles in
-#     Vermont", "sold at Costco").
+#     Vermont", "sold at Costco"); (c) a time or frequency word anywhere ("opened last year", "bakes daily", "for
+#     three generations"); (d) a lowercase past-tense first word ("-ed") that stands alone or is followed by a
+#     function word rather than a noun ("moved here", "expanded in 2019", "relocated to Barre").
 # Item names keep their typed shape: a capitalized origin word ("Brussels sprouts", "Swiss cheese"), connectors
-# ("peaches in syrup", "dates and figs"), one plural word ("pickles"), participle adjectives ("smoked", "cured",
-# "pressed"). A lowercase plural-first name followed by a noun ("greens mix") falls back to the photo read.
+# ("peaches in syrup", "dates and figs"), one plural word ("pickles"), participle adjectives before a noun ("smoked
+# salmon", "cured salami", "smoked and cured ham"). A lowercase plural-first name followed by a noun ("greens mix")
+# falls back to the photo read.
 _OPENER = frozenset("in from at near on of by for to with and since who that which where when whose "
                     "i we they he she it its it's our their his her my this these those there here".split())
 _STATEMENT = frozenset("is are was were am be been being has have had having does did will would could should shall "
-                       "might based located founded established started began begun owned operated headquartered "
-                       "situated family-owned".split())
+                       "might based located founded established started began begun opened owned operated "
+                       "headquartered situated family-owned".split())
 _FIRST_VERB = frozenset("make produce sell grow own operate supply offer manufacture create provide deliver distribute "
                         "import specialize specialise".split())
 # Third-person forms only, as the first word. Verbs whose plural noun is a common one-word product ("rolls",
@@ -124,6 +127,9 @@ _THIRD_PERSON = frozenset(word + ("es" if re.search(r"(?:s|x|z|ch|sh|o)$", word)
                           or word[-2] in "aeiou" else word[:-1] + "ies" for word in _ACTIVITY)
 _CONNECTOR = frozenset("and & n with in of".split())
 _PLACE_PREPOSITION = frozenset("in at from near outside around across throughout since".split())
+_TIME = frozenset("last ago yesterday today tonight daily weekly monthly yearly annually every always recently lately "
+                  "nowadays year years month months week weeks decade decades generation generations".split())
+_AFTER_PAST = (_OPENER - {"and"}) | _TIME | {"a", "an", "the"}
 
 
 def _maker_sentence(rest):
@@ -134,8 +140,12 @@ def _maker_sentence(rest):
     first = low[0]
     if first in _OPENER or first in _FIRST_VERB or first in _THIRD_PERSON or _STATEMENT.intersection(low):
         return True
+    if _TIME.intersection(low):
+        return True
     if (words[0].islower() and len(first) >= 4 and first.endswith("s") and not first.endswith(("ss", "us", "is"))
             and len(low) > 1 and low[1] not in _CONNECTOR):
+        return True
+    if words[0].islower() and len(first) >= 4 and first.endswith("ed") and (len(low) == 1 or low[1] in _AFTER_PAST):
         return True
     return any(word in _PLACE_PREPOSITION and words[at].islower() and words[at + 1][:1].isupper()
                for at, word in enumerate(low[:-1]))

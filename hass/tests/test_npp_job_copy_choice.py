@@ -6,7 +6,8 @@ same input (pins and public IDs only), and the cloud gave a different descriptio
 description`). Case 21 shows the same drift the other way: v1 went out at the segment cap with the default wording,
 then v2 had time to ask and changed it. The stage now keeps the first wording outcome for an identical selector input
 for the whole job. A changed input (a rename changes the eligible IDs) is still asked, other jobs are asked separately,
-and a reply none of which was shown is asked again on the next version (case 36 counts both asks).
+and a reply none of which was shown (prose, an unknown field, a handled selector error) leaves the default the owner saw,
+which is held like any other outcome, so case 36 asks once.
 
 Where the wording is kept (review RETURN at e0991752): in the job's own durable rows (npp_wording), written by Jobs
 with the card it belongs to, never by the render itself:
@@ -29,6 +30,7 @@ OPTIONS = {'kind': 'food', 'category': 'pantry',
 # Real IDs for a food/pantry item: a nondefault description (three phrases) beside the two default rungs.
 PLAIN = {'template_id': 'desc-food-plain', 'phrase_ids': ['food-open-1', 'food-use-1', 'food-close-1']}
 SHORT = {'template_id': 'desc-default-short', 'phrase_ids': []}
+DEFAULT = object()  # in a table: the reply showed nothing of itself, so the default wording is what is held
 
 
 def commit(held, wording):
@@ -138,6 +140,29 @@ class JobCopyChoiceTests(unittest.TestCase):
         self.assertEqual(self.changed(v1, v2), {'sellingPrice'})
         self.assertNotIn('Pick up', v1['description'])  # the valid field was what the owner saw
 
+    def test_a_default_shown_for_an_unusable_reply_keeps_its_wording(self):
+        # Return item 4 (second review). Bug: a reply the Writer did not apply (prose, empty, no answer after a handled
+        # selector error) showed the reviewed default but held nothing, so the price edit asked again and a valid pick
+        # replaced the description the owner had seen.
+        def first_ask(step, prompt, schema, options):
+            self.asked.append(options)
+            if len(self.asked) > 1:
+                return {'description': PLAIN}  # a valid pick, offered if the job ever asks again
+            if self.failure:
+                raise TimeoutError('selector timed out')
+            return self.failure_reply
+
+        for name, reply, failure in (('prose', {'description': 'fabricated prose'}, False), ('empty', {}, False), ('error', None, True)):
+            for restarted in (False, True):
+                with self.subTest(first=name, restarted=restarted):
+                    self.setUp()
+                    self.asked, self.failure, self.failure_reply = [], failure, reply
+                    self.port.selector = first_ask
+                    v1, v2 = self.drafts('$7 each', 'make it $8', between=self.restart if restarted else None)
+                    self.assertEqual(len(self.asked), 1)  # v2 replays the default; it does not ask again
+                    self.assertTrue(v1['description'].startswith('Pick up'))  # v1 is the reviewed default
+                    self.assertEqual(self.changed(v1, v2), {'sellingPrice'})
+
     def test_the_drifting_selector_really_drifts(self):
         # Negative control: without the per-job answer, the second ask gives v2 another description.
         self.drifting_selector()
@@ -196,16 +221,17 @@ class JobCopyChoiceTests(unittest.TestCase):
         self.wording(held, remote=True)({}, 'p2', {}, OPTIONS)
         self.assertEqual(len(self.asked), 2)
 
-    def test_a_reply_none_of_which_was_shown_is_asked_again(self):
-        # Case 36: fabricated prose is never a choice; the Writer gives the default and the next version asks again.
+    def test_a_reply_none_of_which_was_shown_holds_the_default(self):
+        # Case 36: fabricated prose is never a choice; the Writer gives the default, and that default is what the owner
+        # saw, so the next version replays it instead of asking (and maybe getting another description).
         prose = {'description': 'The beans are roasted in copper pans.'}
         self.drifting_selector(reply=prose)
         held = {}
-        for _ in range(2):
+        for expected in (prose, None):
             select = self.wording(held, remote=True)
-            self.assertEqual(select({}, 'p', {}, OPTIONS), prose)
+            self.assertEqual(select({}, 'p', {}, OPTIONS), expected)
             commit(held, select.keep({'description': SHORT}))
-        self.assertEqual((len(self.asked), held), (2, {}))
+        self.assertEqual((len(self.asked), list(held.values())), (1, [None]))
 
     def test_a_reply_is_held_for_the_fields_the_writer_applied(self):
         # Return item 3, unit level: field by field, what was rendered, and nothing a model said that was not shown.
@@ -215,15 +241,16 @@ class JobCopyChoiceTests(unittest.TestCase):
                 ({'story': None, 'description': 'prose'}, {}, {'story': None}),  # a declined story is an answer
                 # a copied description is re-rendered with other phrases of the same template: still the reply's pick
                 ({'description': PLAIN}, {'description': {**PLAIN, 'phrase_ids': ['food-open-2', 'food-use-1', 'food-close-1']}}, {'description': PLAIN}),
-                ({'name': {'template_id': 'bogus'}}, {'name': {'template_id': 'name-item'}}, None),
-                ({'description': PLAIN, 'price': 1}, {'description': PLAIN}, None),  # an unknown field voids the whole reply
-                ({'description': PLAIN, 'story': 'prose'}, {'description': {'template_id': 'desc-food-default', 'phrase_ids': []}}, None),
-                ('desc-a', {}, None), ({}, {}, None), (None, {}, None)):
+                # nothing applied: the card shows the default wording, held as "no choice"
+                ({'name': {'template_id': 'bogus'}}, {'name': {'template_id': 'name-item'}}, DEFAULT),
+                ({'description': PLAIN, 'price': 1}, {'description': PLAIN}, DEFAULT),  # an unknown field voids the whole reply
+                ({'description': PLAIN, 'story': 'prose'}, {'description': {'template_id': 'desc-food-default', 'phrase_ids': []}}, DEFAULT),
+                ('desc-a', {}, DEFAULT), ({}, {}, DEFAULT), (None, {}, DEFAULT)):
             with self.subTest(reply=reply):
                 self.replies(reply)
                 select = self.wording({}, remote=True)
                 select({}, 'p', {}, OPTIONS)
-                self.assertEqual(select.keep(shown), {} if kept is None else {select.digest: kept})
+                self.assertEqual(select.keep(shown), {select.digest: None if kept is DEFAULT else kept})
 
     def test_a_returned_answer_cannot_change_the_held_one(self):
         held = {}

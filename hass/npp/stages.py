@@ -112,8 +112,8 @@ class _Wording:
       with the card, so a worker finishing after the segment cap cannot replace what the cap card showed;
     - a render without remote time (the segment cap) shows the default wording, which is kept as "no choice";
     - a reply is kept for what the Writer actually rendered from it: each field it applied, field by field. A reply
-      nothing of which was applied (wrong shape, an unknown field, IDs that were not offered) was never shown, so the
-      next version asks again."""
+      nothing of which was applied (wrong shape, an unknown field, IDs that were not offered, a handled selector error)
+      showed the default wording, which is kept as "no choice" like the cap's, so a later version never asks for another."""
 
     def __init__(self, ask, held, remote):
         self.ask, self.held, self.remote = ask, held, remote
@@ -130,16 +130,18 @@ class _Wording:
         return deepcopy(self.reply)
 
     def keep(self, rendered):
-        """{digest: choice or None} to hold for what `rendered` (the Writer's selections) shows, or {} when nothing is new."""
+        """{digest: choice or None} to hold for what `rendered` (the Writer's selections) shows, or {} when nothing is new.
+
+        None is the default wording: a render that had no remote time, or whose reply (wrong shape, an unknown field, an
+        unoffered ID, prose, empty, or no answer at all after a handled selector error) the Writer did not apply, so the
+        card shows the reviewed default and a later version shows that same default."""
         if self.digest is None or self.digest in self.held:
             return {}
-        if not self.asked:
-            return {self.digest: None}
         reply = self.reply
-        if not isinstance(reply, dict) or reply.keys() - set(copy.FIELDS):
-            return {}  # the Writer ignores a reply with an unknown field altogether
+        if not self.asked or not isinstance(reply, dict) or reply.keys() - set(copy.FIELDS):
+            return {self.digest: None}  # the Writer ignores a reply with an unknown field altogether
         applied = {key: deepcopy(choice) for key, choice in reply.items() if self._applied(key, choice, rendered.get(key))}
-        return {self.digest: applied} if applied else {}
+        return {self.digest: applied or None}
 
     @staticmethod
     def _applied(key, choice, shown):

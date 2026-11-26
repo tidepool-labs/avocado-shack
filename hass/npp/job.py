@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS npp_approvals(
  approval_id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, n INTEGER NOT NULL, outbox_id INTEGER NOT NULL,
  transport_message_id TEXT, UNIQUE(job_id,n));
 CREATE TABLE IF NOT EXISTS npp_polishes(photo_sha TEXT PRIMARY KEY, started_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS npp_wording(
+ job_id TEXT NOT NULL, digest TEXT NOT NULL, choice_json TEXT NOT NULL, PRIMARY KEY(job_id,digest));
 """
 ACTIVE = "'working','asking','card_out','editing','retake'"
 YES = re.compile(r"yes ([0-9a-f]{4,12})(?:-([1-9][0-9]{0,8}))?", re.I)
@@ -112,6 +114,7 @@ class Card:
     image_sha256: str
     note: str = ""  # text inside the single bounded fallback bracket
     candidate: bool = False  # older injected fixture stages supply a draft they already prepared
+    wording: dict | None = None  # {selector input digest: copy choice or None} this card shows; kept with the card, only IDs
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,7 @@ class Work:
     answers: dict[str, bool] = field(default_factory=dict)
     ask_counts: dict[str, int] = field(default_factory=dict)
     answered: tuple[str, ...] = ()
+    wording: dict = field(default_factory=dict)  # wording already shown in this job (npp_wording), a snapshot read by the pump
 
 
 class Jobs:
@@ -142,6 +146,16 @@ class Jobs:
 
     def version(self, job, n):
         return self.one("SELECT * FROM npp_versions WHERE job_id=? AND n=?", job, n)
+
+    def wording(self, job):
+        """{selector input digest: choice or None} already shown in this job, read fresh each pump so it survives a restart."""
+        held = {}
+        for digest, text in self.db.execute("SELECT digest,choice_json FROM npp_wording WHERE job_id=?", (job,)).fetchall():
+            try:
+                held[digest] = json.loads(text)
+            except ValueError:
+                pass  # an unreadable row holds nothing: that input is asked again
+        return held
 
     def active(self, chat, sender):
         return self.one(f"SELECT * FROM npp_jobs WHERE chat=? AND sender=? AND state IN ({ACTIVE})", chat, sender)
@@ -178,6 +192,7 @@ class Jobs:
                         (now.isoformat(), state, jid))
         self.db.execute("UPDATE npp_questions SET state='expired' WHERE job_id=? AND state='open'", (jid,))
         self.db.execute("UPDATE npp_versions SET state='superseded' WHERE job_id=? AND state IN ('building','queued','delivered')", (jid,))
+        self.db.execute("DELETE FROM npp_wording WHERE job_id=?", (jid,))  # held wording ends with its job
         if self.request(job, now):
             self.c.requests.mark(job["open_request_id"], "closed", now)
         self.dirty.add(jid)
@@ -323,6 +338,10 @@ class Jobs:
                 self.db.execute("UPDATE npp_versions SET image_variant=?,image_path=?,image_sha256=?,change_id=?,draft_hash=?,base=?,"
                                 "card_png_sha=?,outbox_id=?,queued_at=?,state='queued' WHERE job_id=? AND n=?",
                                 (*picture, draft["change_id"], draft["draft_hash"], draft["base"], card_sha, row, now.isoformat(), jid, version["n"]))
+                # The wording this card shows is held with the card, in the same transaction, so a later version (after a
+                # restart too) shows it again. First outcome wins; a result the pump never consumes (a late worker) holds nothing.
+                for digest, choice in (result.wording or {}).items():
+                    self.db.execute("INSERT OR IGNORE INTO npp_wording VALUES (?,?,?)", (jid, digest, dump(choice)))
                 self.end(seg, now, "card")
                 self.answer_questions(jid, pid, now, ())
                 return
@@ -405,7 +424,7 @@ class Jobs:
             for qid, _ in questions:
                 counts[qid] = counts.get(qid, 0) + 1
             work = Work(jid, req, dict(parent) if parent else None, instant(seg["deadline_at"]), answers,
-                        counts, tuple(qid for qid, state in questions if state == 'answered'))
+                        counts, tuple(qid for qid, state in questions if state == 'answered'), self.wording(jid))
             listing = json.loads(version["listing_json"]) if version else None
             ticket = seg["segment_id"], seg["revision"], version["n"] if version else None
             if now >= work.deadline:

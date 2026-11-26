@@ -6,19 +6,35 @@ same input (pins and public IDs only), and the cloud gave a different descriptio
 description`). Case 21 shows the same drift the other way: v1 went out at the segment cap with the default wording,
 then v2 had time to ask and changed it. The stage now keeps the first wording outcome for an identical selector input
 for the whole job. A changed input (a rename changes the eligible IDs) is still asked, other jobs are asked separately,
-and a reply that is not a valid choice is asked again on the next version (case 36 counts both asks).
+and a reply none of which was shown is asked again on the next version (case 36 counts both asks).
+
+Where the wording is kept (review RETURN at e0991752): in the job's own durable rows (npp_wording), written by Jobs
+with the card it belongs to, never by the render itself:
+- it survives a process restart (a fresh ProductionStages reads the same rows);
+- a worker finishing after the segment cap cannot replace what the cap card showed;
+- a reply is kept for what the Writer rendered from it, field by field, not accepted or refused as a whole.
 """
+from datetime import timedelta
+from types import SimpleNamespace
 import unittest
 
 from hass.npp.copy import Context, Fact, Writer
-from hass.npp import assets
-from hass.npp.stages import _eligible_choice
+from hass.npp import assets, stages_for
 from hass.tests import test_npp_stages as base
 
 OPTIONS = {'kind': 'food', 'category': 'pantry',
            'templates': {'name': ['name-item', 'name-brand-item'], 'description': ['desc-a', 'desc-b'],
                          'imageAlt': ['alt-photo'], 'story': ['story-made']},
            'phrase_ids': ['food-open-1', 'food-use-1'], 'fact_ids': {'makes': 'f-makes'}}
+# Real IDs for a food/pantry item: a nondefault description (three phrases) beside the two default rungs.
+PLAIN = {'template_id': 'desc-food-plain', 'phrase_ids': ['food-open-1', 'food-use-1', 'food-close-1']}
+SHORT = {'template_id': 'desc-default-short', 'phrase_ids': []}
+
+
+def commit(held, wording):
+    """What Jobs.finish does with a card's wording: the first outcome for an input stays."""
+    for digest, choice in wording.items():
+        held.setdefault(digest, choice)
 
 
 class JobCopyChoiceTests(unittest.TestCase):
@@ -30,34 +46,97 @@ class JobCopyChoiceTests(unittest.TestCase):
     start_render = base.StageTests.start_render
 
     def drifting_selector(self, reply=None):
-        """Stands in for a cloud selector that answers the same input differently each time it is asked."""
+        """Stands in for a cloud selector that answers the same input differently each time it is asked (both replies render)."""
         self.asked = []
 
         def select(step, prompt, schema, options):
             self.asked.append(options)
             if reply is not None:
                 return reply
-            offered = options['templates']['description']
-            pick = offered[(len(self.asked) - 1) % len(offered)]
-            return {'description': {'template_id': pick, 'phrase_ids': []}}
+            return {'description': (PLAIN, SHORT)[(len(self.asked) - 1) % 2]}
 
         self.port.selector = select
 
-    def drafts(self, first, edit=None):
+    def replies(self, *replies, during=None):
+        """A selector that gives these replies in order (the last one again after that); `during` runs inside the first ask."""
+        self.asked = []
+
+        def select(step, prompt, schema, options):
+            self.asked.append(options)
+            if during is not None and len(self.asked) == 1:
+                during()
+            return replies[min(len(self.asked), len(replies)) - 1]
+
+        self.port.selector = select
+
+    def wording(self, held, *, remote):
+        return self.port._job_selector(SimpleNamespace(wording=held), remote=remote)
+
+    def restart(self):
+        """A new process: a new stage object that shares only what is durable (the database), none of the old one's memory."""
+        old = self.port
+        fresh = stages_for(self.conv, assets())
+        fresh.identifier.read, fresh.selector, fresh.mapper, fresh.persist = old.identifier.read, old.selector, old.mapper, old.persist
+        self.port = self.conv.npp.stages = fresh
+
+    def drafts(self, first, edit=None, *, between=None):
         self.start_render(first)
         self.case.work()
+        if between:
+            between()
         if edit:
             self.case.say(edit)
             self.case.work()
         return [draft['ops'][-1]['args'] for draft in self.saved]
+
+    def changed(self, v1, v2):
+        return {k for k in v1.keys() | v2.keys() if v1.get(k) != v2.get(k)}
 
     def test_price_only_edit_reuses_the_v1_choice(self):
         self.drifting_selector()
         v1, v2 = self.drafts('$7 each', 'make it $8')
         self.assertEqual(len(self.asked), 1)  # asked once; v2 had the identical input
         self.assertEqual((v1['sellingPrice'], v2['sellingPrice']), ('7.00 each', '8.00 each'))
-        self.assertEqual({k for k in v1.keys() | v2.keys() if v1.get(k) != v2.get(k)}, {'sellingPrice'})
+        self.assertEqual(self.changed(v1, v2), {'sellingPrice'})
         self.case.assert_unpublished()
+
+    def test_a_restart_between_versions_keeps_the_shown_wording(self):
+        # Return item 1. Bug: the held choice lived only in the stage object, so after a restart a price edit asked again
+        # and the cloud could give the description the owner never saw. The job's rows are durable; so is the choice.
+        self.replies({'description': PLAIN}, {'description': SHORT})
+        v1, v2 = self.drafts('$7 each', 'make it $8', between=self.restart)
+        self.assertEqual(len(self.asked), 1)  # the new process did not ask again
+        self.assertNotIn('Pick up', v1['description'])  # v1 really is the cloud's nondefault pick
+        self.assertEqual(self.changed(v1, v2), {'sellingPrice'})
+
+    def test_a_late_remote_answer_cannot_replace_the_cap_wording(self):
+        # Return item 2. Bug: the pump runs the cap fallback while the worker is still waiting on the remote selector;
+        # the cap card showed the default and held "no choice", then the worker's reply replaced it, so the next edit
+        # used wording the owner never saw. Here the cap runs inside the worker's ask, and the reply comes after it.
+        def cap_arrives():
+            self.case.now += timedelta(seconds=100)
+            self.case.flush()
+
+        self.replies({'description': PLAIN}, during=cap_arrives)
+        self.start_render('$7 each')
+        self.case.scheduler.run()  # the worker asks, the cap card goes out meanwhile, then the worker's reply returns
+        self.case.flush()
+        self.assertEqual(len(self.saved), 1)  # one card: the cap's, with the default wording
+        self.case.say('make it $8')
+        self.case.work()
+        v1, v2 = [draft['ops'][-1]['args'] for draft in self.saved]
+        self.assertEqual(len(self.asked), 1)  # v2 replays the cap's default; it does not ask or use the late reply
+        self.assertTrue(v1['description'].startswith('Pick up'))  # the default wording the owner saw
+        self.assertEqual(self.changed(v1, v2), {'sellingPrice'})
+
+    def test_a_partly_invalid_reply_holds_what_was_shown(self):
+        # Return item 3. Bug: the whole reply was refused for one bad field, but the Writer shows the valid fields, so a
+        # valid nondefault description beside an invalid name went out unheld and the next price edit could change it.
+        self.replies({'name': {'template_id': 'name-not-offered'}, 'description': PLAIN}, {'description': SHORT})
+        v1, v2 = self.drafts('$7 each', 'make it $8')
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.changed(v1, v2), {'sellingPrice'})
+        self.assertNotIn('Pick up', v1['description'])  # the valid field was what the owner saw
 
     def test_the_drifting_selector_really_drifts(self):
         # Negative control: without the per-job answer, the second ask gives v2 another description.
@@ -68,76 +147,97 @@ class JobCopyChoiceTests(unittest.TestCase):
 
     def test_a_changed_input_is_asked_again(self):
         self.drifting_selector()
-        held = self.port._job_selector('job-a', remote=True)
+        held = {}
         renamed = {**OPTIONS, 'templates': {**OPTIONS['templates'], 'name': ['name-item']}}
-        one, again, other = held({'s': 1}, 'p', {}, OPTIONS), held({'s': 1}, 'p', {}, OPTIONS), held({'s': 1}, 'p', {}, renamed)
-        self.assertEqual(one, again)
+        replies = []
+        for options in (OPTIONS, OPTIONS, renamed):
+            select = self.wording(held, remote=True)
+            replies.append(select({'s': 1}, 'p', {}, options))
+            commit(held, select.keep({'description': replies[-1]['description']}))
+        self.assertEqual(replies[0], replies[1])
         self.assertEqual(len(self.asked), 2)
-        self.assertNotEqual(one, other)
+        self.assertNotEqual(replies[0], replies[2])
 
-    def test_jobs_do_not_share_answers(self):
+    def test_each_job_holds_its_own_wording_and_it_ends_with_the_job(self):
+        npp, db = self.conv.npp, self.conv.db
+        db.execute("INSERT INTO npp_wording VALUES ('job-a','d1','null'), ('job-b','d1','{\"story\":null}'), ('job-a','d2','not json')")
+        self.assertEqual(npp.wording('job-a'), {'d1': None})  # an unreadable row holds nothing
+        self.assertEqual(npp.wording('job-b'), {'d1': {'story': None}})
         self.drifting_selector()
-        a = self.port._job_selector('job-a', remote=True)({}, 'p', {}, OPTIONS)
-        b = self.port._job_selector('job-b', remote=True)({}, 'p', {}, OPTIONS)
-        self.assertEqual(len(self.asked), 2)
-        self.assertNotEqual(a, b)
+        self.start_render('$7 each')
+        self.case.work()
+        jid = self.case.job()['job_id']
+        [(digest, held)] = npp.wording(jid).items()
+        self.assertEqual(held, {'description': PLAIN})  # only what the Writer rendered from the reply, IDs only
+        self.case.say(f'no {jid}')
+        self.assertEqual(npp.wording(jid), {})
+        self.assertEqual(npp.wording('job-b'), {'d1': {'story': None}})
 
     def test_a_held_answer_is_reused_without_remote_time(self):
         self.drifting_selector()
-        held = self.port._job_selector('job-a', remote=True)({}, 'p', {}, OPTIONS)
-        self.assertEqual(self.port._job_selector('job-a', remote=False)({}, 'p', {}, OPTIONS), held)
+        held = {}
+        first = self.wording(held, remote=True)
+        answer = first({}, 'p', {}, OPTIONS)
+        commit(held, first.keep({'description': answer['description']}))
+        self.assertEqual(self.wording(held, remote=False)({}, 'p', {}, OPTIONS), answer)
         self.assertEqual(len(self.asked), 1)
 
     def test_a_version_without_remote_time_keeps_its_default_for_later_versions(self):
         # Case 21: v1 goes out at the segment cap with the default wording; v2 has time but must not change it.
         self.drifting_selector()
-        self.assertIsNone(self.port._job_selector('job-a', remote=False)({}, 'p', {}, OPTIONS))
-        self.assertIsNone(self.port._job_selector('job-a', remote=True)({}, 'p', {}, OPTIONS))
+        held = {}
+        cap = self.wording(held, remote=False)
+        self.assertIsNone(cap({}, 'p', {}, OPTIONS))
+        commit(held, cap.keep({'description': SHORT}))
+        self.assertIsNone(self.wording(held, remote=True)({}, 'p', {}, OPTIONS))
         self.assertEqual(self.asked, [])
-        # Another job, or a changed input in the same job, is still asked.
-        self.port._job_selector('job-b', remote=True)({}, 'p', {}, OPTIONS)
-        self.port._job_selector('job-a', remote=True)({}, 'p2', {}, OPTIONS)
+        # Another job (no rows), or a changed input in the same job, is still asked.
+        self.wording({}, remote=True)({}, 'p', {}, OPTIONS)
+        self.wording(held, remote=True)({}, 'p2', {}, OPTIONS)
         self.assertEqual(len(self.asked), 2)
 
-    def test_a_reply_that_is_not_a_valid_choice_is_asked_again(self):
+    def test_a_reply_none_of_which_was_shown_is_asked_again(self):
         # Case 36: fabricated prose is never a choice; the Writer gives the default and the next version asks again.
-        self.drifting_selector(reply={'description': 'The beans are roasted in copper pans.'})
-        select = self.port._job_selector('job-a', remote=True)
+        prose = {'description': 'The beans are roasted in copper pans.'}
+        self.drifting_selector(reply=prose)
+        held = {}
         for _ in range(2):
-            self.assertEqual(select({}, 'p', {}, OPTIONS), {'description': 'The beans are roasted in copper pans.'})
-        self.assertEqual(len(self.asked), 2)
+            select = self.wording(held, remote=True)
+            self.assertEqual(select({}, 'p', {}, OPTIONS), prose)
+            commit(held, select.keep({'description': SHORT}))
+        self.assertEqual((len(self.asked), held), (2, {}))
+
+    def test_a_reply_is_held_for_the_fields_the_writer_applied(self):
+        # Return item 3, unit level: field by field, what was rendered, and nothing a model said that was not shown.
+        for reply, shown, kept in (
+                ({'name': {'template_id': 'bogus'}, 'description': PLAIN}, {'name': {'template_id': 'name-item'}, 'description': PLAIN}, {'description': PLAIN}),
+                ({'description': 'prose', 'imageAlt': {'template_id': 'alt-photo'}}, {'imageAlt': {'template_id': 'alt-photo'}}, {'imageAlt': {'template_id': 'alt-photo'}}),
+                ({'story': None, 'description': 'prose'}, {}, {'story': None}),  # a declined story is an answer
+                # a copied description is re-rendered with other phrases of the same template: still the reply's pick
+                ({'description': PLAIN}, {'description': {**PLAIN, 'phrase_ids': ['food-open-2', 'food-use-1', 'food-close-1']}}, {'description': PLAIN}),
+                ({'name': {'template_id': 'bogus'}}, {'name': {'template_id': 'name-item'}}, None),
+                ({'description': PLAIN, 'price': 1}, {'description': PLAIN}, None),  # an unknown field voids the whole reply
+                ({'description': PLAIN, 'story': 'prose'}, {'description': {'template_id': 'desc-food-default', 'phrase_ids': []}}, None),
+                ('desc-a', {}, None), ({}, {}, None), (None, {}, None)):
+            with self.subTest(reply=reply):
+                self.replies(reply)
+                select = self.wording({}, remote=True)
+                select({}, 'p', {}, OPTIONS)
+                self.assertEqual(select.keep(shown), {} if kept is None else {select.digest: kept})
 
     def test_a_returned_answer_cannot_change_the_held_one(self):
+        held = {}
         self.drifting_selector()
-        select = self.port._job_selector('job-a', remote=True)
-        select({}, 'p', {}, OPTIONS)['description']['template_id'] = 'tampered'
-        self.assertEqual(select({}, 'p', {}, OPTIONS)['description']['template_id'], 'desc-a')
-        select({}, 'p', {}, OPTIONS)['description']['template_id'] = 'tampered'
-        self.assertEqual(select({}, 'p', {}, OPTIONS)['description']['template_id'], 'desc-a')
+        first = self.wording(held, remote=True)
+        answer = first({}, 'p', {}, OPTIONS)
+        commit(held, first.keep({'description': answer['description']}))
+        for _ in range(2):
+            self.wording(held, remote=True)({}, 'p', {}, OPTIONS)['description']['template_id'] = 'tampered'
+        self.assertEqual(self.wording(held, remote=True)({}, 'p', {}, OPTIONS), answer)
 
     def test_no_selector_stays_no_selector(self):
         self.port.selector = None
-        self.assertIsNone(self.port._job_selector('job-a', remote=True))
-
-
-class EligibleChoiceTests(unittest.TestCase):
-    def test_only_offered_ids_make_a_choice(self):
-        good = {'name': {'template_id': 'name-item'}, 'description': {'template_id': 'desc-a', 'phrase_ids': ['food-open-1']},
-                'story': {'template_id': 'story-made', 'phrase_ids': [], 'fact_ids': ['f-makes']}}
-        self.assertTrue(_eligible_choice(good, OPTIONS))
-        self.assertTrue(_eligible_choice({**good, 'story': None}, OPTIONS))
-        for bad in (None, {}, 'desc-a', {'price': {'template_id': 'name-item'}},
-                    {'description': 'The beans are roasted in copper pans.'},
-                    {'description': {'template_id': 'desc-c'}},
-                    {'name': {'template_id': 'desc-a'}},
-                    {'description': {'template_id': 'desc-a', 'phrase_ids': ['food-close-9']}},
-                    {'description': {'template_id': 'desc-a', 'phrase_ids': 'food-open-1'}},
-                    {'description': {'template_id': 'desc-a', 'phrase_ids': [{'x': 1}]}},
-                    {'story': {'template_id': 'story-made', 'phrase_ids': [], 'fact_ids': ['f-other']}},
-                    {'name': None}):
-            with self.subTest(bad=bad):
-                self.assertFalse(_eligible_choice(bad, OPTIONS))
-        self.assertFalse(_eligible_choice(good, None))
+        self.assertIsNone(self.wording({}, remote=True))
 
 
 class DeclinedStoryTests(unittest.TestCase):

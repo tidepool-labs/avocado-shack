@@ -210,7 +210,8 @@ class ProductionStages(Stages):
         reading = {} if local else self.identifier.read(self._photo(s) for s in shas).evidence or {}
         slot = work.request['slots'].get('intake', {})
         amount = slot.get('price') if slot.get('price_span') else None
-        named_item = next((item for text in reversed(texts) if (item := owner_item(text))), None)
+        named_item = (next((item for text in reversed(texts) if (item := owner_item(text))), None)
+                      or missing.owner_named_item(texts))
         decision = self.missing.decide(reading, price=missing.OwnerPrice(amount, slot.get('sold_by')),
                                        owner_item=named_item, owner_texts=texts, products=content.products, makers=content.makers,
                                        clover=self.clover(), ask_counts=work.ask_counts, answered=work.answered,

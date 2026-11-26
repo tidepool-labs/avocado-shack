@@ -88,6 +88,34 @@ def _owner_maker(texts, item):
     return name if name and live_policy._owner_said(name, lines) else None
 
 
+_HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|but|or|like|similar)\b|[?$0-9]", re.I)
+
+
+def owner_named_item(texts):
+    """The product name the owner typed right after naming its maker: "made by Maple Valley, Maple Valley dark and robust
+    maple syrup" -> "dark and robust maple syrup". Only a clause of the same message that starts with the exact made-by
+    phrase (a word boundary after it) and adds plain words counts; a hedge, question, price or digit gives None, as
+    does a clause that only repeats the maker. Like an "it is ..." line, the result is the owner's own field and so
+    outranks the photo read; the latest message wins."""
+    for text in reversed(list(texts)):
+        clauses = [clause.strip() for clause in re.split(r"[;\n,]", text)]
+        makers = [match[1].strip().rstrip(".!") for clause in clauses
+                  if (match := re.fullmatch(r"made by\s+(.+?)\s*", clause, re.I))]
+        if len(makers) != 1 or not makers[0]:
+            continue
+        lead = re.compile(re.escape(makers[0]) + r"\s+(.+)", re.I)
+        found = []
+        for clause in clauses:
+            match = lead.fullmatch(clause)
+            if not match:
+                continue
+            rest = match[1].strip().rstrip(".!").strip()
+            found.append(None if not rest or _HEDGE.search(rest) else label_reader.identity_text("name", rest))
+        if len(found) == 1 and found[0]:
+            return found[0]
+    return None
+
+
 def _maker(phrase, evidence, makers):
     if not phrase:
         return Maker("absent")

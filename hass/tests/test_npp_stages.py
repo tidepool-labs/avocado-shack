@@ -268,6 +268,33 @@ class StageTests(unittest.TestCase):
         self.run_research.assert_not_called()
         self.case.assert_unpublished()
 
+    def test_name_and_maker_conflict_asks_what_it_is_before_any_card(self):
+        # #634 R5 -> checkpoint 2 option A (t_3eb38fab): a made-by name the confident photo disagrees with, and a
+        # confident label that contradicts his maker. No card or draft; the identity question is the reply, in its
+        # conflict form, which tells him to reply "it is ..." (R6 -> checkpoint 3 option A, t_d61dc2c1). A plain reply
+        # is not read as the item: the same question, naming the form again, comes back (the second of two asks). His
+        # "it is ..." answer names it and the card carries the case-31b label explanation, so nothing is silent.
+        question = self.conv.npp.replies['questions']['ask_identity_conflict']
+        self.assertIn('Reply "it is …"', question)
+        self.reading.update(brand_on_label='Quarry Lane', confidence=dict(item=1, category=1, brand=1))
+        self.case.say('made by Miners, Miners Brussels sprouts, $8 each', photos=1)
+        self.case.work()
+        self.assertEqual(self.case.transport.texts, [question])
+        self.no_draft()
+        self.case.say('Brussels sprouts')
+        self.case.work()
+        self.assertEqual(self.case.transport.texts, [question, question])
+        self.no_draft()
+        self.case.say('it is Brussels sprouts')
+        self.case.work()
+        [(text, _, _)] = self.case.transport.cards.values()
+        self.assertIn('maker left off: label says Quarry Lane', text)
+        self.assertNotIn('name from photo', text)
+        self.assertEqual(self.saved[0]['ops'][-1]['args']['name'], 'Brussels Sprouts')
+        self.assertEqual(self.saved[0]['ops'][0]['args']['brand'], stages.claims.PLACEHOLDER)
+        self.run_research.assert_not_called()
+        self.case.assert_unpublished()
+
     def test_spoken_price_equal_to_cost_still_drafts(self):
         # Case 32b: the exact sale clause is sufficient, not the matching cost or count.
         self.start_render('wild plum jam, cost fourteen, selling fourteen each, got twelve jars')

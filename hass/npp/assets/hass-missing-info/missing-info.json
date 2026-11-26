@@ -9,8 +9,9 @@
       "needed_when": "is_product is false, or confidence.item is below min_confidence",
       "min_confidence": 0.6,
       "question": "ask_identity",
+      "question_when_conflict": "ask_identity_conflict",
       "never_from": [],
-      "note": "Owner words or a clearer photo settle it. A guessed name is never published."
+      "note": "Owner words or a clearer photo settle it. A guessed name is never published. When his made-by item name disagrees with a confident photo read and a confident label contradicts the maker he named, neither name is used and question_when_conflict asks him to say \"it is …\"."
     },
     {
       "id": "selling_price",

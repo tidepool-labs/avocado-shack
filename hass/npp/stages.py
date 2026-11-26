@@ -230,6 +230,7 @@ class ProductionStages(Stages):
         decision = self.missing.decide(reading, price=missing.OwnerPrice(amount, slot.get('sold_by')),
                                        owner_item=typed if form == 'it_is' else None,
                                        owner_named=typed if form == 'made_by' else None,
+                                       owner_after_maker=missing.owner_after_maker(texts) if form is None else None,
                                        owner_texts=texts, products=content.products, makers=content.makers,
                                        clover=self.clover(), ask_counts=work.ask_counts, answered=work.answered,
                                        duplicate_confirmed=work.answers.get('duplicate') is True,

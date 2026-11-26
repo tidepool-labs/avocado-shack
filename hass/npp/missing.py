@@ -176,6 +176,28 @@ def _named_in(text):
     return found[0][1] if len(found) == 1 and found[0][0] > made_at else None
 
 
+def _after_maker_in(text):
+    # "made by Taco Works, Montaña de Oro Sea Salt tortilla chips, $5 each": the clause right after the one made-by
+    # clause, when it does not repeat the maker. It may just as well be a town ("made by Miners, Paso Robles"), so it
+    # is only a candidate: decide() uses it solely when it agrees with a confident photo read, and otherwise ignores
+    # it without a note (the photo read stays, exactly as when nothing followed the maker).
+    clauses = [clause.strip() for clause in re.split(r"[;\n,]", text)]
+    makers = [at for at, clause in enumerate(clauses) if re.fullmatch(r"made by\s+(.+?)\s*", clause, re.I)]
+    if len(makers) != 1 or makers[0] + 1 >= len(clauses):
+        return None
+    rest = clauses[makers[0] + 1].rstrip(".!").strip()
+    if not rest or _HEDGE.search(rest) or _maker_sentence(rest):
+        return None
+    return label_reader.identity_text("name", rest)
+
+
+def owner_after_maker(texts):
+    """The item name the owner typed as the clause right after "made by M" without repeating M, the latest message
+    winning, or None. Weaker than owner_named_item: decide() (owner_after_maker) uses it only to name a confident photo
+    read it agrees with (agrees_with_photo); with no confident read or no agreement it is ignored silently."""
+    return next((name for text in reversed(list(texts)) if (name := _after_maker_in(text))), None)
+
+
 def owner_named_item(texts):
     """The product name the owner typed right after naming its maker: "made by Maple Valley, Maple Valley dark and robust
     maple syrup" -> "dark and robust maple syrup". Only a clause of the same message that starts with the exact made-by
@@ -316,7 +338,8 @@ class MissingInfo:
         self.rules = json.loads(files[RULES])
         self.essentials = {rule["id"]: rule for rule in self.rules["essentials"]}
 
-    def decide(self, reading=None, *, price=OwnerPrice(), owner_item=None, owner_named=None, owner_texts=(), products=(),
+    def decide(self, reading=None, *, price=OwnerPrice(), owner_item=None, owner_named=None, owner_after_maker=None,
+               owner_texts=(), products=(),
                makers=None, clover=None, ask_counts=None, answered=(), duplicate_confirmed=False, near_maker_confirmed=None):
         """Return a pure decision over S2 evidence and projected inputs.
 
@@ -329,6 +352,9 @@ class MissingInfo:
         "call it ...", the card-out name edit; before a card, an "it is ..." line outranks the photo). When the label also
         contradicts the maker he named, no name is used and the identity question is asked in its conflict form, which
         names the "it is ..." reply (checkpoints 2 and 3, option A).
+        `owner_after_maker` is the clause he typed right after "made by M" without repeating M (owner_after_maker): it
+        names the item only when nothing stronger was typed and it agrees with a confident photo read; otherwise it is
+        ignored without a note, since that clause may be a town as easily as a name.
         History inputs are durable question IDs supplied by the composer.
         `near_maker_confirmed` is the owner's answer to the near_maker question: True reuses the matched record,
         False keeps the owner-named maker as new, None (unanswered) asks once.
@@ -352,6 +378,9 @@ class MissingInfo:
             # names it and the card carries only the label explanation.
             photo_item, name_from_photo = None, False
         typed = owner_item or (None if name_from_photo or identity_conflict else owner_named)
+        if not typed and not owner_named and photo_item and owner_after_maker \
+                and agrees_with_photo(owner_after_maker, photo_item):
+            typed = owner_after_maker  # his fuller name for what the photo shows; never a note, never a conflict
         item = label_reader.identity_text("name", typed, title=True) or photo_item
         kind = evidence.get("kind") if photo_item else None
         defaults = self.rules["kind_default_category"]

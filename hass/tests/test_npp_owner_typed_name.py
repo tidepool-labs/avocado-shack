@@ -60,6 +60,25 @@ class OwnerNamedItemTests(unittest.TestCase):
         self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley peaches in syrup",)), "peaches in syrup")
         self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley dark and robust maple syrup",)),
                          "dark and robust maple syrup")
+        for rest, name in (("pickles", "pickles"), ("dates and figs", "dates and figs"), ("hummus dip", "hummus dip"),
+                           ("Swiss cheese", "Swiss cheese"), ("live culture yogurt", "live culture yogurt")):
+            with self.subTest(rest=rest):
+                self.assertEqual(owner_named_item((f"made by Maple Valley, Maple Valley {rest}",)), name)
+
+    def test_a_maker_statement_outside_the_verb_list_is_not_an_item_name(self):
+        # Contract: a clause that says what the maker does is not an item name. Bug: "produces honey" (a verb the filter
+        # did not list) was taken as the name and overrode a confident photo; the filter now fails closed on a verb-first clause.
+        for rest in ("produces honey", "bottles syrup", "supplies farms", "bakes bread", "make honey", "produce honey",
+                     "we make honey", "they sell syrup"):
+            with self.subTest(rest=rest):
+                self.assertIsNone(owner_named_item((f"made by Maple Valley, Maple Valley {rest}",)))
+
+    def test_the_item_clause_must_follow_the_made_by_clause(self):
+        # Contract: only the name typed AFTER its maker counts. Bug: the product clause was taken from before the made-by clause.
+        self.assertIsNone(owner_named_item(("Maple Valley honey, made by Maple Valley",)))
+        self.assertIsNone(owner_named_item(("Maple Valley honey; made by Maple Valley, $15 each",)))
+        self.assertEqual(owner_named_item(("made by Maple Valley, Maple Valley honey",)), "honey")
+        self.assertEqual(owner_named_item(("made by Maple Valley; Maple Valley honey",)), "honey")
 
 
 class OrderedOwnerItemTests(unittest.TestCase):

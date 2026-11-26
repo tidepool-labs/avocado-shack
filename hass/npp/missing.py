@@ -89,28 +89,39 @@ def _owner_maker(texts, item):
 
 
 _HEDGE = re.compile(r"\b(?:maybe|perhaps|probably|not|never|rather than|instead|but|or|like|similar)\b|[?$0-9]", re.I)
-# A clause about the maker, not a product name: it opens with a preposition, conjunction or relative word ("in Vermont",
-# "and Sons", "that sells honey") or carries a verb ("is based in Vermont", "makes syrup", "was founded in 1990").
-_NOT_ITEM = re.compile(r"^(?:in|from|at|near|on|of|by|for|to|with|and|since|who|that|which|where|when)\b"
+# A clause about the maker, not a product name. Fail closed (None keeps the photo and the identity question), so this is
+# deliberately broad: it opens with a preposition, conjunction, relative word or pronoun ("in Vermont", "and Sons",
+# "that sells honey", "we make honey"); it carries a verb from the list below ("is based in Vermont", "was founded");
+# or its first word is a third-person verb form, a plural-looking word ending in "s" that is followed by more item
+# words other than a connector ("produces honey", "bottles syrup", "supplies farms"). "peaches in syrup", "dates and
+# figs" and one-word names ("pickles") still count; a plural-noun-first name such as "Brussels sprouts" is lost.
+_NOT_ITEM = re.compile(r"^(?:in|from|at|near|on|of|by|for|to|with|and|since|who|that|which|where|when|"
+                       r"i|we|they|he|she|it|its|our|their|his|her|this|these|those|there|"
+                       r"make|produce|sell|grow|own|ship|bottle|supply|offer|run|operate)\b"
                        r"|\b(?:is|are|was|were|am|be|been|has|have|had|does|did|based|located|founded|established|"
-                       r"makes|sells|owns|lives|grows|ships|started|began)\b", re.I)
+                       r"makes|sells|owns|lives|grows|ships|produces|started|began)\b", re.I)
+_VERB_FIRST = re.compile(r"^(?!(?:\w*(?:ss|us|is)\b))\w{3,}s\s+(?!(?:and|in|with|of|n|&)\b)\S", re.I)
 
 
 def _named_in(text):
+    # The maker clause comes first and the item clause must follow it: "Maple Valley honey, made by Maple Valley" is
+    # the maker named after the product, not the name typed after its maker.
     clauses = [clause.strip() for clause in re.split(r"[;\n,]", text)]
-    makers = [match[1].strip().rstrip(".!") for clause in clauses
+    makers = [(at, match[1].strip().rstrip(".!")) for at, clause in enumerate(clauses)
               if (match := re.fullmatch(r"made by\s+(.+?)\s*", clause, re.I))]
-    if len(makers) != 1 or not makers[0]:
+    if len(makers) != 1 or not makers[0][1]:
         return None
-    lead = re.compile(re.escape(makers[0]) + r"\s+(.+)", re.I)
-    found = []
-    for clause in clauses:
+    made_at, maker = makers[0]
+    lead = re.compile(re.escape(maker) + r"\s+(.+)", re.I)
+    found = []  # (clause index, name) of every clause that leads with the maker, wherever it sits
+    for at, clause in enumerate(clauses):
         match = lead.fullmatch(clause)
         if not match:
             continue
         rest = match[1].strip().rstrip(".!").strip()
-        found.append(None if not rest or _HEDGE.search(rest) or _NOT_ITEM.search(rest) else label_reader.identity_text("name", rest))
-    return found[0] if len(found) == 1 else None
+        bad = not rest or _HEDGE.search(rest) or _NOT_ITEM.search(rest) or _VERB_FIRST.search(rest)
+        found.append((at, None if bad else label_reader.identity_text("name", rest)))
+    return found[0][1] if len(found) == 1 and found[0][0] > made_at else None
 
 
 def owner_named_item(texts):

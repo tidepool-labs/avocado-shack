@@ -93,9 +93,9 @@ class OwnDayTests(CatalogTestCase):
         later = wed + timedelta(days=8)  # the old word, 8 days on, is no longer current
         self.assertEqual(self.words(later)[self.a], wed_text)
         # a word set the day after that full check, then 7 and 8 days later
-        self.at(thu + timedelta(days=1))
-        self.r.run((SET, {"id": self.a, "available": "limited"}))
         own = thu + timedelta(days=1)
+        self.at(own)
+        self.r.run((SET, {"id": self.a, "available": "limited"}))
         for age, word, counted in ((0, "Limited", 1), (7, "Limited", 1), (8, f"Last confirmed {sitegen._day_text(own)}", 0)):
             day = own + timedelta(days=age)
             with self.subTest(age=age):

@@ -10,7 +10,7 @@ import json
 import unittest
 from datetime import date, datetime, timedelta, timezone
 
-from hass import morning_report
+from hass import editor, morning_report
 from hass.chat.shared import SHELF_ASK
 from hass.content_model import MAX_NOTICE, load_content
 from hass.tests.test_editor import git
@@ -163,9 +163,15 @@ class NoticeReadOnlyTests(NoticeTestCase):
         git(self.repo.wt, "commit", "-aqm", "shelf check")
         self.base = self.count()
         self.assertEqual(self.only(self.status()), [])
+        # Prepare and apply against the same synthetic shop day as the conversation.
+        self.editor.prepare = lambda ops: editor.prepare({"ops": ops}, state=self.editor.state,
+                                                         registry=self.editor.registry, now=self.now)
+        self.editor.apply = lambda change_id, draft_hash: editor.apply(change_id, draft_hash, state=self.editor.state,
+                                                                       registry=self.editor.registry, now=self.now)
         done = self.apply(f"notice {TEXT}")
         self.assertEqual((done["state"], self.commits()), ("verified", 1))
         first = date.fromisoformat(json.loads(self.store_path().read_text("utf-8"))["notice"]["from"])  # AV2152-08: saved as set
+        self.assertEqual(first, date(2026, 11, 2))  # editor used the injected Pacific shop day
         self.at(first.year, first.month, first.day, 20)  # that Pacific day, midday: the notice is active
         line = f"Home notice: {TEXT} - from {first.strftime('%A, %B')} {first.day} through Thursday, November 26"
         self.assertEqual(self.only(self.status()), [line])

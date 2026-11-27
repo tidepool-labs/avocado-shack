@@ -7,7 +7,7 @@ Run: python3 -m unittest hass.tests.test_claims_nested -v
 
 import unittest
 
-from hass import claims, conversation
+from hass import claims, conversation, editor
 from hass.tests.test_claims import MAKERS
 from hass.tests.test_conversation import ConversationTestCase, _ops
 
@@ -102,6 +102,11 @@ class NestedConversationTests(ConversationTestCase):
     def setUp(self):
         super().setUp()
         self.editor = conversation.Editor(self.repo.state)
+        # The dated notice is checked against the same synthetic shop day as the conversation, not the wall clock.
+        self.editor.prepare = lambda ops: editor.prepare({"ops": ops}, state=self.editor.state,
+                                                         registry=self.editor.registry, now=self.now)
+        self.editor.apply = lambda change_id, draft_hash: editor.apply(change_id, draft_hash, state=self.editor.state,
+                                                                       registry=self.editor.registry, now=self.now)
         self.conv = self.open()
         self.base = self.count()
 

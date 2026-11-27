@@ -154,6 +154,20 @@ class Questions(unittest.TestCase):
         content.products = [p for p in content.products if not p["id"].startswith("photo-product-")]
         self.assertEqual(refusal({**FULL, "maker": "same"}, content=content).reply, ia.NO_LAST_FARM)
 
+    def test_latest_product_without_a_visible_maker_does_not_reuse_an_older_farm(self):
+        slots = {**FULL, "maker": None}
+        for fields in ({"brand": ia.UNKNOWN_BRAND}, {"brand": "Etto", "producerKey": "Etto"}):
+            with self.subTest(fields=fields):
+                content = with_last("Fair Hills Farm")
+                content.makers["Etto"]["hidden"] = True
+                content.products.insert(0, {"id": "photo-product-176", "name": "Test plums", "category": "fruit",
+                                            "status": "active", **fields})
+                said = ctx("same farm as last time, Fair Hills Farm", content=content)
+                with self.assertRaises(ia.Refusal) as caught:
+                    ia.plan_add({**slots, "maker": "same farm as last time"}, said)
+                self.assertEqual((caught.exception.kind, caught.exception.reply), ("question", ia.NO_LAST_FARM))
+                self.assertEqual(ia.question("maker", slots, said), "Who makes this wildflower honey?")
+
 
 class Plan(unittest.TestCase):
     def test_new_maker_product_and_todays_shelf_check_on_its_own_line(self):

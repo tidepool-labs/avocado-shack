@@ -300,16 +300,22 @@ def container(ctx, name="") -> str | None:
 
 
 def last_maker(content):
-    """The key of the maker of the product added last (the highest product number whose maker is still shown), else None."""
+    """Return the visible maker key of the highest-numbered active photo product, or None."""
     if content is None:
         return None
-    best, best_n = None, -1
+    latest, latest_n = None, -1
     for p in content.products:
         m = re.fullmatch(r"photo-product-(\d+)", p.get("id", ""))
-        key = p.get("producerKey")
-        if m and p.get("status") == "active" and key in content.makers and not content.makers[key].get("hidden") and int(m.group(1)) > best_n:
-            best, best_n = key, int(m.group(1))
-    return best
+        if not m or p.get("status") != "active":
+            continue
+        n = int(m.group(1))
+        if n > latest_n:
+            latest, latest_n = p, n
+    if latest is None:
+        return None
+    key = latest.get("producerKey")
+    maker = content.makers.get(key)
+    return key if maker is not None and not maker.get("hidden") else None
 
 
 def _maker_names(content) -> dict:

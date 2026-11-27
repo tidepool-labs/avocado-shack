@@ -21,7 +21,7 @@ import time
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 UNITS = ("hass-receiver.service", "hass-worker.service", "hass-health.timer")
 PENDING_WORK_ZERO = {"outbox_unsent 0", "relay_unacked 0", "card_receipt_pending 0", "inbound_pending 0"}
-STAGING_BUDGET_SECONDS = 1800
+STAGING_BUDGET_SECONDS = 5400  # >= 1.5x the measured on-host acceptance + run_parallel time (docs)
 
 
 class Refused(Exception):

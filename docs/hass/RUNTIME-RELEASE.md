@@ -62,8 +62,15 @@ never point tests at live paths. Path overrides do not grant release authority.
    detached HEAD and exact host bytes, validate, start and self-test again. A dirty
    checkout, unexpected HEAD or externally edited host is never overwritten.
 
-Staging (`acceptance.py` + `run_parallel.py`) has its own shared 1800-second budget
-(`STAGING_BUDGET_SECONDS`), with no retries or timeout override flag. The normal
+Staging (`acceptance.py` + `run_parallel.py`) has its own shared 5400-second budget
+(`STAGING_BUDGET_SECONDS`), with no retries or timeout override flag. The value is
+at least 1.5 times a completed passing on-host rehearsal of both phases (service
+interpreter, Node 22, nothing else running): acceptance 971 s plus
+run_parallel 1944 s = 2915 s (2026-11-27; 1.5x = 4373 s). The old 1800-second cap refused that
+run before backup. Run the release from a terminal whose `node` is v22; a Node 18
+`PATH` (for example a bare `systemd-run`) fails the renderer tests and refuses.
+`run_parallel.py` gives every shard its own empty `TMPDIR`, as hosted CI does, so
+tests that inspect the temporary directory cannot see a sibling shard. The normal
 work budget remains 900 seconds excluding those staging tests; switching only
 starts with at least 180 seconds left of that budget. Recovery gets a separate 180 seconds plus
 one bounded emergency-stop attempt. A timeout kills the whole child process group

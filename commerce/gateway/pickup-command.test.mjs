@@ -1,5 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {pickupCommand} from './pickup-command.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import {pickupCommand,assertPickupWindows} from './pickup-command.mjs';
 test('pickup messages require an exact valid date and bounded close/reopen action',()=>{assert.deepEqual(pickupCommand('Close pickup on 2026-10-08'),{date:'2026-10-08',active:false});assert.deepEqual(pickupCommand('Reopen pickup 2028-02-29.'),{date:'2028-02-29',active:true});assert.throws(()=>pickupCommand('Close pickup tomorrow'),/exact/);assert.throws(()=>pickupCommand('Close pickup 2026-02-30'),/exact/);assert.equal(pickupCommand('Delete every order'),null);});
 
-import {assertPickupWindows} from './pickup-command.mjs';
 test('pickup approval binds the whole unexpired window set',()=>{const proposed=[{id:'a',version:1},{id:'b',version:2}];assert.doesNotThrow(()=>assertPickupWindows(proposed,[...proposed].reverse()));for(const current of [[],[proposed[0]],[...proposed,{id:'c',version:1}],[proposed[0],{id:'b',version:3}]])assert.throws(()=>assertPickupWindows(proposed,current),/changed or expired/)});

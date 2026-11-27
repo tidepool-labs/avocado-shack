@@ -19,18 +19,22 @@ class CatalogLimitTests(CatalogTestCase):
         result = self.assertRejected(repo, "refused", *ops)
         self.assertEqual(result.get("reason"), reason, result)
 
-    def test_product_edit_description_over_limit(self):
+    def test_product_add_refuses_each_over_limit_brand_field(self):
         repo = self.repo()
-        self.assertLong(repo, "description is longer than 600 characters",
-                        ("product.edit", {"id": PID, "description": "a" * 601}))
+        for field in ("brand", "displayBrand"):
+            with self.subTest(field=field):
+                self.assertLong(repo, f"{field} is longer than 60 characters",
+                                ("product.add", {**NEW, field: "a" * 61}))
 
     def test_product_add_refused_before_twin_check(self):
         repo = self.repo()
         self.assertLong(repo, "name is longer than 80 characters", ("product.add", {**NEW, "name": "a" * 81}))
         repo.run(("product.add", NEW))
+        added_id = repo.products()[-1]["id"]
         self.assertLong(repo, "description is longer than 600 characters",  # a twin that is also too long
                         ("product.add", {**NEW, "description": "a" * 601}))
-        self.assertRejected(repo, "refused", ("product.add", NEW))  # the plain twin keeps its own reply
+        twin = self.assertRejected(repo, "refused", ("product.add", NEW))
+        self.assertEqual(twin["reason"], f"{added_id} already has this name and brand; edit it instead")
 
     def test_boundaries_accepted_and_one_over_refused(self):
         repo = self.repo()
@@ -77,7 +81,12 @@ class CatalogLimitTests(CatalogTestCase):
 
     def test_image_alt_limit_is_unchanged(self):
         repo = self.repo()
-        result = self.assertRejected(repo, "invalid", ("product.edit", {"id": PID, "imageAlt": "a" * 201}))
+        alt = "a" * 200
+        repo.run(("product.add", {**NEW, "imageAlt": alt}))
+        added = repo.products()[-1]
+        self.assertEqual(added["imageAlt"], alt)
+        result = self.assertRejected(repo, "invalid", ("product.edit", {"id": added["id"], "imageAlt": alt + "a"}))
+        self.assertTrue(result["problems"], result)
         self.assertTrue(all("imageAlt" in p for p in result["problems"]), result)
 
 

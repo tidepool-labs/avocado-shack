@@ -411,6 +411,22 @@ class CheapAnswerTests(SkillCase):
 
 
 class SeveralItemsTests(SkillCase):
+    def test_combined_proposal_names_the_hike_difficulty_left_off(self):
+        text = ("change the honey description to Big Sur honey and add the Mill Creek hike "
+                "Saturday at 8am at Mill Creek trailhead")
+        self.script(text, {"calls": [
+            {"skill": "item.describe", "slots": {"product": "Big Sur Honey Company honey", "description": "Big Sur honey"}},
+            {"skill": "hike.add", "slots": MILL},  # the interpreter supplied "easy"; the owner did not
+        ]})
+        self.assertEqual(self.say(text), "proposed")
+        [reply] = self.replies()
+        self.assertIn("Left off (you didn't say it): difficulty.", reply.splitlines())
+        [draft] = self.drafts()
+        ops = json.loads(draft["ops_json"])
+        self.assertEqual([op["op"] for op in ops], ["product.edit", "hike.create"])
+        self.assertNotIn("difficulty", ops[1]["args"])
+        self.nothing_written()
+
     def test_complete_calls_make_one_draft_and_the_incomplete_one_is_asked_next(self):
         text = "add the Mill Creek hike Saturday 8am at Mill Creek trailhead and change the bread"
         self.script(text, {"calls": [

@@ -279,6 +279,86 @@ class TransactionTests(unittest.TestCase):
         self.assert_old()
         self.assertTrue(obj.active)
 
+    def add_target_with_new_files(self):
+        """A target that also adds files (one nested), so a partial checkout can leave untracked files."""
+        self.git("checkout", "-q", "--detach", self.new)
+        (self.rt / "added.txt").write_text("added\n")
+        (self.rt / "pkg" / "deep").mkdir(parents=True)
+        (self.rt / "pkg" / "deep" / "mod.py").write_text("x = 1\n")
+        self.git("add", "added.txt", "pkg/deep/mod.py")
+        self.git("commit", "-q", "-s", "-m", "newer")
+        target = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", target)
+        self.git("checkout", "-q", "--detach", self.old)
+        self.args.target = target
+        return target
+
+    def interrupted_checkout(self, foreign=None):
+        """Checkout child killed part-way: some target bytes written, HEAD still old, index lock left."""
+        target = self.add_target_with_new_files()
+        test = self
+
+        class Interrupted(FixtureRelease):
+            def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
+                if str(argv[0]) == "git" and argv[3:] == ["checkout", "--detach", target]:
+                    self.checkouts.append(target)
+                    (test.rt / "version.txt").write_text("new\n")
+                    (test.rt / "pkg" / "deep").mkdir(parents=True)
+                    (test.rt / "pkg" / "deep" / "mod.py").write_text("x =")
+                    (Path(test.git("rev-parse", "--absolute-git-dir")) / "index.lock").write_bytes(b"")
+                    if foreign:
+                        (test.rt / foreign).write_text("operator file\n")
+                    raise KeyboardInterrupt
+                return super().command(label, argv, cwd=cwd, timeout=timeout, codes=codes, strip=strip)
+
+        obj = Interrupted(self.args)
+        with contextlib.redirect_stdout(self.out):
+            code = obj.run()
+        return obj, code, target
+
+    def test_interrupted_checkout_recovers_old_head_and_files(self):
+        obj, code, target = self.interrupted_checkout()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.phase(obj), "rolled-back")
+        self.assertEqual(obj.checkouts, [target, self.old])
+        self.assert_old()
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=all"), "")
+        self.assertFalse((self.rt / "added.txt").exists())
+        self.assertFalse((self.rt / "pkg").exists())
+        self.assertFalse((Path(self.git("rev-parse", "--absolute-git-dir")) / "index.lock").exists())
+        self.assertTrue(obj.active)
+        assert obj.pending is not None
+        self.assertFalse(obj.pending.exists())
+
+    def test_interrupted_checkout_with_foreign_change_is_left_stopped(self):
+        obj, code, _ = self.interrupted_checkout(foreign="operator-notes.txt")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.phase(obj), "rollback-failed")
+        self.assertEqual((self.rt / "operator-notes.txt").read_text(), "operator file\n")
+        # Refused before any recovery checkout: partial bytes stay for the operator.
+        self.assertEqual((self.rt / "version.txt").read_text(), "new\n")
+        self.assertEqual(release.private_read(self.host), self.before)
+        self.assertFalse(obj.active)
+        assert obj.pending is not None
+        self.assertTrue(obj.pending.exists())
+
+    def test_completed_checkout_with_owned_edit_still_recovers(self):
+        target = self.add_target_with_new_files()
+        obj = FixtureRelease(self.args)
+        def hook(label):
+            if label == "start":
+                obj.pending_hook = None
+                (self.rt / "pkg" / "deep" / "mod.py").write_text("half-written\n")
+                raise release.Refused("start")
+        obj.pending_hook = hook
+        with contextlib.redirect_stdout(self.out):
+            self.assertEqual(obj.run(), 1)
+        self.assertEqual(obj.checkouts, [target, self.old])
+        self.assertEqual(self.phase(obj), "rolled-back")
+        self.assert_old()
+        self.assertFalse((self.rt / "pkg").exists())
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=all"), "")
+
     def test_post_switch_validation_failure_restores(self):
         for failure in ("selftest", "host-check"):
             with self.subTest(failure=failure):

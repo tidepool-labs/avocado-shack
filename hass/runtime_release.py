@@ -87,6 +87,7 @@ class Release:
         self.new_host = None
         self.stage = None
         self.pending = None
+        self.git_dir = None
 
     def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
         remaining = self.deadline - time.monotonic()
@@ -293,20 +294,65 @@ class Release:
         self.record("released")
         self.mutating = False
 
+    def recover_checkout(self):
+        """Return the runtime to expected_old after a checkout this release started.
+
+        The runtime was verified clean at expected_old, with services stopped and the
+        release lock held, immediately before the checkout. So the only changes this
+        transaction can own are paths that differ between expected_old and target.
+        Anything else (or a HEAD that is neither commit) is foreign: refuse and leave
+        it untouched for the operator. A checkout killed part-way may leave
+        modified/deleted tracked files, untracked files added by target and the
+        index lock; all three are undone here and the result is re-verified.
+        """
+        old, target = self.a.expected_old, self.a.target
+        head = self.git("rev-parse", "HEAD")
+        if head not in (old, target):
+            raise Refused("rollback-runtime-changed")
+        if self.git_dir is not None:
+            lock = self.git_dir / "index.lock"
+            if os.path.lexists(lock):
+                if lock.is_symlink() or not lock.is_file():
+                    raise Refused("rollback-index-lock")
+                lock.unlink()  # left by the killed checkout child (process group already reaped)
+        runtime = str(self.a.runtime)
+        owned = set(self.command("owned-paths", ["git", "-C", runtime, "diff", "--name-only", "-z", "--no-renames",
+                                                 old, target], strip=False).split("\0")) - {""}
+
+        def dirty():
+            out = self.command("rollback-status", ["git", "-C", runtime, "status", "--porcelain=v1", "-z",
+                                                   "--no-renames", "--untracked-files=all"], strip=False)
+            entries = [(item[:2], item[3:]) for item in out.split("\0") if item]
+            if any(len(code) != 2 or path not in owned for code, path in entries):
+                raise Refused("rollback-foreign-change")
+            return entries
+
+        dirty()  # refuse before any recovery write if a foreign path changed
+        self.git("checkout", "--detach", "--force", old)
+        root = self.a.runtime
+        for code, path in dirty():
+            # After the forced checkout only untracked target-only files can remain.
+            if code != "??":
+                raise Refused("rollback-runtime-changed")
+            file = root / path
+            if not file.parent.resolve().is_relative_to(root) or not (file.is_symlink() or file.is_file()):
+                raise Refused("rollback-foreign-change")
+            file.unlink()
+            parent = file.parent
+            while parent != root and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+
     def rollback(self):
         # Rollback has a separate 3-minute budget; never start a mixed runtime/pin.
         self.rollback_mode = True
         self.deadline = time.monotonic() + 180
         self.stop()
         if self.write_attempted:
-            head = self.git("rev-parse", "HEAD")
-            if head not in (self.a.expected_old, self.a.target):
-                raise Refused("rollback-runtime-changed")
-            self.clean_head(head)
             current = private_read(self.a.host)
             if current not in (self.old_host, self.new_host):
                 raise Refused("rollback-host-changed")
-            self.git("checkout", "--detach", self.a.expected_old)
+            self.recover_checkout()
             self.clean_head(self.a.expected_old)
             if private_read(self.a.host) != current:
                 raise Refused("rollback-host-changed")
@@ -345,6 +391,7 @@ class Release:
         # Lock is tied to this runtime's Git metadata, not a caller-selected
         # receipt folder: alternate --receipts cannot run two moves together.
         git_dir = Path(self.git("rev-parse", "--absolute-git-dir"))
+        self.git_dir = git_dir
         lock_path = git_dir / "runtime-release.lock"
         self.pending = git_dir / "runtime-release.pending"
         with open(lock_path, "a+b", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW, 0o600)) as lock:

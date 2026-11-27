@@ -66,10 +66,13 @@ def main():
     print(f"hass tests: {len(discovered)} suites in {len(groups)} parallel shards", flush=True)
     t0 = time.time()
     procs = []
-    with tempfile.TemporaryDirectory(prefix="hass-shards-") as tmp:
+    # Short names (as hosted ci_shards.py uses): a shard's TMPDIR is only
+    # "/hpXXXXXXXX/N" longer than the inherited one. Tests that bind Unix sockets
+    # under TMPDIR bind a relative name, so they do not depend on its length.
+    with tempfile.TemporaryDirectory(prefix="hp") as tmp:
         for i, group in enumerate(groups):
             log = os.path.join(tmp, f"shard{i}.log")
-            shard_tmp = os.path.join(tmp, f"tmp{i}")
+            shard_tmp = os.path.join(tmp, str(i))
             os.mkdir(shard_tmp, 0o700)
             with open(log, "wb") as f:
                 # Keep stdout/stderr in real order for mergegate's header adjacency.

@@ -660,6 +660,64 @@ class TransactionTests(unittest.TestCase):
                 self.assert_old()
                 killpg.assert_called_once_with(123456789, release.signal.SIGKILL)
 
+    def test_staging_timeout_removes_the_children_scratch(self):
+        # Real processes: run_parallel's shard writes a fixture into its TMPDIR, then the
+        # staging budget expires and the whole process group is SIGKILLed, so neither the
+        # test's nor run_parallel's own cleanup runs. The release process removes the tree.
+        files = {
+            "hass/__init__.py": "",
+            "hass/tests/__init__.py": "",
+            "hass/acceptance.py": "",
+            "hass/tests/run_parallel.py": Path(release.__file__).with_name("tests").joinpath(
+                "run_parallel.py").read_text(),
+            "hass/tests/test_slow.py": (
+                "import os, tempfile, time, unittest\n"
+                "class Slow(unittest.TestCase):\n"
+                "    def test_leaves_scratch(self):\n"
+                "        fd, path = tempfile.mkstemp(prefix='fixture-')\n"
+                "        with open(os.environ['HASS_FIXTURE_MARK'], 'w') as mark:\n"
+                "            mark.write(path)\n"
+                "        time.sleep(120)\n"
+            ),
+        }
+        for name, text in files.items():
+            (self.rt / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.rt / name).write_text(text)
+        self.git("checkout", "-q", "--detach", self.new)
+        self.git("add", "hass")
+        self.git("commit", "-q", "-s", "-m", "slow staging")
+        target = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", target)
+        self.git("checkout", "-q", "--detach", self.old)
+        self.args.target = target
+        outer = self.root / "outer-tmp"
+        outer.mkdir()
+        mark = self.root / "mark"
+        obj = FixtureRelease(self.args)
+        fixture_command = obj.command
+
+        def command(label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
+            if label in ("acceptance", "tests"):
+                obj.calls.append(label)
+                return release.Release.command(obj, label, argv, cwd=cwd, timeout=timeout, codes=codes, strip=strip)
+            return fixture_command(label, argv, cwd=cwd, timeout=timeout, codes=codes, strip=strip)
+
+        obj.command = command
+        with patch.dict(os.environ, {"TMPDIR": str(outer), "HASS_FIXTURE_MARK": str(mark)}), \
+                patch.object(tempfile, "tempdir", None), \
+                patch.object(release, "STAGING_BUDGET_SECONDS", 8), \
+                contextlib.redirect_stdout(self.out):
+            code = obj.run()
+        self.assertEqual(code, 1)
+        self.assertIn("RELEASE refused tests-timeout", self.out.getvalue())
+        self.assertNotIn("stop", obj.calls)
+        self.assert_old()
+        fixture = Path(mark.read_text())  # the shard really wrote its scratch before the kill
+        self.assertTrue(fixture.is_relative_to(outer), fixture)
+        self.assertFalse(fixture.exists())
+        self.assertEqual(os.listdir(outer), [])
+        self.assertIsNone(obj.stage_tmp)
+
     def test_staging_does_not_enlarge_switch_or_recovery_budget(self):
         obj, code, _, _, _ = self.timed_staging(130, 870, work_seconds=721)
         self.assertEqual(code, 1)

@@ -84,4 +84,6 @@ class ParallelDiscoveryTests(unittest.TestCase):
             self.assertEqual(len(dirs), 2, out)
             for path in dirs:
                 self.assertTrue(Path(path).is_relative_to(outer), path)
+                # Only "/hpXXXXXXXX/N" deeper than the inherited TMPDIR (AF_UNIX paths are short).
+                self.assertLessEqual(len(path) - len(str(outer)), len("/hpXXXXXXXX/9"), path)
             self.assertEqual(os.listdir(outer), [])  # shard dirs are removed with the run

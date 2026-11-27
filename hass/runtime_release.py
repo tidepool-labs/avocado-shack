@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -86,6 +87,7 @@ class Release:
         self.old_host = None
         self.new_host = None
         self.stage = None
+        self.stage_tmp = None  # TMPDIR owned by this process for the staging children
         self.pending = None
         self.git_dir = None
 
@@ -96,6 +98,8 @@ class Release:
         # Child output is never forwarded: host checks, inbox and tests may contain
         # private fields on error. Public receipts contain fixed labels only.
         env = dict(os.environ, HASS_PYTHON=str(self.a.python))
+        if self.stage_tmp is not None:
+            env["TMPDIR"] = str(self.stage_tmp)
         child = subprocess.Popen([str(x) for x in argv], cwd=cwd, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  start_new_session=True, env=env)
@@ -248,6 +252,11 @@ class Release:
         staging_start = time.monotonic()
         work_deadline = self.deadline
         self.deadline = staging_start + STAGING_BUDGET_SECONDS
+        # The staging children write their scratch (run_parallel's shard trees, test
+        # fixtures) under a TMPDIR this process owns. A timeout SIGKILLs their process
+        # group, so their own cleanup never runs; this process removes the whole tree.
+        # Short name: the shard trees nest below it (see run_parallel.py).
+        self.stage_tmp = Path(tempfile.mkdtemp(prefix="hs"))
         try:
             self.command("acceptance", [self.a.python, "-B", "hass/acceptance.py"],
                          cwd=self.stage, timeout=STAGING_BUDGET_SECONDS)
@@ -255,6 +264,8 @@ class Release:
                          cwd=self.stage, timeout=STAGING_BUDGET_SECONDS)
         finally:
             self.deadline = work_deadline + (time.monotonic() - staging_start)
+            stage_tmp, self.stage_tmp = self.stage_tmp, None
+            shutil.rmtree(stage_tmp, ignore_errors=True)
         self.command("backup", ["systemctl", "--user", "start", "hass-backup.service"], timeout=120)
         if self.command("backup-result", ["systemctl", "--user", "show", "-p", "Result", "--value", "hass-backup.service"]) != "success":
             raise Refused("backup-result")

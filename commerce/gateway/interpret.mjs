@@ -18,7 +18,8 @@ export function interpret(message, previous={}) {
  if(/(?:online\s+(?:pickup|stock|bin)|for\s+online)/i.test(t)) f.stock_pool='online';
  if(/\b(new|received|arrival)\b/i.test(t)) f.stock_action='receipt';
  else if(/\b(total|available|recount)\b/i.test(t))f.stock_action='recount';
- if(/(?:action)\s*[:=]\s*(receipt|recount|transfer|correction)/i.test(t))f.stock_action=t.match(/(?:action)\s*[:=]\s*(receipt|recount|transfer|correction)/i)[1].toLowerCase();
+ const action=t.match(/(?:action)\s*[:=]\s*(receipt|recount|transfer|correction)/i);
+ if(action)f.stock_action=action[1].toLowerCase();
  const detailLabels={description:'description', 'package size':'package_size',ingredients:'ingredients',allergens:'allergens',handling:'handling',category:'category'};
  for(const [label,key] of Object.entries(detailLabels)){const match=t.match(new RegExp('(?:^|[;\\n])\\s*'+label+'\\s*[:=]\\s*([^;\\n]*)','i'));if(match)f[key]=match[1].trim();}
  Object.assign(f,productDetails(f));if(f.category!==undefined&&(typeof f.category!=='string'||!f.category||f.category.length>80))throw Object.assign(new Error('Use a category name between 1 and 80 characters.'),{status:422});

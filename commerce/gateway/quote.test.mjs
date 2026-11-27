@@ -1,6 +1,5 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {sameQuoteItems} from './quote.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import {sameQuoteItems,samePurchaseItems} from './quote.mjs';
 test('persisted JSON key order does not invalidate unchanged quote',()=>{assert.equal(sameQuoteItems([{quantity:2,product_id:'p',components:[{quantity:1,inventory_id:'i'}]}],[{components:[{inventory_id:'i',quantity:1}],product_id:'p',quantity:2}]),true)});
 test('changed quantity or component invalidates quote',()=>{assert.equal(sameQuoteItems([{product_id:'p',quantity:2}],[{quantity:3,product_id:'p'}]),false);assert.equal(sameQuoteItems([{components:[{quantity:1}]}],[{components:[{quantity:2}]}]),false)});
 
-import {samePurchaseItems} from './quote.mjs';
 test('purchase replay binds identities and counts while retaining the saved price',()=>{const saved=[{product_id:'p',variant_id:'v',quantity:2,price_minor:200}];assert.equal(samePurchaseItems(saved,[{product_id:'p',quantity:2,price_minor:1}]),true);for(const input of [[{product_id:'p',quantity:3}],[{product_id:'p',variant_id:'other',quantity:2}],[{product_id:'other',quantity:2}]])assert.equal(samePurchaseItems(saved,input),false)});

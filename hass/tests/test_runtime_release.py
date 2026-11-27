@@ -628,17 +628,31 @@ class TransactionTests(unittest.TestCase):
         return obj, code, budgets, recovery, killpg
 
     def test_1000_second_staging_has_own_shared_budget(self):
+        budget = release.STAGING_BUDGET_SECONDS
         obj, code, budgets, _, killpg = self.timed_staging(130, 870)
         self.assertEqual(code, 0)
-        self.assertEqual(budgets, [1800, 1670])
+        self.assertEqual(budgets, [budget, budget - 130])
+        self.assertEqual(self.phase(obj), "released")
+        killpg.assert_not_called()
+
+    def test_measured_host_staging_fits_shared_budget(self):
+        # H74: on this host acceptance.py took 971 s and run_parallel.py 1944 s, 2915 s in total
+        # (corrected runner, service venv, Node 22, six shards). The old 1800 s cap refused before backup.
+        self.assertEqual(release.STAGING_BUDGET_SECONDS, 5400)
+        acceptance, tests = 971, 1944
+        self.assertGreaterEqual(release.STAGING_BUDGET_SECONDS, int(1.5 * (acceptance + tests)))
+        obj, code, budgets, _, killpg = self.timed_staging(acceptance, tests)
+        self.assertEqual(code, 0)
+        self.assertEqual(budgets, [release.STAGING_BUDGET_SECONDS, release.STAGING_BUDGET_SECONDS - acceptance])
         self.assertEqual(self.phase(obj), "released")
         killpg.assert_not_called()
 
     def test_staging_timeout_refuses_before_downtime(self):
-        for acceptance, tests in ((1801, 0), (130, 1671)):
+        budget = release.STAGING_BUDGET_SECONDS
+        for acceptance, tests in ((budget + 1, 0), (130, budget - 129), (1049, budget - 1048)):
             with self.subTest(acceptance=acceptance, tests=tests):
                 obj, code, budgets, _, killpg = self.timed_staging(acceptance, tests)
-                self.assertEqual(budgets[0], 1800)
+                self.assertEqual(budgets[0], budget)
                 self.assertEqual(code, 1)
                 self.assertNotIn("stop", obj.calls)
                 self.assertNotIn("backup", obj.calls)

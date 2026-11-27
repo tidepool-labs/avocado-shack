@@ -4,6 +4,9 @@
 Each worker discovers the same suite and runs its round-robin subset of top-level
 suites. Reports are buffered and printed whole so mergegate's FAIL/ERROR header
 parsing sees the original unittest output, never interleaved shard output.
+Each shard gets its own empty TMPDIR (like hosted ci_shards.py workers), so a
+test that lists the temp directory before and after never sees a sibling
+shard's scratch. This runner is also the attended release's staging step.
 
 Usage: python3 hass/tests/run_parallel.py [--jobs N] [--list]
 """
@@ -66,12 +69,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix="hass-shards-") as tmp:
         for i, group in enumerate(groups):
             log = os.path.join(tmp, f"shard{i}.log")
+            shard_tmp = os.path.join(tmp, f"tmp{i}")
+            os.mkdir(shard_tmp, 0o700)
             with open(log, "wb") as f:
                 # Keep stdout/stderr in real order for mergegate's header adjacency.
                 p = subprocess.Popen(
                     [sys.executable, "-u", str(Path(__file__).resolve()),
                      "--jobs", str(jobs), "--shard", str(i)],
                     cwd=str(ROOT), stdout=f, stderr=subprocess.STDOUT,
+                    env=dict(os.environ, TMPDIR=shard_tmp),
                 )
             procs.append((i, group, p, log))
         rc = 0

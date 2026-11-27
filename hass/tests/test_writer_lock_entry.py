@@ -5,7 +5,9 @@ regular file" (CLI unsafe-state, exit 2), and nothing is created or changed thro
 test_editor builds them. Run: python3 -m unittest hass.tests.test_writer_lock_entry -v
 """
 
-import contextlib, io, json, os, signal, socket, stat, time, unittest  # noqa: E401
+import contextlib, io, json, os, shutil, signal, socket, stat, tempfile, time, unittest  # noqa: E401
+from pathlib import Path
+from unittest.mock import patch
 
 from hass import editor, install, statebackup
 from hass.tests.test_editor import HOURS, NEW_HOURS, EditorTestCase, _req
@@ -83,10 +85,31 @@ class WriterLockEntryTests(EditorTestCase):
 
     @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "needs unix sockets")
     def test_socket_is_refused(self):
+        self.assert_socket_refused()
+
+    def assert_socket_refused(self):
         sock = socket.socket(socket.AF_UNIX)
         self.addCleanup(sock.close)
-        sock.bind(str(self.lock))
+        # Relative bind: an absolute TMPDIR-based path can exceed sun_path (~107 bytes).
+        with contextlib.chdir(self.lock.parent):
+            sock.bind(self.lock.name)
+        self.assertTrue(stat.S_ISSOCK(os.lstat(self.lock).st_mode))
         self.assertUnsafe(self.apply)
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "needs unix sockets")
+    def test_socket_is_refused_under_a_long_tmpdir(self):
+        # A deep TMPDIR (e.g. a nested shard/stage scratch) must not break or skip the socket case.
+        deep = Path(tempfile.mkdtemp(prefix="hass-long-tmpdir-"))
+        self.addCleanup(shutil.rmtree, deep, True)
+        deep = deep / ("d" * 60)
+        deep.mkdir()
+        with patch.object(tempfile, "tempdir", str(deep)):
+            self.r = self.repo()
+        self.lock, self.tmp = self.r.state / "writer.lock", self.r.state.parent
+        self.draft = self.r.prepare(_req((HOURS, {"hours": NEW_HOURS})))["draft"]
+        self.head = self.r.head()
+        self.assertGreater(len(os.fsencode(self.lock)), 107)  # too long for an absolute bind
+        self.assert_socket_refused()
 
     def test_folder_is_one_unsafe_state_cli_line_not_io_error(self):
         self.lock.mkdir(mode=0o700)

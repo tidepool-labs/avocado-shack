@@ -4,7 +4,7 @@ The refusal is exit 2 with stdout empty, decided by lstat before anything opens,
 the state dir is left exactly as it was. A missing database stays "unavailable" (exit 1). Reuses the test_retention
 temp fixture (never the real private state). Run: python3 -B -m unittest hass.tests.test_retention_paths -v
 """
-import hashlib, json, os, socket, stat, threading, unittest  # noqa: E401
+import contextlib, hashlib, json, os, socket, stat, threading, unittest  # noqa: E401
 from pathlib import Path
 
 from hass.tests import test_retention as base
@@ -77,10 +77,10 @@ class RetentionPathsTest(unittest.TestCase):
     def test_socket_inbox_is_refused(self):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(sock.close)
-        try:
-            sock.bind(str(self.replace("inbox.sqlite3")))
-        except OSError as exc:  # e.g. a temp path longer than sun_path allows
-            self.skipTest(f"cannot bind a Unix socket here: {exc}")
+        path = self.replace("inbox.sqlite3")
+        # Relative bind: an absolute TMPDIR-based path can exceed sun_path (~107 bytes).
+        with contextlib.chdir(path.parent):
+            sock.bind(path.name)
         self.assert_unsafe("inbox.sqlite3")
 
     def test_both_missing_stay_unavailable_exit_1(self):

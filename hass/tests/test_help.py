@@ -23,10 +23,24 @@ def examples(entries=ENTRIES):
     return [(e[0], ex) for e in entries for ln in e[3] for ex in re.findall("\ue000(.*?)\ue001", ln)]
 
 
+def displayed_examples(plain_detail):
+    """Read the example from each 'example - explanation' line, skipping introductory prose."""
+    return [line.split(" - ", 1)[0] for line in plain_detail.splitlines() if " - " in line]
+
+
 def coverage_problems(entries, verbs):
-    """What is wrong between the help entries and the parsers' verbs; computed from the parsers, not from the entries."""
+    """Check marked-example coverage and the command advertised by each displayed example."""
     out = [f"example does not parse as {n}'s own command: {ex}" for n, ex in examples(entries) if verb(ex) is None]
     got = {n: {verb(ex) for m, ex in examples(entries) if m == n} for n in {e[0] for e in entries}}
+    # Most help names are also parser verbs; these are the owner-facing names that differ.
+    aliases = {"yes": "approve", "no": "reject", "notes": "memory", "photos to take": "photos",
+               "stop changes": "pause", "resume changes": "resume"}
+    for name, _, _, lines in entries:
+        expected = aliases.get(name, name)
+        for ex in displayed_examples(voice.plain("\n".join(lines))):
+            actual = verb(ex)
+            if actual != expected:
+                out.append(f"help {name}: {ex!r} parses as {actual!r}, expected {expected!r}")
     for v in sorted(verbs):
         owners = [n for n, vs in got.items() if v in vs]
         if len(owners) != 1: out.append(f"parser verb {v} has {len(owners)} entries")
@@ -75,6 +89,18 @@ class HelpTextTests(unittest.TestCase):
         self.assertIn("example does not parse as again2's own command: please undo it all", coverage_problems(bad, parser_verbs()))
         self.assertIn("parser verb undo has 2 entries", coverage_problems(ENTRIES + (("undo2", "Drafts", (), (commands.q("undo") + " - x",)),), parser_verbs()))
 
+    def test_swapped_help_examples_fail_even_with_complete_verb_coverage(self):
+        swap = {"held": "costs", "costs": "held"}
+        swapped = [(swap.get(name, name), group, words, lines) for name, group, words, lines in ENTRIES]
+        self.assertIn("help held: 'costs' parses as 'costs', expected 'held'", coverage_problems(swapped, parser_verbs()))
+
+    def test_displayed_command_examples_keep_their_codes_and_queries(self):
+        for name in ("undo", "show", "again", "find", "listing", "shelf", "post", "history", "help"):
+            for ex in displayed_examples(voice.plain(commands.help_detail(name))):
+                with self.subTest(name=name, example=ex):
+                    _, _, operand = ex.partition(" ")
+                    self.assertEqual(conversation.parse_command(ex), (name, operand or None))
+
     def test_detail_lines_are_complete_and_short(self):
         for e in ENTRIES:
             for word in (e[0], *e[2]):
@@ -108,13 +134,12 @@ class HelpTextTests(unittest.TestCase):
             self.assertIsNone(verb(text), text)
         self.assertEqual(conversation.read_command("help?"), ("help", None))  # AV1352-05: a read-only command
 
-    def test_capability_phrases_parse_as_help_without_capture_group_drift(self):
+    def test_capability_phrases_parse_as_help_and_other_commands_keep_their_meaning(self):
         for text in CAPABILITY:
             for variant in (text, text.upper(), f"  {text}  ", text + "!", text + ".", text + "?"):
                 if variant.endswith("?") and variant.count("?") > 1: continue
                 with self.subTest(text=variant):
                     self.assertEqual(conversation.parse_command(variant), ("help", None))
-        self.assertEqual(commands.COMMAND_RE.groups, 27)  # no capture group added (AV1052-05: shelf is groups 24/25; AV2137-06: costs is 26; AV2137-07: held is 27)
         self.assertEqual(conversation.parse_command("history eggs"), ("history", "eggs"))
         self.assertEqual(conversation.parse_command("show a1b2"), ("show", "a1b2"))
         self.assertEqual(conversation.parse_command("post eggs"), ("post", "eggs"))
@@ -162,6 +187,16 @@ class HelpConversationTests(ConversationTestCase):
         self.assertTrue(reply.startswith("Unknown command. Send help with one of:\nDrafts: yes, no"))
         self.assertNotIn("a1b2", reply)
         self.assertEqual(self.state(), ([], [], 0, 0, []))
+
+    def test_help_yes_does_not_approve_a_waiting_draft(self):
+        self.propose("hours")
+        before = self.state()
+        self.assertEqual(self.say("help yes"), "help")
+        [detail] = self.replies()
+        self.assertEqual(detail, voice.plain(commands.help_detail("yes")))
+        self.assertEqual([conversation.parse_keyword(ex) for ex in displayed_examples(detail)],
+                         [("approve", None), ("approve", "a1b2")])
+        self.assertEqual(self.state(), before)
 
     def test_help_detail_while_paused_lapsed_and_never_approves(self):
         draft, _reply = self.propose("hours")

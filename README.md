@@ -1,8 +1,8 @@
 # Avocado Shack
 
-**The private home for Avocado Shack's website and Hass, Michael Wolfe's planned store assistant.**
+**Source and documentation for Avocado Shack's website and Hass, Michael Wolfe's planned store assistant.**
 
-The working website is a food catalog for in-person visits, with the North Coast Hiking Club and a newsletter signup (not open on the static build). Hass will let Michael manage it by sending texts, photos and voice notes. Hass's editing tools already work on test conversations (fixtures); the messaging connection to a phone is planned, not running, and nothing is deployed.
+The working website is a food catalog for in-person visits, with the North Coast Hiking Club and a newsletter signup (not open on the static build). Hass will let Michael manage it by sending texts, photos and voice notes. Hass's editing tools already work on test conversations (fixtures); the messaging connection to a phone is planned, not running. The website has a private preview but no public deployment.
 
 ## Start here
 
@@ -22,7 +22,7 @@ The working website is a food catalog for in-person visits, with the North Coast
 | Website files, event format and checks | [Storefront guide](storefront-mockup/README.md) |
 | Decisions and actual completed work | [Build ledger](BUILD_LEDGER.md) |
 
-Use [GitHub Issues](https://github.com/Grahammmm/avocado-shack/issues) for the work queue. Use this repository for reviewed source, content, optimized web images and project documentation. Start new work from the latest `main`, use a `codex/` branch, and keep changes small enough to review. GitHub stores the project; it is not the website host.
+Use [GitHub Issues](https://github.com/tidepool-labs/avocado-shack/issues) for the work queue. Use this repository for reviewed source, content, optimized web images and project documentation. Start new work from the latest `main`, use a `codex/` branch, and keep changes small enough to review. GitHub stores the project; it is not the website host.
 
 ## Current website
 
@@ -31,7 +31,7 @@ Use [GitHub Issues](https://github.com/Grahammmm/avocado-shack/issues) for the w
 - Separate `/hike` page with maps, sample invitations and a dummy RSVP.
 - Forms depend on where the site runs. On the static build (a plain web host), the signup and RSVP forms send and save nothing and say that signup is not open. The sample RSVP on the sample invitation sends and stores nothing anywhere. Only the separate local community server (`storefront-mockup/community-server.py`, loopback only) saves real-event signups and RSVPs, outside Git. No email delivery is connected; no real hikes are scheduled.
 - Hass can already, on fixture conversations, add, edit, hide and restore products and makers, draft a real hike, ask for explicit approval, show a checked preview and undo one change without losing later edits. See the [commands](docs/hass/COMMANDS.md), the [phone guide](docs/hass/PHONE_GUIDE.md) and the [known limits](docs/hass/LIMITS.md). Approving a change saves it in the writer checkout; it does not appear on a served website by itself. No phone, live channel, owner trial or signed-off handover exists yet.
-- `python3 hass/sitegen.py --publish DIR` builds an allowlisted static copy of the site into a new or empty folder outside the repository. It never serves or copies `storefront-mockup/` as a whole. Building it is not deploying it: publishing is a separate decision for G, and nothing is hosted.
+- `python3 hass/sitegen.py --publish DIR` builds an allowlisted static copy of the site into a new or empty folder outside the repository. It never serves or copies `storefront-mockup/` as a whole. Building it is not deploying it: publishing is a separate decision for G.
 - Catalog only: no prices, basket, online orders, weekly boxes or merchandise.
 
 The active code is in [`storefront-mockup/`](storefront-mockup/). The `commerce/` prototype and earlier proposals are historical. Shopify and Clover are possible later integrations, not the current backend.
@@ -40,7 +40,7 @@ The active code is in [`storefront-mockup/`](storefront-mockup/). The `commerce/
 
 | Location | Purpose |
 | --- | --- |
-| This private GitHub repository | Shared source, plans, issues and source history |
+| This public GitHub repository | Shared source, plans, issues and source history |
 | Agent Orange: `/home/user/repos/avocado-shack` | Working checkout and private website service |
 | Agent Orange: `/home/user/.local/share/avocado-shack` | Private runtime, community database and archived data; outside Git |
 | Mac: `/Users/owner/Documents/ChatGPT/Avo_Shack` | Preserved original project and `handoff-backups/2026-10-20` |

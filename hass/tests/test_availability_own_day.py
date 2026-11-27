@@ -29,7 +29,7 @@ class OwnDayTests(CatalogTestCase):
         self.a, self.b, self.c = (p["id"] for p in active[:3])
         self.at(MON)
 
-    def at(self, day):
+    def at(self, day: date) -> None:
         self.r.now = datetime(day.year, day.month, day.day, 20, tzinfo=timezone.utc)  # midday Pacific
 
     def product(self, pid):

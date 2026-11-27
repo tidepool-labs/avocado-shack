@@ -12,7 +12,7 @@ from hass import sitegen
 SHOP = Path(__file__).resolve().parents[2] / "storefront-mockup" / "shop.js"
 
 
-def _words(name):
+def _words(name: str) -> "list[str]":
     sets = re.findall(r"\b" + name + r"=new Set\(\[([^\]]*)\]\)", SHOP.read_text(encoding="utf-8"))
     assert len(sets) == 1, name
     return re.findall(r"'([^']*)'", sets[0])

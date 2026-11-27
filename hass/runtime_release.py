@@ -20,6 +20,7 @@ import time
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 UNITS = ("hass-receiver.service", "hass-worker.service", "hass-health.timer")
+PENDING_WORK_ZERO = {"outbox_unsent 0", "relay_unacked 0", "card_receipt_pending 0", "inbound_pending 0"}
 STAGING_BUDGET_SECONDS = 1800
 
 
@@ -79,14 +80,16 @@ class Release:
         self.start = time.monotonic()
         self.deadline = self.start + 900
         self.rollback_mode = False
-        self.mutating = False
+        self.mutating = False  # services may have been stopped
+        self.write_attempted = False  # checkout or host replacement may have started
         self.run_dir = None
         self.old_host = None
         self.new_host = None
         self.stage = None
         self.pending = None
+        self.git_dir = None
 
-    def command(self, label, argv, cwd=None, timeout=60, codes=(0,)):
+    def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise Refused("time-budget")
@@ -110,7 +113,7 @@ class Release:
             raise
         if child.returncode not in codes:
             raise Refused(label)
-        return stdout.strip()
+        return stdout.strip() if strip else stdout
 
     def git(self, *args):
         return self.command("git", ["git", "-C", self.a.runtime, *args])
@@ -136,6 +139,9 @@ class Release:
 
     def stop(self):
         self.command("stop", ["systemctl", "--user", "stop", *reversed(UNITS)])
+        self.require_stopped()
+
+    def require_stopped(self):
         self.units(False)
         # A timer's triggered service may still be running after the timer stops.
         state = self.command("health-idle", ["systemctl", "--user", "is-active", "hass-health.service"], codes=(3,))
@@ -162,6 +168,44 @@ class Release:
                                                   "status", "--state", self.a.state_root / "state"]))
         if not isinstance(report, dict) or type(report.get("pending")) is not int or report["pending"] != 0:
             raise Refused("inbox-not-empty")
+
+    def state_path(self):
+        assert self.old_host is not None
+        configured = json.loads(self.old_host).get("state")
+        if not isinstance(configured, str) or not Path(configured).is_absolute():
+            raise Refused("pending-work-state")
+        state = self.a.state_root / "state"
+        if state != Path(configured).resolve() or state != state.resolve():
+            raise Refused("pending-work-state")
+        return state
+
+    def pending_work_clear(self):
+        # Receiver and worker both use cfg['state'] and a relay beside their host config.
+        state = self.state_path()
+        stores = {"inbox": state / "inbox.sqlite3", "conversation": state / "conversation.sqlite3",
+                  "relay": self.a.host.parent / "relay.sqlite3"}
+        identities = set()
+        for path in stores.values():
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or path != path.resolve():
+                    raise Refused("pending-work-store")
+            except (OSError, RuntimeError):
+                raise Refused("pending-work-store") from None
+            identities.add((info.st_dev, info.st_ino))
+        if len(identities) != len(stores):
+            raise Refused("pending-work-store-alias")
+        # Use the reviewed stable tools checkout, including for an inverse move
+        # whose destination predates the complete checker. No partial/legacy fallback.
+        checker = Path(__file__).resolve().parents[1] / "scripts/hass/install_pending_work.py"
+        if not checker.is_file() or checker.resolve() != checker:
+            raise Refused("pending-work-checker")
+        argv = [self.a.python, "-B", checker, "--complete"]
+        for role, path in stores.items():
+            argv.extend([f"--{role}", path])
+        lines = self.command("pending-work", argv, strip=False).splitlines()
+        if len(lines) != 5 or lines[-1] != "PASS install_pending_work" or set(lines[:-1]) != PENDING_WORK_ZERO:
+            raise Refused("pending-work-incomplete")
 
     def record(self, phase):
         if self.run_dir:
@@ -194,6 +238,7 @@ class Release:
         if self.command("backup-timer", ["systemctl", "--user", "is-active", "hass-backup.timer"]) != "active":
             raise Refused("backup-timer")
         self.host_check()
+        self.state_path()  # Bind the baseline and the later stopped read to the same editor state.
         self.selftest()  # No allow-list for existing failures (AVB-03 relay-stuck is a real gate).
         self.inbox_empty()
         self.stage = self.run_dir / "stage"
@@ -225,38 +270,128 @@ class Release:
         self.mutating = True
         self.stop()
         self.clean_head(self.a.expected_old)
-        self.inbox_empty()
         if private_read(self.a.host) != self.old_host:
             raise Refused("host-changed")
+        self.pending_work_clear()
+        self.require_stopped()
+        self.clean_head(self.a.expected_old)
+        if private_read(self.a.host) != self.old_host:
+            raise Refused("host-changed")
+        # A pre-existing (e.g. ignored) file where target adds a tracked path would be
+        # overwritten by checkout and could not be told apart from our own bytes.
+        if any(os.path.lexists(self.a.runtime / path) for path in self.target_only_paths()):
+            raise Refused("runtime-target-path-exists")
+        # Recovery may remove an index lock left by our own killed checkout; it must not pre-date it.
+        if self.git_dir is not None and os.path.lexists(self.git_dir / "index.lock"):
+            raise Refused("runtime-index-locked")
+        self.write_attempted = True  # a failed or interrupted checkout may still change files
         self.git("checkout", "--detach", self.a.target)
         self.clean_head(self.a.target)
+        if private_read(self.a.host) != self.old_host:
+            raise Refused("host-changed")
+        assert self.new_host is not None
         private_write(self.a.host, self.new_host)
         self.host_check()
         self.start_units()
         self.selftest()
         self.units(True)
         self.clean_head(self.a.target)
+        if private_read(self.a.host) != self.new_host:
+            raise Refused("host-changed")
         self.record("released")
         self.mutating = False
+
+    def target_only_paths(self):
+        """Paths tracked by target but not by expected_old (Git tree listing, not status)."""
+        def tree(commit):
+            out = self.command("owned-tree", ["git", "-C", str(self.a.runtime), "ls-tree", "-r", "--name-only", "-z",
+                                              commit], strip=False)
+            return set(out.split("\0")) - {""}
+        return sorted(tree(self.a.target) - tree(self.a.expected_old))
+
+    def recover_checkout(self):
+        """Return the runtime to expected_old after a checkout this release started.
+
+        The runtime was verified clean at expected_old, with services stopped and the
+        release lock held, immediately before the checkout. So the only changes this
+        transaction can own are paths that differ between expected_old and target.
+        Anything else (or a HEAD that is neither commit) is foreign: refuse and leave
+        it untouched for the operator. A checkout killed part-way may leave
+        modified/deleted tracked files, untracked files added by target and the
+        index lock; all three are undone here and the result is re-verified.
+        """
+        old, target = self.a.expected_old, self.a.target
+        head = self.git("rev-parse", "HEAD")
+        if head not in (old, target):
+            raise Refused("rollback-runtime-changed")
+        if self.git_dir is not None:
+            lock = self.git_dir / "index.lock"
+            if os.path.lexists(lock):
+                if lock.is_symlink() or not lock.is_file():
+                    raise Refused("rollback-index-lock")
+                lock.unlink()  # left by the killed checkout child (process group already reaped)
+        runtime = str(self.a.runtime)
+        owned = set(self.command("owned-paths", ["git", "-C", runtime, "diff", "--name-only", "-z", "--no-renames",
+                                                 old, target], strip=False).split("\0")) - {""}
+
+        def dirty():
+            out = self.command("rollback-status", ["git", "-C", runtime, "status", "--porcelain=v1", "-z",
+                                                   "--no-renames", "--untracked-files=all"], strip=False)
+            entries = [(item[:2], item[3:]) for item in out.split("\0") if item]
+            if any(len(code) != 2 or path not in owned for code, path in entries):
+                raise Refused("rollback-foreign-change")
+            return entries
+
+        dirty()  # refuse before any recovery write if a foreign path changed
+        self.git("checkout", "--detach", "--force", old)
+        # Paths tracked by target but not by old survive a forced checkout as
+        # untracked files, and an old-tree ignore rule can hide them from status.
+        # So remove them by name from the two trees, not from what status shows.
+        # apply() refused before the checkout if any of them already existed.
+        added = self.target_only_paths()
+        root = self.a.runtime
+        for path in added:
+            file = root / path
+            if not os.path.lexists(file):
+                continue
+            if not file.parent.resolve().is_relative_to(root) or not (file.is_symlink() or file.is_file()):
+                raise Refused("rollback-foreign-change")
+            file.unlink()
+            parent = file.parent
+            while parent != root and parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+        if dirty() or any(os.path.lexists(root / path) for path in added):
+            raise Refused("rollback-runtime-changed")
 
     def rollback(self):
         # Rollback has a separate 3-minute budget; never start a mixed runtime/pin.
         self.rollback_mode = True
         self.deadline = time.monotonic() + 180
         self.stop()
-        head = self.git("rev-parse", "HEAD")
-        if head not in (self.a.expected_old, self.a.target) or self.git("status", "--porcelain", "--untracked-files=all"):
-            raise Refused("rollback-runtime-changed")
-        current = private_read(self.a.host)
-        if current not in (self.old_host, self.new_host):
+        if self.write_attempted:
+            current = private_read(self.a.host)
+            if current not in (self.old_host, self.new_host):
+                raise Refused("rollback-host-changed")
+            self.recover_checkout()
+            self.clean_head(self.a.expected_old)
+            if private_read(self.a.host) != current:
+                raise Refused("rollback-host-changed")
+            assert self.old_host is not None
+            private_write(self.a.host, self.old_host)
+        else:
+            # A pre-write refusal changed neither artifact. Do not rewrite them.
+            self.clean_head(self.a.expected_old)
+        if private_read(self.a.host) != self.old_host:
             raise Refused("rollback-host-changed")
-        self.git("checkout", "--detach", self.a.expected_old)
-        self.clean_head(self.a.expected_old)
-        private_write(self.a.host, self.old_host)
+        self.state_path()
         self.host_check()
         self.start_units()
         self.selftest()
         self.units(True)
+        self.clean_head(self.a.expected_old)
+        if private_read(self.a.host) != self.old_host:
+            raise Refused("rollback-host-changed")
         self.record("rolled-back")
         self.mutating = False
 
@@ -277,6 +412,7 @@ class Release:
         # Lock is tied to this runtime's Git metadata, not a caller-selected
         # receipt folder: alternate --receipts cannot run two moves together.
         git_dir = Path(self.git("rev-parse", "--absolute-git-dir"))
+        self.git_dir = git_dir
         lock_path = git_dir / "runtime-release.lock"
         self.pending = git_dir / "runtime-release.pending"
         with open(lock_path, "a+b", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW, 0o600)) as lock:

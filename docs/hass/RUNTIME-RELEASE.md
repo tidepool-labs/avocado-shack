@@ -73,7 +73,11 @@ run before backup. Run the release from a terminal whose `node` is v22; a Node 1
 tests that inspect the temporary directory cannot see a sibling shard. The release
 runs both staging phases with a `TMPDIR` it creates and owns; a timeout SIGKILLs
 the children (so their own cleanup never runs) and the release then removes that
-whole tree. Shard directories add only `/hpXXXXXXXX/N` to the path, and tests that
+whole tree, first restoring owner access to directories a killed test left locked
+(mode 000 or read-only; symlinks are removed, never followed). If the tree still
+cannot be removed, it prints the fixed line `RELEASE stage-scratch-left` (no paths)
+and refuses `stage-scratch-cleanup` before backup or downtime; the leftover is an
+`hs…` directory in that terminal's `TMPDIR`. Shard directories add only `/hpXXXXXXXX/N` to the path, and tests that
 bind Unix sockets under `TMPDIR` bind a relative name, so a deep `TMPDIR` (for
 example an agent scratch directory) cannot hit the ~107-byte socket path limit. The normal
 work budget remains 900 seconds excluding those staging tests; switching only

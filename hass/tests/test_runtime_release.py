@@ -293,18 +293,21 @@ class TransactionTests(unittest.TestCase):
         self.args.target = target
         return target
 
-    def interrupted_checkout(self, foreign=None):
+    def interrupted_checkout(self, foreign=None, target=None, partial=None):
         """Checkout child killed part-way: some target bytes written, HEAD still old, index lock left."""
-        target = self.add_target_with_new_files()
+        target = target or self.add_target_with_new_files()
         test = self
+
+        def default_partial():
+            (test.rt / "version.txt").write_text("new\n")
+            (test.rt / "pkg" / "deep").mkdir(parents=True)
+            (test.rt / "pkg" / "deep" / "mod.py").write_text("x =")
 
         class Interrupted(FixtureRelease):
             def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
                 if str(argv[0]) == "git" and argv[3:] == ["checkout", "--detach", target]:
                     self.checkouts.append(target)
-                    (test.rt / "version.txt").write_text("new\n")
-                    (test.rt / "pkg" / "deep").mkdir(parents=True)
-                    (test.rt / "pkg" / "deep" / "mod.py").write_text("x =")
+                    (partial or default_partial)()
                     (Path(test.git("rev-parse", "--absolute-git-dir")) / "index.lock").write_bytes(b"")
                     if foreign:
                         (test.rt / foreign).write_text("operator file\n")
@@ -315,6 +318,66 @@ class TransactionTests(unittest.TestCase):
         with contextlib.redirect_stdout(self.out):
             code = obj.run()
         return obj, code, target
+
+    def ignored_target_file(self):
+        """Old ignores build/; target force-tracks build/gen.txt. Re-pins old/host to the ignoring commit."""
+        (self.rt / ".gitignore").write_text("build/\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-q", "-s", "-m", "ignore build")
+        self.old = self.git("rev-parse", "HEAD")
+        (self.rt / "build").mkdir()
+        (self.rt / "build" / "gen.txt").write_text("generated\n")
+        self.git("add", "-f", "build/gen.txt")
+        self.git("commit", "-q", "-s", "-m", "track generated file")
+        target = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", target)
+        self.git("checkout", "-q", "--detach", self.old)
+        self.assertFalse((self.rt / "build").exists())
+        self.before = self.before.replace(json.loads(self.before)["runtimeCommit"].encode(), self.old.encode())
+        release.private_write(self.host, self.before)
+        self.args.expected_old, self.args.target = self.old, target
+        return target
+
+    def test_interrupted_checkout_removes_ignored_target_only_file(self):
+        target = self.ignored_target_file()
+        def partial():
+            (self.rt / "build").mkdir()
+            (self.rt / "build" / "gen.txt").write_text("gene")
+        obj, code, _ = self.interrupted_checkout(target=target, partial=partial)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.phase(obj), "rolled-back")
+        self.assertEqual(obj.checkouts, [target, self.old])
+        self.assert_old()
+        self.assertFalse((self.rt / "build").exists())
+        self.assertEqual(self.git("status", "--porcelain", "--ignored", "--untracked-files=all"), "")
+        self.assertTrue(obj.active)
+
+    def test_preexisting_ignored_file_at_target_path_refuses_before_checkout(self):
+        self.ignored_target_file()
+        (self.rt / "build").mkdir()
+        (self.rt / "build" / "gen.txt").write_text("operator build output\n")
+        obj, code = self.run_release()
+        self.assertEqual(code, 1)
+        self.assertEqual(obj.checkouts, [])
+        self.assertEqual(self.phase(obj), "rolled-back")
+        self.assertEqual((self.rt / "build" / "gen.txt").read_text(), "operator build output\n")
+        self.assert_old()
+        self.assertTrue(obj.active)
+
+    def test_preexisting_index_lock_refuses_before_checkout_and_is_kept(self):
+        lock = Path(self.git("rev-parse", "--absolute-git-dir")) / "index.lock"
+        obj = FixtureRelease(self.args)
+        def hook(label):
+            if label == "pending-work":
+                obj.pending_hook = None
+                lock.write_bytes(b"")  # another Git process appears while services are stopped
+        obj.pending_hook = hook
+        with contextlib.redirect_stdout(self.out):
+            self.assertEqual(obj.run(), 1)
+        self.assertEqual(obj.checkouts, [])
+        self.assertTrue(lock.exists())
+        self.assertEqual(self.phase(obj), "rolled-back")
+        self.assert_old()
 
     def test_interrupted_checkout_recovers_old_head_and_files(self):
         obj, code, target = self.interrupted_checkout()

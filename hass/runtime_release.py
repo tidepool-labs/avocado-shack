@@ -277,6 +277,13 @@ class Release:
         self.clean_head(self.a.expected_old)
         if private_read(self.a.host) != self.old_host:
             raise Refused("host-changed")
+        # A pre-existing (e.g. ignored) file where target adds a tracked path would be
+        # overwritten by checkout and could not be told apart from our own bytes.
+        if any(os.path.lexists(self.a.runtime / path) for path in self.target_only_paths()):
+            raise Refused("runtime-target-path-exists")
+        # Recovery may remove an index lock left by our own killed checkout; it must not pre-date it.
+        if self.git_dir is not None and os.path.lexists(self.git_dir / "index.lock"):
+            raise Refused("runtime-index-locked")
         self.write_attempted = True  # a failed or interrupted checkout may still change files
         self.git("checkout", "--detach", self.a.target)
         self.clean_head(self.a.target)
@@ -293,6 +300,14 @@ class Release:
             raise Refused("host-changed")
         self.record("released")
         self.mutating = False
+
+    def target_only_paths(self):
+        """Paths tracked by target but not by expected_old (Git tree listing, not status)."""
+        def tree(commit):
+            out = self.command("owned-tree", ["git", "-C", str(self.a.runtime), "ls-tree", "-r", "--name-only", "-z",
+                                              commit], strip=False)
+            return set(out.split("\0")) - {""}
+        return sorted(tree(self.a.target) - tree(self.a.expected_old))
 
     def recover_checkout(self):
         """Return the runtime to expected_old after a checkout this release started.
@@ -329,19 +344,25 @@ class Release:
 
         dirty()  # refuse before any recovery write if a foreign path changed
         self.git("checkout", "--detach", "--force", old)
+        # Paths tracked by target but not by old survive a forced checkout as
+        # untracked files, and an old-tree ignore rule can hide them from status.
+        # So remove them by name from the two trees, not from what status shows.
+        # apply() refused before the checkout if any of them already existed.
+        added = self.target_only_paths()
         root = self.a.runtime
-        for code, path in dirty():
-            # After the forced checkout only untracked target-only files can remain.
-            if code != "??":
-                raise Refused("rollback-runtime-changed")
+        for path in added:
             file = root / path
+            if not os.path.lexists(file):
+                continue
             if not file.parent.resolve().is_relative_to(root) or not (file.is_symlink() or file.is_file()):
                 raise Refused("rollback-foreign-change")
             file.unlink()
             parent = file.parent
-            while parent != root and not any(parent.iterdir()):
+            while parent != root and parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
                 parent.rmdir()
                 parent = parent.parent
+        if dirty() or any(os.path.lexists(root / path) for path in added):
+            raise Refused("rollback-runtime-changed")
 
     def rollback(self):
         # Rollback has a separate 3-minute budget; never start a mixed runtime/pin.

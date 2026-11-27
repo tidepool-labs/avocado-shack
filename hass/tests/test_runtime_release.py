@@ -28,8 +28,12 @@ class FixtureRelease(release.Release):
         self.restarts = "0"
         self.health_state = "inactive"
         self.pending_hook: Callable[[str], None] | None = None
+        self.pending_output = ("outbox_unsent 0\nrelay_unacked 0\ncard_receipt_pending 0\n"
+                               "inbound_pending 0\nPASS install_pending_work")
+        self.pending_commands = []
+        self.checkouts = []
 
-    def command(self, label, argv, cwd=None, timeout=60, codes=(0,)):
+    def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
         self.calls.append(label)
         if self.pending_hook:
             self.pending_hook(label)
@@ -39,7 +43,9 @@ class FixtureRelease(release.Release):
                 self.active = False  # partial stop still requires rollback
             raise release.Refused(label)
         if str(argv[0]) == "git":
-            return super().command(label, argv, cwd=cwd, timeout=timeout, codes=codes)
+            if argv[3:5] == ["checkout", "--detach"]:
+                self.checkouts.append(argv[-1])
+            return super().command(label, argv, cwd=cwd, timeout=timeout, codes=codes, strip=strip)
         if label == "stop":
             self.active = False
         elif label == "start":
@@ -58,6 +64,11 @@ class FixtureRelease(release.Release):
             return "HASS-SELFTEST fixture pass=10 warn=0 fail=0 skip=1"
         elif label == "inbox":
             return '{"pending": 0}'
+        elif label == "pending-work":
+            if self.active or self.health_state != "inactive":
+                raise AssertionError("pending work read before quiescence")
+            self.pending_commands.append(argv)
+            return self.pending_output.strip() if strip else self.pending_output
         elif label == "host-check":
             if json.loads(release.private_read(self.a.host))["runtimeCommit"] != self.git("rev-parse", "HEAD"):
                 raise release.Refused("host-check")
@@ -84,8 +95,12 @@ class TransactionTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", self.new)
         self.git("checkout", "-q", "--detach", self.old)
         self.host = self.root / "host.json"
+        self.state = self.root / "state" / "state"
+        self.state.mkdir(parents=True)
+        for path in (self.state / "inbox.sqlite3", self.state / "conversation.sqlite3", self.root / "relay.sqlite3"):
+            release.private_write(path, b"fixture store")
         self.before = (json.dumps({"runtimeCommit": self.old, "approvals": "hold", "secretFile": "NEVER-OPEN",
-                                   "interpreter": {"model": "fixture"}}) + "\n").encode()
+                                   "state": str(self.state), "interpreter": {"model": "fixture"}}) + "\n").encode()
         release.private_write(self.host, self.before)
         self.args = release.arguments(["--runtime", str(self.rt), "--host", str(self.host),
             "--state-root", str(self.root / "state"), "--receipts", str(self.root / "receipts"),
@@ -125,6 +140,15 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(obj.stage.exists())
         self.assertLess(obj.calls.index("tests"), obj.calls.index("stop"))
         self.assertLess(obj.calls.index("backup-result"), obj.calls.index("stop"))
+        # Clean release must use the actual host/store roles, not a copied relay
+        # beside the editor state. Fixture command rejects any active reader.
+        command, = obj.pending_commands
+        self.assertEqual(Path(command[2]).name, "install_pending_work.py")
+        self.assertEqual(command[3:], ["--complete", "--inbox", self.state / "inbox.sqlite3",
+                         "--conversation", self.state / "conversation.sqlite3",
+                         "--relay", self.host.parent / "relay.sqlite3"])
+        self.assertLess(obj.calls.index("health-idle"), obj.calls.index("pending-work"))
+        self.assertEqual(obj.checkouts, [self.new])
         self.assertEqual((obj.run_dir / "host.before").stat().st_mode & 0o777, 0o600)
         self.assertNotIn("NEVER-OPEN", self.out.getvalue())
         self.assertNotIn("NEVER-OPEN", (obj.run_dir / "receipt.json").read_text())
@@ -165,11 +189,93 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.phase(obj), "rolled-back")
         self.assert_old()
         self.assertTrue(obj.active)
+        self.assertEqual(obj.checkouts, [])
+
+    def test_late_pending_refuses_without_writes_and_recovers_original_services(self):
+        # The active inbox baseline is empty. A late relay/outbox refusal must
+        # not switch, or rewrite already-correct host bytes as "rollback".
+        for scenario in ("checker-exit", "partial", "decorated-pass", "missing-counter", "repeated-counter", "pending-receipt"):
+            with self.subTest(scenario=scenario):
+                obj = FixtureRelease(self.args, ["pending-work"] if scenario == "checker-exit" else [])
+                if scenario == "partial":
+                    obj.pending_output = obj.pending_output.replace("PASS", "PARTIAL PASS")
+                elif scenario == "decorated-pass":
+                    obj.pending_output += " \n"
+                elif scenario == "missing-counter":
+                    obj.pending_output = obj.pending_output.replace("relay_unacked 0\n", "")
+                elif scenario == "repeated-counter":
+                    obj.pending_output = obj.pending_output.replace("relay_unacked 0", "outbox_unsent 0")
+                elif scenario == "pending-receipt":
+                    obj.pending_output = obj.pending_output.replace("card_receipt_pending 0", "card_receipt_pending 1")
+                write = release.private_write
+                def deny_host_replacement(path, data):
+                    if path == self.host:
+                        self.fail("a refusal attempted to replace the host file")
+                    write(path, data)
+                identity = self.host.stat().st_ino
+                with patch.object(release, "private_write", side_effect=deny_host_replacement) as writes, \
+                        contextlib.redirect_stdout(self.out):
+                    self.assertEqual(obj.run(), 1)
+                self.assertNotIn(self.host, [call.args[0] for call in writes.call_args_list])
+                self.assertEqual(obj.checkouts, [])
+                self.assertEqual(self.phase(obj), "rolled-back")
+                self.assertEqual(self.host.stat().st_ino, identity)
+                self.assert_old()
+                self.assertTrue(obj.active)
+                assert obj.pending is not None
+                self.assertFalse(obj.pending.exists())
+
+    def test_inbox_baseline_cannot_use_a_different_state_root(self):
+        self.args.state_root = self.root / "stale"
+        obj, code = self.run_release()
+        self.assertEqual(code, 1)
+        self.assertNotIn("inbox", obj.calls)
+        self.assertNotIn("stop", obj.calls)
+        self.assert_old()
+
+    def test_wrong_or_aliased_store_refuses_before_checker_open(self):
+        # A clean stale relay with the same basename is not the effective one.
+        relay = self.host.parent / "relay.sqlite3"
+        relay.rename(self.state / relay.name)
+        obj, code = self.run_release()
+        self.assertEqual((code, obj.pending_commands, obj.checkouts), (1, [], []))
+        self.assertTrue(obj.active)
+        os.link(self.state / "inbox.sqlite3", relay)
+        obj, code = self.run_release()
+        self.assertEqual((code, obj.pending_commands, obj.checkouts), (1, [], []))
+        self.assert_old()
+        self.assertTrue(obj.active)
+
+    def test_prewrite_recovery_that_cannot_restart_retains_marker(self):
+        obj, code = self.run_release(["pending-work", "start"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.phase(obj), "rollback-failed")
+        self.assertEqual(obj.checkouts, [])
+        self.assertFalse(obj.active)
+        assert obj.pending is not None
+        self.assertTrue(obj.pending.exists())
+        self.assert_old()
+
+    def test_drift_during_stopped_checker_is_not_overwritten_or_restarted(self):
+        obj = FixtureRelease(self.args)
+        drift = self.before.replace(b'"hold"', b'"private"')
+        def hook(label):
+            if label == "pending-work":
+                release.private_write(self.host, drift)
+        obj.pending_hook = hook
+        with contextlib.redirect_stdout(self.out):
+            self.assertEqual(obj.run(), 2)
+        self.assertEqual(obj.checkouts, [])
+        self.assertEqual(release.private_read(self.host), drift)
+        self.assertNotIn("start", obj.calls)
+        self.assertFalse(obj.active)
+        self.assertEqual(self.phase(obj), "rollback-failed")
 
     def test_start_failure_restores_bytes_head_and_services(self):
         obj, code = self.run_release(["start"])
         self.assertEqual(code, 1)
         self.assertEqual(self.phase(obj), "rolled-back")
+        self.assertEqual(obj.checkouts, [self.new, self.old])
         self.assert_old()
         self.assertTrue(obj.active)
 
@@ -285,8 +391,7 @@ class TransactionTests(unittest.TestCase):
                 command = obj.command
                 def with_report(label, argv, **kwargs):
                     return report if label == "inbox" else command(label, argv, **kwargs)
-                obj.command = with_report
-                with contextlib.redirect_stdout(self.out):
+                with patch.object(obj, "command", side_effect=with_report), contextlib.redirect_stdout(self.out):
                     self.assertEqual(obj.run(), 1)
                 self.assertNotIn("stop", obj.calls)
                 self.assert_old()
@@ -299,8 +404,7 @@ class TransactionTests(unittest.TestCase):
                 command = obj.command
                 def with_output(label, argv, **kwargs):
                     return output if label == "selftest" else command(label, argv, **kwargs)
-                obj.command = with_output
-                with contextlib.redirect_stdout(self.out):
+                with patch.object(obj, "command", side_effect=with_output), contextlib.redirect_stdout(self.out):
                     self.assertEqual(obj.run(), 1)
                 self.assertNotIn("stop", obj.calls)
                 self.assert_old()
@@ -360,17 +464,17 @@ class TransactionTests(unittest.TestCase):
                 return StageChild(acceptance if argv[-1] == "hass/acceptance.py" else tests)
             return real_popen(argv, **kwargs)
 
-        def command(label, argv, cwd=None, timeout=60, codes=(0,)):
+        def command(label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
             if label in ("acceptance", "tests"):
                 obj.calls.append(label)
-                return release.Release.command(obj, label, argv, cwd=cwd, timeout=timeout, codes=codes)
+                return release.Release.command(obj, label, argv, cwd=cwd, timeout=timeout, codes=codes, strip=strip)
             if label == "backup-result":
                 clock[0] += work_seconds
             if label == "start" and fail_start and not obj.rollback_mode:
                 raise release.Refused("start")
             if label == "stop" and obj.rollback_mode:
                 recovery.append(obj.deadline - clock[0])
-            return fixture_command(label, argv, cwd=cwd, timeout=timeout, codes=codes)
+            return fixture_command(label, argv, cwd=cwd, timeout=timeout, codes=codes, strip=strip)
 
         obj.command = command
         with patch("hass.runtime_release.time.monotonic", side_effect=lambda: clock[0]), \

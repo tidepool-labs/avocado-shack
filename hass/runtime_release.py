@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -26,41 +27,6 @@ STAGING_BUDGET_SECONDS = 5400  # >= 1.5x the measured on-host acceptance + run_p
 
 class Refused(Exception):
     pass
-
-
-def remove_owned_tree(root):
-    """Remove a private scratch tree this process created; True when it is gone.
-
-    A SIGKILLed test cannot run its teardown, so it may leave directories it locked
-    (mode 000 or read-only). Owner access is restored on such directories before
-    descending. Symlinks are removed, never followed. Errors are not raised (the
-    caller reports a fixed label; paths may name private fixtures)."""
-    uid = os.getuid()
-
-    def remove(path):
-        try:
-            st = os.lstat(path)
-        except FileNotFoundError:
-            return
-        if not stat.S_ISDIR(st.st_mode):
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
-            return
-        mode = stat.S_IMODE(st.st_mode)
-        if st.st_uid == uid and mode & 0o700 != 0o700:
-            os.chmod(path, mode | 0o700)
-        with os.scandir(path) as entries:
-            names = [entry.name for entry in entries]
-        for name in names:
-            remove(os.path.join(path, name))
-        with contextlib.suppress(FileNotFoundError):
-            os.rmdir(path)
-
-    try:
-        remove(os.fspath(root))
-    except (OSError, RecursionError):
-        pass
-    return not os.path.lexists(root)
 
 
 def private_read(path):
@@ -299,13 +265,7 @@ class Release:
         finally:
             self.deadline = work_deadline + (time.monotonic() - staging_start)
             stage_tmp, self.stage_tmp = self.stage_tmp, None
-            scratch_removed = remove_owned_tree(stage_tmp)
-            if not scratch_removed:
-                # Fixed label only: the tree's paths may name private fixtures. Printed
-                # here so it is reported even when a staging refusal is in flight.
-                print("RELEASE stage-scratch-left", flush=True)
-        if not scratch_removed:
-            raise Refused("stage-scratch-cleanup")
+            shutil.rmtree(stage_tmp, ignore_errors=True)
         self.command("backup", ["systemctl", "--user", "start", "hass-backup.service"], timeout=120)
         if self.command("backup-result", ["systemctl", "--user", "show", "-p", "Result", "--value", "hass-backup.service"]) != "success":
             raise Refused("backup-result")

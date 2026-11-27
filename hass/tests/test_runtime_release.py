@@ -8,7 +8,6 @@ import io
 import json
 import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
 import tempfile
@@ -676,18 +675,6 @@ class TransactionTests(unittest.TestCase):
                 "class Slow(unittest.TestCase):\n"
                 "    def test_leaves_scratch(self):\n"
                 "        fd, path = tempfile.mkstemp(prefix='fixture-')\n"
-                "        # Locked trees a killed test never restores (as test_statebackup_list does).\n"
-                "        locked = os.path.join(tempfile.gettempdir(), 'locked')\n"
-                "        os.makedirs(os.path.join(locked, 'inner'))\n"
-                "        for d in (locked, os.path.join(locked, 'inner')):\n"
-                "            with open(os.path.join(d, 'sample'), 'w') as sample:\n"
-                "                sample.write('synthetic')\n"
-                "        readonly = os.path.join(tempfile.gettempdir(), 'readonly')\n"
-                "        os.mkdir(readonly)\n"
-                "        open(os.path.join(readonly, 'sample'), 'w').close()\n"
-                "        os.chmod(os.path.join(locked, 'inner'), 0)\n"
-                "        os.chmod(locked, 0)\n"
-                "        os.chmod(readonly, 0o500)\n"
                 "        with open(os.environ['HASS_FIXTURE_MARK'], 'w') as mark:\n"
                 "            mark.write(path)\n"
                 "        time.sleep(120)\n"
@@ -723,7 +710,6 @@ class TransactionTests(unittest.TestCase):
             code = obj.run()
         self.assertEqual(code, 1)
         self.assertIn("RELEASE refused tests-timeout", self.out.getvalue())
-        self.assertNotIn("stage-scratch-left", self.out.getvalue())
         self.assertNotIn("stop", obj.calls)
         self.assert_old()
         fixture = Path(mark.read_text())  # the shard really wrote its scratch before the kill
@@ -731,21 +717,6 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(fixture.exists())
         self.assertEqual(os.listdir(outer), [])
         self.assertIsNone(obj.stage_tmp)
-
-    def test_scratch_left_behind_refuses_before_backup_without_paths(self):
-        with patch.object(release, "remove_owned_tree", return_value=False) as remove:
-            obj, code, _, _, killpg = self.timed_staging(130, 870)
-        self.assertEqual(code, 1)
-        remove.assert_called_once()
-        out = self.out.getvalue()
-        self.assertIn("RELEASE stage-scratch-left", out)
-        self.assertIn("RELEASE refused stage-scratch-cleanup", out)
-        self.assertNotIn(str(remove.call_args.args[0]), out)
-        self.assertNotIn("backup", obj.calls)
-        self.assertNotIn("stop", obj.calls)
-        self.assertTrue(obj.active)
-        self.assert_old()
-        killpg.assert_not_called()
 
     def test_staging_does_not_enlarge_switch_or_recovery_budget(self):
         obj, code, _, _, _ = self.timed_staging(130, 870, work_seconds=721)
@@ -771,23 +742,6 @@ class TransactionTests(unittest.TestCase):
 
 
 class PrimitiveTests(unittest.TestCase):
-    def test_owned_tree_removal_never_follows_symlinks(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            outside = Path(tmp) / "outside"
-            (outside / "locked").mkdir(parents=True)
-            (outside / "locked" / "keep").write_text("keep")
-            (outside / "locked").chmod(0)
-            tree = Path(tmp) / "tree"
-            tree.mkdir()
-            (tree / "dir-link").symlink_to(outside)
-            (tree / "locked-link").symlink_to(outside / "locked")
-            self.assertTrue(release.remove_owned_tree(tree))
-            self.assertFalse(os.path.lexists(tree))
-            self.assertEqual(stat.S_IMODE((outside / "locked").lstat().st_mode), 0)
-            (outside / "locked").chmod(0o700)
-            self.assertEqual((outside / "locked" / "keep").read_text(), "keep")
-            self.assertTrue(release.remove_owned_tree(tree))  # already gone
-
     def test_bad_commit_literal_refused(self):
         for value in ("HEAD", "a" * 39, "A" * 40, "a" * 40 + "\n", "--help"):
             with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

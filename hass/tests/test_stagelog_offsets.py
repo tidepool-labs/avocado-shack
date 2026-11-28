@@ -57,6 +57,34 @@ class T(unittest.TestCase):
         self.assertEqual(self.cli(a, b), (0, "%s accepted=0.0 reply-queued=0.0 bb-send-end=0.0\n" % A, ""))
         self.assertEqual([(r["id"], r.get("rid")) for r in rows], [(A, None), (A, R), (R, None), (R, None), (Q, None)])
 
+    def test_conflicting_reply_bindings_leave_send_unattributed_in_either_order(self):
+        # A last-wins join credits one of the two turns; falling back to the raw reply id credits R.
+        # An identical binding for a different reply must still yield its measured send duration.
+        good = "e" * 12
+        bind_r, bind_q = (', "rid": "%s"' % rid for rid in (R, Q))
+        with tempfile.TemporaryDirectory() as tmp:
+            host, mac = (Path(tmp) / name for name in ("host.jsonl", "mac.jsonl"))
+            host.write_text("\n".join([
+                line(10, "accepted", A), line(11, "accepted", H), line(12, "accepted", R),
+                line(13, "accepted", good), line(14, "reply-queued", A, bind_r),
+                line(14, "reply-queued", A, bind_r), line(15, "reply-queued", H, bind_r),
+                line(16, "reply-queued", good, bind_q), line(16, "reply-queued", good, bind_q),
+            ]) + "\n")
+            mac.write_text("\n".join([
+                line(17, "reply-pulled", R), line(18, "bb-send-start", R), line(20, "bb-send-end", R),
+                line(19, "reply-pulled", Q), line(21, "bb-send-start", Q), line(24, "bb-send-end", Q),
+            ]) + "\n")
+            rows = stagelog.read(host) + stagelog.read(mac)
+        for order, records in (("forward", rows), ("reverse", rows[::-1])):
+            stages = dict(stagelog.table(records))
+            with self.subTest(order=order, control="matching duplicate"):
+                self.assertEqual(stages[good], {"accepted": 0, "reply-queued": 3, "reply-pulled": 6,
+                                                "bb-send-start": 8, "bb-send-end": 11})
+            with self.subTest(order=order, control="conflict and id collision"):
+                self.assertEqual({i: stages[i] for i in (A, H, R)},
+                                 {A: {"accepted": 0, "reply-queued": 4},
+                                  H: {"accepted": 0, "reply-queued": 4}, R: {"accepted": 0}})
+
     def test_duplicate_overflow_does_not_choose_a_different_occurrence(self):
         p = self.write(line("-1e308", "accepted"), line("1e308", "handled"), line("1.5e308", "handled"),
                        line("0", "ack-end"), line("7", "ack-end"), line("3", "weird"))

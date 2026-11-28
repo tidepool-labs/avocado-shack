@@ -23,10 +23,15 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 UNITS = ("hass-receiver.service", "hass-worker.service", "hass-health.timer")
 PENDING_WORK_ZERO = {"outbox_unsent 0", "relay_unacked 0", "card_receipt_pending 0", "inbound_pending 0"}
 STAGING_BUDGET_SECONDS = 5400  # >= 1.5x the measured on-host acceptance + run_parallel time (docs)
+INVOCATION = re.compile(r"[0-9a-f]{32}\Z")  # systemd InvocationID
 
 
 class Refused(Exception):
     pass
+
+
+def boot_id():
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
 def private_read(path):
@@ -90,6 +95,9 @@ class Release:
         self.stage_tmp = None  # TMPDIR owned by this process for the staging children
         self.pending = None
         self.git_dir = None
+        # Ordering evidence observed by this run (receipt "witness"): the backup this run
+        # started, and the host pin and unit launches on ONE monotonic clock and boot.
+        self.witness = {}
 
     def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
         remaining = self.deadline - time.monotonic()
@@ -157,6 +165,26 @@ class Release:
         time.sleep(30)
         self.units(True)
 
+    def unit_launches(self):
+        """Each service's current main process launched after the pin, same boot."""
+        if boot_id() != self.witness["boot_id"]:
+            raise Refused("unit-launch-boot")
+        launched = {}
+        for unit in UNITS[:2]:
+            out = self.command("unit-launch", ["systemctl", "--user", "show", "-p", "InvocationID",
+                                               "-p", "ExecMainStartTimestampMonotonic", unit])
+            fields = {}
+            for line in str(out).splitlines():
+                key, _, value = line.partition("=")
+                fields[key] = value
+            invocation, start = fields.get("InvocationID", ""), fields.get("ExecMainStartTimestampMonotonic", "")
+            if not INVOCATION.fullmatch(invocation) or not start.isdigit():
+                raise Refused("unit-launch")
+            if int(start) <= self.witness["pinned_monotonic_us"]:
+                raise Refused("unit-launch-before-pin")
+            launched[unit] = {"invocation": invocation, "start_monotonic_us": int(start)}
+        self.witness["units"] = launched
+
     def selftest(self):
         assert self.run_dir is not None
         output = self.command("selftest", ["bash", self.a.runtime / "scripts/hass/live_selftest.sh",
@@ -217,6 +245,7 @@ class Release:
                 "phase": phase, "old": self.a.expected_old, "target": self.a.target,
                 "runtime": str(self.a.runtime), "host": str(self.a.host),
                 "elapsed_seconds": round(time.monotonic() - self.start, 3),
+                "witness": self.witness,
             }, sort_keys=True) + "\n").encode())
         if self.pending is not None:
             if phase == "switching":
@@ -269,6 +298,11 @@ class Release:
         self.command("backup", ["systemctl", "--user", "start", "hass-backup.service"], timeout=120)
         if self.command("backup-result", ["systemctl", "--user", "show", "-p", "Result", "--value", "hass-backup.service"]) != "success":
             raise Refused("backup-result")
+        backup = self.command("backup-invocation", ["systemctl", "--user", "show", "-p", "InvocationID", "--value",
+                                                    "hass-backup.service"])
+        if not INVOCATION.fullmatch(backup):
+            raise Refused("backup-invocation")
+        self.witness["backup_invocation"] = backup
         private_write(self.run_dir / "host.before", self.old_host)
         self.record("prepared")
 
@@ -302,10 +336,15 @@ class Release:
             raise Refused("host-changed")
         assert self.new_host is not None
         private_write(self.a.host, self.new_host)
+        # Taken after the atomic replace returned: any later launch on this boot's
+        # monotonic clock saw the new pin. Wall-clock steps cannot reorder it.
+        self.witness["boot_id"] = boot_id()
+        self.witness["pinned_monotonic_us"] = time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000
         self.host_check()
         self.start_units()
         self.selftest()
         self.units(True)
+        self.unit_launches()
         self.clean_head(self.a.target)
         if private_read(self.a.host) != self.new_host:
             raise Refused("host-changed")

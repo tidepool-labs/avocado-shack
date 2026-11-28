@@ -32,6 +32,10 @@ class FixtureRelease(release.Release):
                                "inbound_pending 0\nPASS install_pending_work")
         self.pending_commands = []
         self.checkouts = []
+        self.backup_invocation = "b" * 32
+        self.started_us = 0
+        self.launch_us: int | str | None = None  # None = the fixture launch happens at the "start" call
+        self.unit_invocation = "a" * 32
 
     def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
         self.calls.append(label)
@@ -50,6 +54,7 @@ class FixtureRelease(release.Release):
             self.active = False
         elif label == "start":
             self.active = True
+            self.started_us = time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000 + 1
         elif label == "unit-state":
             return "active" if self.active else "inactive"
         elif label == "restart-count":
@@ -60,6 +65,11 @@ class FixtureRelease(release.Release):
             return "active"
         elif label == "backup-result":
             return "success"
+        elif label == "backup-invocation":
+            return self.backup_invocation
+        elif label == "unit-launch":
+            launch = self.launch_us if self.launch_us is not None else self.started_us
+            return f"InvocationID={self.unit_invocation}\nExecMainStartTimestampMonotonic={launch}"
         elif label == "selftest":
             return "HASS-SELFTEST fixture pass=10 warn=0 fail=0 skip=1"
         elif label == "inbox":
@@ -152,6 +162,59 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual((obj.run_dir / "host.before").stat().st_mode & 0o777, 0o600)
         self.assertNotIn("NEVER-OPEN", self.out.getvalue())
         self.assertNotIn("NEVER-OPEN", (obj.run_dir / "receipt.json").read_text())
+
+    def test_receipt_witness_orders_pin_before_launch_on_one_clock(self):
+        obj, code = self.run_release()
+        self.assertEqual(code, 0)
+        witness = json.loads(release.private_read(obj.run_dir / "receipt.json"))["witness"]
+        self.assertEqual(witness["backup_invocation"], "b" * 32)
+        self.assertEqual(witness["boot_id"], release.boot_id())
+        for unit in release.UNITS[:2]:
+            self.assertEqual(witness["units"][unit]["invocation"], "a" * 32)
+            self.assertGreater(witness["units"][unit]["start_monotonic_us"], witness["pinned_monotonic_us"])
+        self.assertLess(obj.calls.index("backup-invocation"), obj.calls.index("stop"))
+
+    def test_launch_not_after_pin_rolls_back(self):
+        # A launch at or before the pin on the monotonic clock (e.g. a start that raced
+        # the switch) is refused even if the wall clock was stepped to look later.
+        for offset in (-5_000_000, 0):
+            with self.subTest(offset=offset):
+                obj = FixtureRelease(self.args)
+                def hook(label, obj=obj, offset=offset):
+                    if label == "unit-launch":
+                        obj.launch_us = obj.witness["pinned_monotonic_us"] + offset
+                obj.pending_hook = hook
+                with patch("hass.runtime_release.time.time", return_value=4e9), contextlib.redirect_stdout(self.out):
+                    self.assertEqual(obj.run(), 1)
+                self.assertEqual(self.phase(obj), "rolled-back")
+                self.assert_old()
+
+    def test_launch_on_another_boot_or_unreadable_rolls_back(self):
+        for case in ("boot", "invocation", "start"):
+            with self.subTest(case=case):
+                obj = FixtureRelease(self.args)
+                if case == "invocation":
+                    obj.unit_invocation = "n/a"
+                elif case == "start":
+                    obj.launch_us = "n/a"
+                boots = iter([release.boot_id(), "other-boot"])
+                with contextlib.ExitStack() as stack:
+                    if case == "boot":
+                        stack.enter_context(patch("hass.runtime_release.boot_id", side_effect=lambda: next(boots)))
+                    stack.enter_context(contextlib.redirect_stdout(self.out))
+                    self.assertEqual(obj.run(), 1)
+                self.assertEqual(self.phase(obj), "rolled-back")
+                self.assert_old()
+
+    def test_backup_invocation_unreadable_refuses_before_stop(self):
+        for value in ("", "n/a", "B" * 32, "b" * 31):
+            with self.subTest(value=value):
+                obj = FixtureRelease(self.args)
+                obj.backup_invocation = value
+                with contextlib.redirect_stdout(self.out):
+                    self.assertEqual(obj.run(), 1)
+                self.assertNotIn("stop", obj.calls)
+                self.assert_old()
 
     def test_default_plan_opens_no_private_files_or_services(self):
         self.args.apply = False

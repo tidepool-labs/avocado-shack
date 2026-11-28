@@ -89,7 +89,11 @@ before recovery. The backup timer is left alone; no units are installed/reloaded
   promise that the stop succeeded**. The operator must inspect actual unit state.
 
 Private receipts: `~/.local/state/hass-releases/run-*/receipt.json` contain only
-phase, commit IDs, paths and elapsed seconds. `host.before` is private config,
+phase, commit IDs, paths, elapsed seconds and a `witness`: the InvocationID of the
+backup this run started, the boot ID and the monotonic time (microseconds) taken
+after the host pin was replaced, and each service's InvocationID and monotonic
+launch time. A launch not after the pin, or on another boot, rolls the move back;
+readers compare on that one clock, never wall time. `host.before` is private config,
 not a report attachment: never paste, commit or export it. Keep the same receipt
 root. Staging cleanup is best-effort, never forced.
 

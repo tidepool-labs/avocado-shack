@@ -446,9 +446,22 @@ class StockCase(unittest.TestCase):
         release_journal.atomic(fixture.hostdir / 'publish.json', dict(anchor_site_commit=git(fixture.site, 'rev-parse', 'HEAD'),
             anchor_build_today=self.today(), anchor_seq=0, anchor_at=self.now.isoformat()))
         self.pull(); self.runq(); self.yes(); self.pull()
+        # DEMO-LOCK-1 readback race: the marker lands after the release settles live, before the stock readback.
+        site, inner, calls = fixture.site.resolve(), self.live.git_runner, []
+        self.live.git_runner = lambda cwd, *a: (calls.append(a) if Path(cwd).resolve() == site else None, inner(cwd, *a))[1]
+        marker, real_apply, real_reconcile, applied = fixture.hostdir / release_journal.DEMO_MARKER, self.live.apply, self.live.reconcile, []
+        def apply_then_settle(*a, **k): applied.append(1); return real_apply(*a, **k)
+        def settle_then_mark():  # the post-apply reconcile settles the release live, then `on` lands
+            real_reconcile()
+            if applied: marker.write_text('x'); calls.clear()
+        with patch.object(self.live, 'apply', side_effect=apply_then_settle) as apply, patch.object(self.live, 'reconcile', side_effect=settle_then_mark):
+            with self.assertRaisesRegex(ValueError, 'busy'): self.runq()
+        self.assertEqual((apply.call_count, calls, fixture.push_calls), (1, [], 1))
+        flight = self.data()['inflight']; self.assertEqual(self.live.entry_state(flight['change_id']), 'live')
+        marker.unlink(); self.pull()  # after `off` the kept in-flight record finishes: no second apply or push
         with patch.object(self.live, 'apply', wraps=self.live.apply) as apply:
-            self.assertEqual(self.runq(), 'live'); self.assertEqual(apply.call_count, 1)
-        self.assertEqual(fixture.push_calls, 1)
+            self.runq(); self.assertEqual(apply.call_count, 0)
+        self.assertIsNone(self.data()['inflight']); self.assertTrue(calls); self.assertEqual(fixture.push_calls, 1)
         self.live.baseline(self.live.load()[0], 'acceptance-readback')
         cid = self.data()['lastStockRelease']['change_id']
         self.assertEqual(self.data()['lastStockRelease']['actor'], 'stock-sync')
@@ -458,12 +471,10 @@ class StockCase(unittest.TestCase):
             self.live.revert_last()
             self.assertEqual(undo.call_args.args[0], [{'op': 'history.revert', 'args': {'changeId': cid}}])
         # DEMO-LOCK-1: a job admitted before `demo-lock on` (marker written after its startup check) reads no site checkout.
-        site, inner, calls = fixture.site.resolve(), self.live.git_runner, []
-        self.live.git_runner = lambda cwd, *a: (calls.append(a) if Path(cwd).resolve() == site else None, inner(cwd, *a))[1]
-        (fixture.hostdir / release_journal.DEMO_MARKER).write_text('x')
+        marker.write_text('x'); calls.clear()
         self.pull(**{self.ids[0]: 2})
         self.assertEqual((self.runq(), calls, fixture.push_calls), ('publish-refused', [], 1))
-        (fixture.hostdir / release_journal.DEMO_MARKER).unlink()  # negative control: the same run reads the checkout again
+        marker.unlink()  # negative control: the same run reads the checkout again
         self.pull(); self.runq(); self.assertTrue(calls)
 
 

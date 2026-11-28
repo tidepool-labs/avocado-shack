@@ -1,13 +1,14 @@
 """Fixture-only contract for the saved stdout verdict, not the preflight producer."""
 
-from contextlib import redirect_stderr, redirect_stdout
-import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
-from scripts.hass.install_preflight_verdict import after_verdict, before_verdict, main
+from scripts.hass.install_preflight_verdict import after_verdict, before_verdict
+from scripts.hass.npp_preflight import SKILLS, STAGES
 
 
 ON = {"npp": True, "houseRender": True, "photo_polish": True}
@@ -15,10 +16,10 @@ ON = {"npp": True, "houseRender": True, "photo_polish": True}
 
 def report(*, after=False):
     return {
-        "status": "READY", "present": ["stage.py"], "missing": [],
+        "status": "READY", "present": list(STAGES), "missing": [],
         "pins": {"manifest_present": True, "checked": 2, "mismatches": []},
         "allowlist_count": 0,
-        "skills": {"present": ["SKILL.md"], "missing": []},
+        "skills": {"present": list(SKILLS), "missing": []},
         "acceptance_fail_0": True,
         "switches": {"current": dict(ON) if after else {"npp": False},
                      "proposed": dict(ON), "diff": [] if after else [
@@ -55,7 +56,7 @@ class VerdictTests(unittest.TestCase):
             ("missing", ["stage.py"], "incomplete stages"),
             ("missing", None, "incomplete stages"),
             ("present", [], "incomplete stages"),
-            ("skills", {"present": ["SKILL.md"], "missing": ["other.md"]}, "incomplete skills"),
+            ("skills", {"present": list(SKILLS), "missing": ["other.md"]}, "incomplete skills"),
             ("skills", {}, "incomplete skills"),
             ("pins", None, "pins not verified"),
             ("pins", {"manifest_present": 1, "mismatches": [], "checked": 2}, "pins not verified"),
@@ -72,6 +73,27 @@ class VerdictTests(unittest.TestCase):
         del missing["acceptance_fail_0"]
         self.assertEqual(before_verdict(capture(missing), 0, default_off_confirmed=True),
                          "FAIL: acceptance not confirmed")
+
+        # Nonempty, length-only, and set-only checks can mistake incomplete or
+        # duplicated paths for the full roster, even when both captures agree.
+        baseline = capture(report())
+        for group, roster in (("stages", STAGES), ("skills", SKILLS)):
+            for defect, present in (
+                ("truncated", roster[:-1]),
+                ("substituted", (*roster[:-1], "fixture-path")),
+                ("duplicated", (*roster, roster[0])),
+                ("malformed", (*roster[:-1], {})),
+            ):
+                with self.subTest(group=group, defect=defect):
+                    before, after = report(), report(after=True)
+                    for evidence in (before, after):
+                        (evidence if group == "stages" else evidence["skills"])["present"] = list(present)
+                    expected = f"FAIL: incomplete {group}"
+                    self.assertEqual(before_verdict(capture(before), 0, default_off_confirmed=True), expected)
+                    for saved_before, verdict in ((baseline, expected),
+                                                  (capture(before), "FAIL: before report did not pass")):
+                        self.assertEqual(after_verdict(capture(after), 0, before_stdout=saved_before,
+                                                       before_exit_status=0, default_off_confirmed=True), verdict)
 
     def test_before_uses_current_npp_and_requires_independent_evidence(self):
         # Proposed true is normal before switching; missing current NPP is not its own proof.
@@ -127,14 +149,15 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(check(after), "PASS")
         self.assertEqual(check(after, 3), "FAIL: preflight exit status")
         self.assertEqual(check({**after, "acceptance_fail_0": None}), "FAIL: acceptance not confirmed")
-        for key, value in (("allowlist_count", 1), ("present", ["replacement.py"]),
-                           ("skills", {"present": ["other.md"], "missing": []}),
+        for key, value in (("allowlist_count", 1), ("present", list(reversed(STAGES))),
+                           ("skills", {"present": list(reversed(SKILLS)), "missing": []}),
                            ("pins", {"manifest_present": True, "checked": 3, "mismatches": []})):
             with self.subTest(key=key):
                 self.assertEqual(check({**after, key: value}), "FAIL: readiness changed")
 
     def test_cli_reads_saved_first_lines_and_emits_only_fixed_reasons(self):
-        # Diagnostics/filenames must not leak and passing fixtures must remain untouched.
+        # Exercise the standalone import outside the checkout; do not leak diagnostics or paths.
+        script = Path(__file__).resolve().parents[2] / "scripts/hass/install_preflight_verdict.py"
         with tempfile.TemporaryDirectory() as tmp:
             before = Path(tmp) / "before.out"
             after = Path(tmp) / "after.out"
@@ -142,22 +165,25 @@ class VerdictTests(unittest.TestCase):
             after.write_bytes(capture(report(after=True)))
             original = {p: p.read_bytes() for p in (before, after)}
             common = ["--exit-status", "0", "--default-off-confirmed"]
+            pair = ["after", "--stdout", str(after), *common, "--before-stdout", str(before),
+                    "--before-exit-status", "0"]
             for args, status, expected in (
                 (["before", "--stdout", str(before), *common], 0, "PASS"),
-                (["after", "--stdout", str(after), *common, "--before-stdout", str(before),
-                  "--before-exit-status", "0"], 0, "PASS"),
+                (pair, 0, "PASS"),
                 (["before", "--stdout", str(before)], 2, "FAIL: invalid arguments"),
                 (["before", "--stdout", str(Path(tmp) / "absent"), *common], 1, "FAIL: could not read saved stdout"),
             ):
                 with self.subTest(status=status, expected=expected):
-                    out, err = io.StringIO(), io.StringIO()
-                    with redirect_stdout(out), redirect_stderr(err):
-                        if status == 2:
-                            with self.assertRaises(SystemExit) as exc:
-                                main(args)
-                            self.assertEqual(exc.exception.code, status)
-                        else:
-                            self.assertEqual(main(args), status)
-                    self.assertEqual((out.getvalue(), err.getvalue()),
+                    result = subprocess.run([sys.executable, "-B", str(script), *args], cwd=tmp,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, status)
+                    self.assertEqual((result.stdout, result.stderr),
                                      ("", expected + "\n") if status == 2 else (expected + "\n", ""))
             self.assertEqual({p: p.read_bytes() for p in Path(tmp).iterdir()}, original)
+
+            for path, is_after in ((before, False), (after, True)):
+                path.write_bytes(capture({**report(after=is_after), "present": list(STAGES[:-1])}))
+            result = subprocess.run([sys.executable, "-B", str(script), *pair], cwd=tmp,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (1, "FAIL: before report did not pass\n", ""))

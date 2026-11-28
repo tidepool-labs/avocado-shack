@@ -2,6 +2,65 @@ import test from 'node:test';import assert from 'node:assert/strict';import {int
 test('explicit owner message extracts price, quantity, unit and recount',()=>{const {fields,questions:q}=interpret('Product: Strawberry preserves 8 oz; $9 per jar; 12 available for online pickup');assert.equal(fields.name,'Strawberry preserves 8 oz');assert.equal(fields.price_minor,900);assert.equal(fields.quantity,12);assert.equal(fields.stock_action,'recount');assert.deepEqual(q,[])});
 test('arrival differs from total; unspecified pool remains unknown',()=>{const f=interpret('Product: Strawberry preserves; $9 per jar; 12 new jars').fields;assert.equal(f.stock_action,'receipt');assert.ok(questions(f).some(s=>s.includes('online bin')))});
 test('an explicit stock action overrides an inferred recount',()=>{assert.equal(interpret('Product: Hass avocado; 12 available; Action = RECEIPT').fields.stock_action,'receipt')});
+
+test('New potatoes with 12 available is a recount',()=>{
+ const {fields}=interpret('New potatoes; 12 available',{stock_action:'receipt'});
+ assert.equal(fields.stock_action,'recount');
+ assert.equal(fields.quantity,12);
+});
+test('a price-only edit preserves the previous inventory',()=>{
+ for(const text of ['$2 each','Potatoes, each, $2','$2 total','$-2 each']){
+  const {fields,questions:q}=interpret(text,{quantity:7,stock_action:'receipt'});
+  assert.equal(fields.quantity,7,text);
+  assert.equal(fields.stock_action,'receipt',text);
+  assert.ok(!q.some(s=>s.includes('How many')),text);
+ }
+});
+test('names and product details are not stock claims',()=>{
+ for(const text of ['New potatoes','Total cereal','Product: 12 new jars','12 new jars, box, $2','Description: received 12 new jars; Package size: 6 jars']){
+  const {fields}=interpret(text,{quantity:7});
+  assert.equal(fields.stock_action,undefined,text);
+  assert.equal(fields.quantity,7,text);
+ }
+});
+test('counted stock phrases and direct stock replies still set the action',()=>{
+ for(const [text,action] of [['received 12 jars','receipt'],['12 jars are now available','recount'],['a new arrival','receipt'],['the total now available','recount']]){
+  assert.equal(interpret(text).fields.stock_action,action,text);
+ }
+});
+test('stock cues followed by a count replace or invalidate a previous quantity',()=>{
+ const previous={name:'Jar',unit:'jar',price_minor:200,quantity:7,stock_pool:'online',stock_action:'recount'};
+ for(const [text,action] of [['received 12','receipt'],['total of 12','recount']]){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,12,text);
+  assert.equal(result.fields.stock_action,action,text);
+  assert.deepEqual(result.questions,[],text);
+ }
+ for(const text of ['received 12.5','total of 1,200','received -12']){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,undefined,text);
+  assert.ok(result.questions.some(q=>q.includes('How many')),text);
+ }
+});
+test('explicit quantities and cue-first counts must agree and be valid',()=>{
+ const previous={name:'Jar',unit:'jar',price_minor:200,quantity:7,stock_pool:'online',stock_action:'recount'};
+ for(const text of ['received 12; qty: -20','qty: 12.5; received 12','received 12; qty: 20','qty: 20; received 12','received 12.5; qty: 12']){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,undefined,text);
+  assert.ok(result.questions.some(q=>q.includes('How many')),text);
+ }
+ for(const text of ['received 12; qty: 12','qty: 12; received 12']){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,12,text);
+  assert.deepEqual(result.questions,[],text);
+ }
+});
+test('an explicit action stays authoritative before conflicting stock wording',()=>{
+ const {fields}=interpret('action: correction; New potatoes; 12 available');
+ assert.equal(fields.stock_action,'correction');
+ assert.equal(fields.quantity,12);
+});
+
 test('picture observation cannot supply inventory or a product identity',()=>{assert.equal(interpret('').fields.quantity,undefined);assert.ok(questions({}).length>=6)});
 test('invalid money, quantity, restricted item and unsupported weight cannot publish',()=>{const good={name:'Jar',unit:'jar',price_minor:900,quantity:12,stock_pool:'online',stock_action:'recount'};assert.doesNotThrow(()=>validateFields(good));for(const f of [{...good,quantity:-1},{...good,price_minor:1.5},{...good,restricted:true},{...good,unit:'lb'}])assert.throws(()=>validateFields(f))});
 test('stale approval and missing version fail',()=>{assert.throws(()=>assertVersion({version:2},1));assert.throws(()=>assertVersion({version:2},undefined));assert.doesNotThrow(()=>assertVersion({version:2},2))});

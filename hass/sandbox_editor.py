@@ -45,7 +45,7 @@ class SiteEditor(conversation.Editor):
     def sync_settings(self, settings):
         try:
             cfg = sandbox.policy(self.gate.source())
-            live = 'site' in cfg['live'] and not cfg['hold']
+            live = 'site' in cfg['live'] and not cfg['hold'] and not cfg['lock']
         except (ValueError, OSError):
             live = False
         if live:
@@ -109,7 +109,12 @@ class SiteEditor(conversation.Editor):
             return {'result': getattr(exc, 'code', 'env-gone' if recorded else 'env-changed')}
         return None
 
+    def _locked(self):
+        return sandbox.policy(self.gate.source())['lock'] is not None
+
     def live(self):
+        if self._locked():  # demo lock: the release engine is never constructed (went_live of a live change is already False)
+            raise sandbox.ModeError('env-changed')
         self._live = self.live_factory()
         self._live.environment_guard = self.check_environment
         self._live.conv = self.conv
@@ -128,7 +133,9 @@ class SiteEditor(conversation.Editor):
             return problem
         binding = self._draft(cid)['environment']
         if binding['env'] == 'live':
-            return self.live().apply(cid, draft_hash, chat=chat)
+            try: live = self.live()
+            except sandbox.ModeError as exc: return {'result': exc.code}
+            return live.apply(cid, draft_hash, chat=chat)
         return editor.apply(cid, draft_hash, state=self.state, registry=self.registry,
                             guard=lambda: self.check_environment(cid), now=self.clock(),
                             recovery_guard=lambda cid: self.check_environment(cid, recorded=True))
@@ -143,7 +150,12 @@ class SiteEditor(conversation.Editor):
     def reconcile(self):
         # Only an existing release journal can need publication recovery. Its identity
         # is checked by LiveEditor before any remote call; never infer it from mode.
-        root = Path(self.gate.source()['hostDir'])
+        # Demo lock: no release recovery at all (no fetch, reset or push of the site checkout);
+        # host.py only turns the lock on when every release journal is settled.
+        source = self.gate.source()
+        if sandbox.policy(source)['lock'] is not None:
+            return
+        root = Path(source['hostDir'])
         if (root / 'releases').is_dir():
             self.live().reconcile()
 

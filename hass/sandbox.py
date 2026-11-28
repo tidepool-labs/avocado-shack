@@ -11,6 +11,8 @@ import re
 PACKS = frozenset(('site', 'front', 'till', 'reports', 'core'))
 TARGETS = frozenset(('site', 'till', 'local'))
 OFF = re.compile(r'[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?')
+LOCK = re.compile(r'[a-z0-9][a-z0-9-]{0,31}')  # demoLock id; absent demoLock = off
+TREE = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
 
 
 class ModeError(ValueError):
@@ -30,7 +32,13 @@ def policy(raw):
         raise ModeError('mode_gen')
     if raw.get('approvals') not in ('hold', 'private', 'live'):
         raise ModeError('approvals')
-    return {'live': sorted(live), 'off': sorted(off), 'mode_gen': gen, 'hold': raw['approvals'] == 'hold'}
+    lock = raw.get('demoLock')  # {id, tree}: written only by `host.py demo-lock on`
+    if lock is not None:
+        if not (isinstance(lock, dict) and set(lock) == {'id', 'tree'} and all(isinstance(lock[k], str) for k in lock)
+                and LOCK.fullmatch(lock['id']) and TREE.fullmatch(lock['tree'])):
+            raise ModeError('demoLock')
+        lock = lock['id']
+    return {'live': sorted(live), 'off': sorted(off), 'mode_gen': gen, 'hold': raw['approvals'] == 'hold', 'lock': lock}
 
 
 def identity(descriptor):
@@ -72,6 +80,10 @@ class Gate:
             raise ModeError('policy')
         targets = sorted({m['target'] for m in members})
         env = 'live' if any(t != 'local' for t in targets) and all(t in cfg['live'] for t in targets if t != 'local') else 'sandbox'
+        if cfg['lock']:  # demo lock: every new draft is private; only this lock's own private drafts can be undone or recovered
+            env = 'sandbox'
+            if recorded is not None and (recorded.get('env') != 'sandbox' or recorded.get('lock') != cfg['lock']):
+                raise ModeError('env-gone')
         if recorded is not None:
             env = recorded['env']
             if targets != sorted(recorded['targets']):
@@ -86,7 +98,8 @@ class Gate:
         if recorded is not None and ids != recorded['targets']:
             raise ModeError('env-gone')
         return {'env': env, 'targets': ids, 'mode_gen': cfg['mode_gen'], 'members': members,
-                'off': [x for x in cfg['off'] if any(x in (m['pack'], m['skill']) for m in members)]}
+                'off': [x for x in cfg['off'] if any(x in (m['pack'], m['skill']) for m in members)],
+                **({'lock': cfg['lock']} if cfg['lock'] else {})}
 
     def check(self, binding, *, recorded=False):
         if not isinstance(binding, dict):

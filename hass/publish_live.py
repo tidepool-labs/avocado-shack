@@ -664,7 +664,7 @@ def main(argv=None):
         cfg = host.load_host(args.host)
         from hass.sandbox import policy
         mode = policy(cfg)
-        if mode['hold'] or 'site' not in mode['live']:
+        if mode['hold'] or 'site' not in mode['live'] or mode['lock']:  # demo lock: no operator release command either
             raise ValueError('sandbox')
         live = LiveEditor(cfg['state'], cfg['release'], Path(args.host).resolve().parent)
         # Recovery and retry validate each journal's recorded target before any target I/O.

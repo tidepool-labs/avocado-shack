@@ -8,11 +8,13 @@ import sys
 import tempfile
 import unittest
 
+from hass.npp.evidence import Evidence
 from scripts.hass.npp_review_export import redact
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/hass/npp_review_export.py"
 DAY = "2031-02-03"
+NO_EVIDENCE = dict(stages=None, fallbacks=None, drifted_steps=None, failed_checks=None, approval_role=None)
 
 
 class NppReviewExportTests(unittest.TestCase):
@@ -68,7 +70,8 @@ class NppReviewExportTests(unittest.TestCase):
                                 disposition="queued"),
             first | dict(dir="out", kind="text", text_redacted="Use this title", attachments=0, disposition="queued"),
             dict(job="feed", state="card_out", segments=1, versions=[dict(n=2, state="building", image_variant=None),
-                 dict(n=1, state="delivered", image_variant="raw")]),
+                 dict(n=1, state="delivered", image_variant="raw")], summary=NO_EVIDENCE | dict(
+                     segment_s=[None], slow=False, edits=0, questions=0, evidence="missing")),
         ])
 
     def test_c2_redaction(self):
@@ -210,6 +213,123 @@ class NppReviewExportTests(unittest.TestCase):
                 self.assertEqual((result.returncode, result.stdout), (2, ""))
                 self.assertIn("usage:", result.stderr)
                 self.assertFalse(self.out.exists())
+
+    def jobs(self):
+        return {row["job"]: row for row in map(json.loads, self.out.read_text().splitlines())}
+
+    def test_c6_job_summary(self):
+        # C6: catch counting every version (or only state "delivered") as delivered, -1 edits with none
+        # delivered, ">= 75" or offset-blind slow math, any-instead-of-count questions, duplicate or
+        # non-drifted steps, a later passing rerun hiding a failed check, and negative durations.
+        def at(clock, zone="Z"):
+            return f"{DAY}T{clock}{zone}"
+
+        def segment(start, end, outcome):
+            return dict(accepted_at=start, ended_at=end, outcome=outcome)
+
+        def version(n, state, delivered_at=None):
+            return dict(n=n, state=state, image_variant="raw", delivered_at=delivered_at)
+
+        doc = Evidence()
+        doc.stage("S1", 0, 400, "ok")
+        doc.stage("S2", 400, 6400, "fallback", "label-local")
+        doc.stage("S6", 6400, 81400, "fallback", "polish-late")
+        doc.model("identify", "vision-pin", "vision-other")
+        doc.model("copy", "copy-pin", "copy-pin")
+        doc.model("identify", "vision-pin", "vision-third")
+        doc.model("verify", "verify-pin", None)
+        for code in ("picture-raw", "label-local", "picture-raw"):
+            doc.fallback(code)
+        doc.check("length", "fail")
+        doc.check("length", "pass")
+        doc.check("claims", "pass")
+        doc.check("private-price", "fail", "no-match")
+        doc.approval(4, "Mike", at("09:06:00"), "change-1", "abcdef1")
+        # Newest segment and version first, as the job runner writes receipts.
+        self.receipt("c0de", state="approved", evidence=doc.doc(), segments=[
+            segment(at("09:10:00"), None, None),
+            segment(at("09:05:00"), at("09:05:08"), "card"),
+            segment(at("09:00:00"), at("09:01:15.5"), "card"),
+            segment(at("00:50:00", "-08:00"), at("08:51:10"), "question"),
+            segment(at("08:40:00"), at("08:40:05+00:00", ""), "question"),
+        ], versions=[version(5, "building"), version(4, "approved", at("09:05:09")),
+                     version(3, "superseded", at("09:01:16")), version(2, "superseded"),
+                     version(1, "superseded", at("08:52:00"))])
+        self.receipt("beef", versions=[version(1, "queued")],
+                     segments=[segment(at("10:00:00"), at("10:01:15"), "card")])
+        self.receipt("cafe", evidence=Evidence().doc())
+        self.receipt("dead", segments=[segment(at("10:00:05"), at("10:00:00"), "card")])
+        result = self.run_cli()
+        self.assert_pass(result, 0, 3)
+        self.assertEqual(result.stdout.splitlines()[:-1], ["NOTE bad-receipt dead"])
+        jobs = self.jobs()
+        self.assertEqual(sorted(jobs), ["beef", "c0de", "cafe"])
+        self.assertEqual(jobs["c0de"]["summary"], dict(
+            segment_s=[None, 8.0, 75.5, 70.0, 5.0], slow=True,
+            stages=[dict(stage="S1", ms=400, outcome="ok"), dict(stage="S2", ms=6000, outcome="fallback"),
+                    dict(stage="S6", ms=75000, outcome="fallback")],
+            fallbacks=["label-local", "picture-raw"], drifted_steps=["identify"],
+            failed_checks=["length", "private-price"], approval_role="Mike",
+            edits=2, questions=2, evidence="recorded"))
+        self.assertEqual(jobs["beef"]["summary"], NO_EVIDENCE | dict(
+            segment_s=[75.0], slow=False, edits=0, questions=0, evidence="missing"))
+        self.assertEqual(jobs["cafe"]["summary"], dict(
+            segment_s=[None], slow=False, stages=[], fallbacks=[], drifted_steps=[], failed_checks=[],
+            approval_role=None, edits=0, questions=0, evidence="recorded"))
+
+    def test_c7_bad_evidence(self):
+        # C7: catch dropping the whole job, failing the run, or keeping parts of an invalid record
+        # (its approval role, or a private value that the schema refused).
+        good = Evidence()
+        good.fallback("picture-raw")
+        email = "fake+listing@example.invalid"
+        private = good.doc() | dict(fallbacks=[email, "picture-raw"],
+                                    approval=dict(version=1, role="G", approved_at=0, change_id="change-1",
+                                                  draft_hash="abcdef1"))
+        self.receipt("abcd", evidence=good.doc())
+        self.receipt("babe", evidence="$75.41")
+        self.receipt("bade", evidence=private)
+        self.receipt("bead", evidence=dict(evidence_version=1, cost="$75.41"))
+        result = self.run_cli()
+        self.assert_pass(result, 0, 4)
+        self.assertEqual(result.stdout.splitlines()[:-1],
+                         ["NOTE bad-evidence babe", "NOTE bad-evidence bade", "NOTE bad-evidence bead"])
+        jobs = self.jobs()
+        self.assertEqual(jobs["abcd"]["summary"]["fallbacks"], ["picture-raw"])
+        for job in ("babe", "bade", "bead"):
+            with self.subTest(job=job):
+                self.assertEqual(jobs[job]["versions"], jobs["abcd"]["versions"])
+                self.assertEqual(jobs[job]["summary"], NO_EVIDENCE | dict(
+                    segment_s=[None], slow=False, edits=0, questions=0, evidence="bad"))
+        rendered = (self.out.read_bytes() + result.stdout.encode()).lower()
+        for canary in (email, "75.41"):
+            with self.subTest(canary=canary):
+                self.assertNotIn(canary.encode(), rendered)
+
+    def test_c8_evidence_name_redaction(self):
+        # C8: schema-valid names used to bypass the export's privacy redactor.
+        canaries = ("75.41", "listing.example.invalid", "usd", "three-fifty", "listing.xn--fixture-9za")
+        for field in ("fallbacks", "failed_checks", "drifted_steps"):
+            with self.subTest(field=field):
+                doc = Evidence()
+                for name in (*canaries, "label-local"):
+                    if field == "fallbacks":
+                        doc.fallback(name)
+                    elif field == "failed_checks":
+                        doc.check(name, "fail")
+                    else:
+                        doc.model(name, "sample-pin", "sample-other")
+                self.receipt(evidence=doc.doc())
+                result = self.run_cli("--force")
+                self.assert_pass(result, 0, 1)
+                summary = self.jobs()["feed"]["summary"]
+                self.assertEqual(summary["evidence"], "recorded")
+                self.assertIn("label-local", summary[field])
+                output = self.out.read_text() + result.stdout + result.stderr
+                for name in canaries:
+                    with self.subTest(name=name):
+                        self.assertNotIn(name, output)
+                self.assertEqual(summary[field], ["[redacted]"] * len(canaries) + ["label-local"])
 
 
 if __name__ == "__main__":

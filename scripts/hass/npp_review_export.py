@@ -14,6 +14,7 @@ import unicodedata
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from hass.npp import evidence
 from hass.npp.private_numbers import values
 from hass.npp.receipt import JOB_RE, read_artifact
 
@@ -40,6 +41,7 @@ OTHER_NUMBERS = re.compile(
 JOB_STATES = frozenset("working asking card_out editing retake expired approved published publish_failed".split())
 VERSION_STATES = frozenset("building queued delivered superseded approved".split())
 IMAGE_VARIANTS = (None, "raw", "house", "polished")
+SLOW_SEGMENT_S = 75  # Design section 1.3: per-segment p90 target.
 
 
 def redact(text):
@@ -114,7 +116,61 @@ def events(path, since):
                  disposition=_redact(row["disposition"], identities)) for day, row in raw]
 
 
+def _instant(value):
+    """An aware time, None for an absent one; anything else makes the receipt bad."""
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ValueError
+    moment = datetime.fromisoformat(value)
+    if moment.utcoffset() is None:
+        raise ValueError
+    return moment
+
+
+def _segment_seconds(segment):
+    # An open segment, or one written without times, has no measured duration.
+    start, end = _instant(segment.get("accepted_at")), _instant(segment.get("ended_at"))
+    if start is None or end is None:
+        return None
+    if end < start:
+        raise ValueError
+    return (end - start).total_seconds()
+
+
+EVIDENCE_FACTS = ("stages", "fallbacks", "drifted_steps", "failed_checks", "approval_role")
+
+
+def _review_names(names):
+    # Schema-valid identifiers can still be private. Treat any dotted name as
+    # ambiguous here: even a hostname missed by the prose redactor (e.g. an
+    # ASCII-encoded IDN) must not pass through. Keep one entry per distinct name.
+    return sorted("[redacted]" if "." in name or redact(name) != name else name for name in set(names))
+
+
+def _evidence_summary(row):
+    """Return (summary fields, status) from validated evidence only; never a partial record."""
+    doc = row.get("evidence")
+    if doc is None:  # Receipts written before HRM-03 carry no evidence.
+        return dict.fromkeys(EVIDENCE_FACTS), "missing"
+    try:
+        problems = evidence.validate(doc)
+    except (TypeError, ValueError, AttributeError, RecursionError):
+        problems = ["evidence: unreadable"]
+    if problems:
+        return dict.fromkeys(EVIDENCE_FACTS), "bad"
+    return dict(
+        stages=[dict(stage=s["stage"], ms=round(s["ended_ms"] - s["started_ms"], 3), outcome=s["outcome"])
+                for s in doc["stages"]],
+        fallbacks=_review_names(doc["fallbacks"]),
+        drifted_steps=_review_names(m["step"] for m in doc["models"] if m["drift"]),
+        failed_checks=_review_names(c["name"] for c in doc["checks"] if c["verdict"] == "fail"),
+        approval_role=doc["approval"]["role"] if doc["approval"] else None,
+    ), "recorded"
+
+
 def receipt_summary(path):
+    """Return the export row and job summary for one receipt; raise if the receipt itself is bad."""
     job = path.parent.name
     if not re.fullmatch(JOB_RE, job) or path.parent.is_symlink():
         raise ValueError
@@ -126,14 +182,30 @@ def receipt_summary(path):
     if not isinstance(row["versions"], list):
         raise ValueError
     versions = []
+    delivered = set()
     for version in row["versions"]:
         if not isinstance(version, dict):
             raise ValueError
         n, state, image = version["n"], version["state"], version["image_variant"]
         if type(n) is not int or n < 1 or state not in VERSION_STATES or image not in IMAGE_VARIANTS:
             raise ValueError
+        # A later edit marks a delivered card superseded, so the receipt time is the delivery
+        # signal; delivered and approved states imply delivery for receipts without that time.
+        if _instant(version.get("delivered_at")) is not None or state in ("delivered", "approved"):
+            delivered.add(n)
         versions.append(dict(n=n, state=state, image_variant=image))
-    return dict(job=job, state=row["state"], segments=len(row["segments"]), versions=versions)
+    seconds = [_segment_seconds(segment) for segment in row["segments"]]
+    facts, status = _evidence_summary(row)
+    summary = dict(
+        segment_s=[None if s is None else round(s, 3) for s in seconds],  # receipt order
+        slow=any(s is not None and s > SLOW_SEGMENT_S for s in seconds),
+        **facts,
+        edits=max(len(delivered) - 1, 0),
+        # Each question reply ends its segment with outcome "question".
+        questions=sum(segment.get("outcome") == "question" for segment in row["segments"]),
+        evidence=status,
+    )
+    return dict(job=job, state=row["state"], segments=len(row["segments"]), versions=versions, summary=summary)
 
 
 class UnsafeOutput(ValueError):
@@ -195,10 +267,14 @@ def main(argv=None):
     jobs = []
     for path in receipts:
         try:
-            jobs.append(receipt_summary(path))
+            job = receipt_summary(path)
         except (OSError, ValueError, KeyError, TypeError, RecursionError):
             job = path.parent.name
             print("NOTE bad-receipt " + (job if re.fullmatch(JOB_RE, job) else "<invalid-job>"))
+            continue
+        if job["summary"]["evidence"] == "bad":  # The job stays; its evidence facts are left out.
+            print("NOTE bad-evidence " + job["job"])
+        jobs.append(job)
     try:
         out = output_path(args.out)
         if out == args.export.resolve() or out in receipts:

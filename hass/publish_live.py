@@ -236,6 +236,13 @@ class LiveEditor(conversation.Editor):
         if files != self.tree(): raise ValueError('baseline')
         return files
 
+    def locked_baseline(self, books, cid):
+        """baseline() for callers outside a release step (the stock queue): under the release interlock, so a job admitted
+        before `demo-lock on` reads no site checkout afterwards (DEMO-LOCK-1)."""
+        with self.books.lock() as held:
+            if not held: raise ValueError('busy')
+            return self.baseline(books, cid)
+
     def _asker(self, j):
         """The owner chat whose yes started this release, as recorded in the release entry when that yes was applied (two owners
         can hold drafts with the same change_id, so the newest draft row is never used). An entry with no recorded chat (written
@@ -664,8 +671,7 @@ def main(argv=None):
         cfg = host.load_host(args.host)
         from hass.sandbox import policy
         mode = policy(cfg)
-        if mode['hold'] or 'site' not in mode['live'] or mode['lock'] or journal.demo_marked(Path(args.host).resolve().parent):
-            # demo lock: no operator release command either (Books.lock refuses it again under the release interlock)
+        if mode['hold'] or 'site' not in mode['live']:
             raise ValueError('sandbox')
         live = LiveEditor(cfg['state'], cfg['release'], Path(args.host).resolve().parent)
         # Recovery and retry validate each journal's recorded target before any target I/O.

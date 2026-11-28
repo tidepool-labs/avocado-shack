@@ -101,7 +101,7 @@ class MacRunbookTests(unittest.TestCase):
         names = lambda text: set(re.findall(r'"(\w+)"\s*:', text))
         self.assertEqual(names(blocks[0]), hass_forwarder.KEYS - {'gChat', 'ownerChats'})  # gChat and ownerChats are optional: documented in BRIDGE_WIRING.md
         sandbox_doc = (ROOT / 'docs/hass/SANDBOX.md').read_text(encoding='utf-8')
-        sandbox_keys = {'live', 'off', 'mode_gen'}  # optional per-target switch keys: documented in SANDBOX.md, absent from the first-install example
+        sandbox_keys = {'live', 'off', 'mode_gen', 'demoLock'}  # optional switch keys: documented in SANDBOX.md, absent from the first-install example
         for key in sandbox_keys:
             self.assertIn('\"' + key + '\"', sandbox_doc)
         self.assertEqual(names(blocks[1]) - {'url', 'model'}, host.KEYS - {'release', 'clover'} - sandbox_keys)

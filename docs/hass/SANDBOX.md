@@ -25,6 +25,11 @@ Every successful update raises `mode_gen`. No command restarts a service itself.
 The worker rereads the routing policy for draft and approval/apply checks; a worker
 started with approval application held still needs its existing attended restart.
 
+`"demoLock"` (absent = off) is written only by the attended `hass/host.py demo-lock
+on --id ID` / `off` command: while on, new changes go to the private copy only,
+only that activation's own private changes can be undone, and no release step
+touches the site checkout. See the command help for its refusals.
+
 Do not add till to the live list before AVB-22's separate write approval. A list
 entry is necessary, never sufficient: merchant identity, environment-appropriate
 credentials, write allow-list, owner approval and executor gates still apply.

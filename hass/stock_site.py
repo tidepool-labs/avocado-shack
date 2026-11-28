@@ -174,7 +174,7 @@ class StockSite:
             self.data.update(asOf=meta['asOf'], itemCount=len(items)); self.save()
             self.live.reconcile()
             books, _ = self.live.load()
-            try: self.live.baseline(books, 'stock-check')
+            try: self.live.locked_baseline(books, 'stock-check')
             except (ValueError, OSError): return self.wait('publish-refused', list(pending))
             inflight = self.data['inflight']
             if inflight:
@@ -234,7 +234,7 @@ class StockSite:
             self.live.reconcile()
             content, _ = reports.read_inputs(self.state, self.live.wt)
             if self.live.entry_state(d['change_id']) == 'live':
-                self.live.baseline(self.live.load()[0], 'stock-readback')
+                self.live.locked_baseline(self.live.load()[0], 'stock-readback')  # refused: raises, the job stops, inflight kept
                 if not self.finish(self.data['inflight'], {p['id']: p for p in content['products']}): return self.wait('publish-refused', batch)
                 self.data['inflight'] = None
                 self.save(); self.totals(); return 'live'

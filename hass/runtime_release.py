@@ -25,6 +25,7 @@ PENDING_WORK_ZERO = {"outbox_unsent 0", "relay_unacked 0", "card_receipt_pending
 STAGING_BUDGET_SECONDS = 5400  # >= 1.5x the measured on-host acceptance + run_parallel time (docs)
 INVOCATION = re.compile(r"[0-9a-f]{32}\Z")  # systemd InvocationID
 BACKUP = "hass-backup.service"
+BACKUP_SCOPE = "requested-and-waited; start job may be shared"  # never claims sole ownership
 TICK_NS = 1_000_000_000 // os.sysconf("SC_CLK_TCK")  # /proc/<pid>/stat starttime unit
 
 
@@ -227,12 +228,17 @@ class Release:
         self.witness["units"] = launched
 
     def backup(self):
-        """Run the state backup and bind THIS run's completed invocation (before any stop).
+        """Run the state backup and bind the completed invocation it waited for (before any stop).
 
         Positive evidence: the unit was idle when this run asked; afterwards it reports a
         new successful invocation whose main process ran inside [asked, returned] on the
         monotonic clock; and the journal holds exactly one start job of the unit since
         `asked`, done, for that same invocation. Anything else is ambiguous: refuse.
+
+        Claim (receipt `backup_scope`): the one fresh successful backup this run requested
+        and waited for. NOT sole ownership: systemd merges identical start requests, so a
+        timer/manual request queued after the idle read can share the same job. That shared
+        run is the same fresh backup (it ran inside this run's window, before any stop).
         """
         self.witness["boot_id"] = boot_id()
         asked = monotonic_us()
@@ -261,6 +267,7 @@ class Release:
             raise Refused("backup-ambiguous")
         self.witness["backup_invocation"] = invocation
         self.witness["backup_job"] = job[1]
+        self.witness["backup_scope"] = BACKUP_SCOPE
 
     def backup_job(self, since_us):
         """(invocation, job id) of the ONE completed start job since since_us, else None/refuse."""

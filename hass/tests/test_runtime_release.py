@@ -330,6 +330,27 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(obj.calls.count("backup-journal"), 4)
         self.assertEqual(obj.witness["backup_invocation"], "b" * 32)
 
+    def test_backup_job_joined_by_another_requester_is_recorded_as_shared(self):
+        # A timer/manual start queued after the idle read but before this run's request
+        # reaches systemd: systemd merges both into ONE start job and ONE run inside this
+        # run's window. That is still the fresh backup this run waited for, so it releases,
+        # but the receipt must not claim sole ownership.
+        obj = FixtureRelease(self.args)
+        joined = []
+        def timer_queues_first(label):
+            if label == "backup":
+                joined.append("timer")  # merged: no second job, no second run
+        obj.pending_hook = timer_queues_first
+        with contextlib.redirect_stdout(self.out):
+            self.assertEqual(obj.run(), 0)
+        self.assertEqual(joined, ["timer"])
+        witness = json.loads(release.private_read(obj.run_dir / "receipt.json"))["witness"]
+        self.assertEqual((witness["backup_invocation"], witness["backup_job"]), ("b" * 32, 41))
+        self.assertEqual(witness["backup_scope"], "requested-and-waited; start job may be shared")
+        self.assertNotIn("owner", json.dumps(witness))
+        # A run that starts its OWN job after this run's start returned still refuses
+        # before any stop: see "swapped-after-result" in the test above.
+
     def test_default_plan_opens_no_private_files_or_services(self):
         self.args.apply = False
         self.host.unlink()

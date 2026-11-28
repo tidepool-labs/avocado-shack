@@ -491,7 +491,7 @@ class LiveEditor(conversation.Editor):
     def notify(self, j):
         state = j['state']
         if not self.conv or state in j['notified']: return
-        attachments, extra = [], None
+        attachments, extra, flags = [], None, {}
         chat = self._asker(j)
         original = self._original_owner(j) if state == 'live' else None  # HASS-SEC-2 (L6): (owner chat, code) of the change undone
         if state == 'live' and j['kind'] == 'undo' and not self._has_draft(j['change_id']):
@@ -501,7 +501,9 @@ class LiveEditor(conversation.Editor):
             shot = self.conv.screenshot(j['change_id'])
             attachments = [shot] if shot else []
             posted = getattr(self.conv, 'npp_posted', lambda cid: None)(j['change_id'])  # NPP-G S13: a listing's own live confirmation
-            if posted: text, attachments = posted, []
+            # The item link carries the product id on purpose (reply.posted checks its form); without ids_ok the voice check turns
+            # the whole confirmation into voice.SAFE_LINE, so the owner never sees where his listing is.
+            if posted: text, attachments, flags = posted, [], {'ids_ok': True}
             else:
                 text = owner_answers.LIVE_SHOWN.format()
                 text += ' ' + (owner_answers.LIVE_PICTURE if shot else owner_answers.LIVE_NO_PICTURE)
@@ -513,7 +515,7 @@ class LiveEditor(conversation.Editor):
         elif state == 'unconfirmed': text = owner_answers.LIVE_UNCONFIRMED.format(code=j['code'])
         else: return
         if chat not in self.settings.get('ownerChats', (self.settings['ownerChat'],)): attachments = []  # G's chat is text only; every owner chat gets the picture
-        self.conv.outbox.add(chat, text, attachments)
+        self.conv.outbox.add(chat, text, attachments, **flags)
         if extra: self.conv.outbox.add(*extra, [])
         self.books.write(j, notified=[*j['notified'], state])
 

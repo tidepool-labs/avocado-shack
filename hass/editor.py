@@ -121,7 +121,9 @@ def worktree_problems(wt: Path, recovering=False) -> list[str]:
     problems = ["detached HEAD is refused"] if branch.returncode else \
         ["branch main is refused"] if branch.stdout.strip() == "main" else []
     if recovering: return problems
-    if _out(wt, "status", "--porcelain"): problems.append("writer worktree has uncommitted changes")
+    status = _git(wt, "status", "--porcelain")
+    if status.returncode: problems.append("git status failed")
+    elif status.stdout.strip(): problems.append("writer worktree has uncommitted changes")
     problems += [f"git {key} is not configured" for key in ("user.name", "user.email") if not _out(wt, "config", key)]
     return problems
 

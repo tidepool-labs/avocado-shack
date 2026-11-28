@@ -182,6 +182,18 @@ class DemoLockSwitchTests(HostCase):
         self.assertNotEqual(self.raw()['demoLock']['activation'], first)
         self.assertEqual(self.site_editor().check_environment(cid, recorded=True), {'result': 'env-gone'})
 
+    def test_an_on_interrupted_after_the_host_json_replace_keeps_the_interlock_closed(self):
+        real = os.replace
+        def replaced_then_interrupted(*a): real(*a); raise KeyboardInterrupt
+        with patch.object(host.os, 'replace', side_effect=replaced_then_interrupted), self.assertRaises(KeyboardInterrupt): self.switch(True)
+        self.assertEqual(self.marker.read_text().strip(), self.raw()['demoLock']['activation'])
+        with release_journal.Books(self.hostdir).lock() as held: self.assertFalse(held)
+        self.assertEqual(self.switch(False)['result'], 'ok')  # `off` finishes the interrupted switch
+        with release_journal.Books(self.hostdir).lock() as held: self.assertTrue(held)
+        original = self.path.read_bytes()  # control: a replace that fails before the rename leaves everything as it was
+        with patch.object(host.os, 'replace', side_effect=OSError('disk')), self.assertRaises(OSError): self.switch(True)
+        self.assertEqual((self.path.read_bytes(), self.marker.exists()), (original, False))
+
     @unittest.skipIf(os.geteuid() == 0, 'root ignores directory permissions')
     def test_on_refuses_unreadable_or_unsettled_state_changing_nothing(self):
         original, journal, releases = self.path.read_bytes(), self.repo.state / 'journal', self.hostdir / 'releases'

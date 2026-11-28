@@ -640,7 +640,10 @@ def _set_demo_lock(path, cfg, sdir, wt, on, lock_id):
             os.fsync(fh.fileno())
         _replace_host(path, updated)
     except BaseException:
-        with contextlib.suppress(OSError): marker.unlink()
+        # Reopen the interlock only when host.json is confirmed back without a demo lock; an `on` interrupted after the
+        # replace (or an unreadable host.json) keeps the marker, and `off` finishes the switch.
+        with contextlib.suppress(Exception):
+            if 'demoLock' not in _private_json(path): marker.unlink()
         raise
     return {"result": "ok", "demoLock": "on", "next": "systemctl --user restart hass-worker"}
 

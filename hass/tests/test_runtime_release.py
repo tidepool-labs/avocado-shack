@@ -17,6 +17,16 @@ from unittest.mock import patch
 
 from hass import runtime_release as release
 
+CHILDREN: list[subprocess.Popen] = []  # fixture "service" processes, reaped per test
+REAL_BOOT = release.boot_id()
+
+
+def reap_children():
+    while CHILDREN:
+        child = CHILDREN.pop()
+        child.kill()
+        child.wait()
+
 
 class FixtureRelease(release.Release):
     """Keep actual Git/file operations; simulate ONLY external service/test tools."""
@@ -32,10 +42,47 @@ class FixtureRelease(release.Release):
                                "inbound_pending 0\nPASS install_pending_work")
         self.pending_commands = []
         self.checkouts = []
+        # Backup unit model: runs are (invocation, exec start us, exec exit us, job id) on
+        # the real monotonic clock; the journal is rendered from them.
+        self.backup_idle = "inactive"
+        self.backup_prior = "9" * 32
         self.backup_invocation = "b" * 32
-        self.started_us = 0
-        self.launch_us: int | str | None = None  # None = the fixture launch happens at the "start" call
+        self.backup_runs = [(self.backup_prior, 1, 2, 7)]  # an earlier run, before this one asked
+        self.backup_extra = 0  # further complete runs inside this run's start call
+        self.journal_lag = 0  # reads before the done record is visible
+        self.journal_extra: list[dict] = []
+        # Service model: a REAL child process forked at "start" is each unit's main PID,
+        # so the kernel start time is real. launch_pid overrides it (e.g. a pre-pin fork).
+        self.main_pid = 0
+        self.launch_pid: int | None = None
+        self.exec_pid: str | None = None
         self.unit_invocation = "a" * 32
+        self.launch_reads = 0
+        self.launch_hook: Callable[[int], None] | None = None
+
+    def fork(self):
+        child = subprocess.Popen(["sleep", "600"], stdin=subprocess.DEVNULL)
+        CHILDREN.append(child)
+        return child.pid
+
+    def backup_run(self, invocation):
+        start = release.monotonic_us()
+        while release.monotonic_us() < start + 3:
+            pass
+        self.backup_runs.append((invocation, start + 1, start + 2, 40 + len(self.backup_runs)))
+
+    def journal(self):
+        boot = REAL_BOOT.replace("-", "")
+        lines = []
+        for n, (inv, start, end, job) in enumerate(self.backup_runs):
+            base = {"_BOOT_ID": boot, "USER_UNIT": release.BACKUP, "JOB_TYPE": "start", "JOB_ID": str(job),
+                    "USER_INVOCATION_ID": inv}
+            lines.append(dict(base, __MONOTONIC_TIMESTAMP=str(start)))
+            lines.append({"_BOOT_ID": boot, "_SYSTEMD_INVOCATION_ID": inv, "__MONOTONIC_TIMESTAMP": str(end)})
+            if n < len(self.backup_runs) - 1 or self.journal_lag <= 0:
+                lines.append(dict(base, JOB_RESULT="done", __MONOTONIC_TIMESTAMP=str(end + 1)))
+        self.journal_lag -= 1
+        return "\n".join(json.dumps(line) for line in lines + self.journal_extra)
 
     def command(self, label, argv, cwd=None, timeout=60, codes=(0,), *, strip=True):
         self.calls.append(label)
@@ -54,7 +101,11 @@ class FixtureRelease(release.Release):
             self.active = False
         elif label == "start":
             self.active = True
-            self.started_us = time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000 + 1
+            pin = self.witness.get("pinned_boottime_ns")
+            if self.write_attempted and pin is not None:  # a real start forks well after the pin
+                while time.clock_gettime_ns(time.CLOCK_BOOTTIME) < pin + 2 * release.TICK_NS:
+                    pass
+            self.main_pid = self.fork()
         elif label == "unit-state":
             return "active" if self.active else "inactive"
         elif label == "restart-count":
@@ -63,13 +114,26 @@ class FixtureRelease(release.Release):
             return self.health_state
         elif label in ("backup-timer",):
             return "active"
+        elif label == "backup-before":
+            return f"ActiveState={self.backup_idle}\nInvocationID={self.backup_prior}"
+        elif label == "backup":
+            self.backup_run(self.backup_invocation)
+            for n in range(self.backup_extra):
+                self.backup_run(f"{n + 1:x}" * 32)
         elif label == "backup-result":
-            return "success"
-        elif label == "backup-invocation":
-            return self.backup_invocation
+            inv, start, end, _ = self.backup_runs[-1]
+            return (f"Result=success\nActiveState=inactive\nExecMainStatus=0\nInvocationID={inv}\n"
+                    f"ExecMainStartTimestampMonotonic={start}\nExecMainExitTimestampMonotonic={end}")
+        elif label == "backup-journal":
+            return self.journal()
         elif label == "unit-launch":
-            launch = self.launch_us if self.launch_us is not None else self.started_us
-            return f"InvocationID={self.unit_invocation}\nExecMainStartTimestampMonotonic={launch}"
+            self.launch_reads += 1
+            if self.launch_hook:
+                self.launch_hook(self.launch_reads)
+            pid = self.launch_pid if self.launch_pid is not None else self.main_pid
+            return (f"ActiveState={'active' if self.active else 'inactive'}\nInvocationID={self.unit_invocation}\n"
+                    f"MainPID={pid}\nExecMainPID={self.exec_pid if self.exec_pid is not None else pid}\n"
+                    f"NRestarts={self.restarts}")
         elif label == "selftest":
             return "HASS-SELFTEST fixture pass=10 warn=0 fail=0 skip=1"
         elif label == "inbox":
@@ -117,6 +181,7 @@ class TransactionTests(unittest.TestCase):
             "--python", sys.executable, "--target", self.new, "--expected-old", self.old, "--apply", "--attended"])
         self.out = io.StringIO()
         self.addCleanup(patch.stopall)
+        self.addCleanup(reap_children)
         patch("sys.stdin.isatty", return_value=True).start()
         patch("hass.runtime_release.time.sleep").start()
 
@@ -167,54 +232,103 @@ class TransactionTests(unittest.TestCase):
         obj, code = self.run_release()
         self.assertEqual(code, 0)
         witness = json.loads(release.private_read(obj.run_dir / "receipt.json"))["witness"]
-        self.assertEqual(witness["backup_invocation"], "b" * 32)
+        self.assertEqual((witness["backup_invocation"], witness["backup_job"]), ("b" * 32, 41))
         self.assertEqual(witness["boot_id"], release.boot_id())
         for unit in release.UNITS[:2]:
             self.assertEqual(witness["units"][unit]["invocation"], "a" * 32)
-            self.assertGreater(witness["units"][unit]["start_monotonic_us"], witness["pinned_monotonic_us"])
-        self.assertLess(obj.calls.index("backup-invocation"), obj.calls.index("stop"))
+            self.assertGreater(witness["units"][unit]["launch_boottime_min_ns"], witness["pinned_boottime_ns"])
+        self.assertLess(obj.calls.index("backup-journal"), obj.calls.index("stop"))
 
-    def test_launch_not_after_pin_rolls_back(self):
-        # A launch at or before the pin on the monotonic clock (e.g. a start that raced
-        # the switch) is refused even if the wall clock was stepped to look later.
-        for offset in (-5_000_000, 0):
-            with self.subTest(offset=offset):
-                obj = FixtureRelease(self.args)
-                def hook(label, obj=obj, offset=offset):
-                    if label == "unit-launch":
-                        obj.launch_us = obj.witness["pinned_monotonic_us"] + offset
-                obj.pending_hook = hook
-                with patch("hass.runtime_release.time.time", return_value=4e9), contextlib.redirect_stdout(self.out):
-                    self.assertEqual(obj.run(), 1)
-                self.assertEqual(self.phase(obj), "rolled-back")
-                self.assert_old()
+    def rolls_back(self, obj, *, wall=None):
+        with contextlib.ExitStack() as stack:
+            if wall is not None:
+                stack.enter_context(patch("hass.runtime_release.time.time", return_value=wall))
+            stack.enter_context(contextlib.redirect_stdout(self.out))
+            self.assertEqual(obj.run(), 1)
+        self.assertEqual(self.phase(obj), "rolled-back")
+        self.assert_old()
 
-    def test_launch_on_another_boot_or_unreadable_rolls_back(self):
-        for case in ("boot", "invocation", "start"):
+    def test_pre_pin_fork_rolls_back_whatever_systemd_or_wall_clock_say(self):
+        # A REAL process forked before the pin (e.g. a start that raced the switch) is
+        # the unit's main PID; the fixture reports nothing else that could order it.
+        # The kernel's own fork time decides, even with the wall clock far ahead.
+        obj = FixtureRelease(self.args)
+        def hook(label):
+            if label == "stop" and obj.launch_pid is None:
+                obj.launch_pid = obj.fork()
+        obj.pending_hook = hook
+        self.rolls_back(obj, wall=4e9)
+        self.assertIn("unit-launch", obj.calls)
+        # The test process itself is the oldest possible fork.
+        obj = FixtureRelease(self.args)
+        obj.launch_pid = os.getpid()
+        self.rolls_back(obj)
+
+    def test_unstable_or_unproven_main_process_rolls_back(self):
+        def swap_pid(obj):
+            def hook(reads):
+                if reads == 2:
+                    obj.launch_pid = obj.fork()  # main PID changed between the two snapshots
+            return hook
+        for case in ("boot", "invocation", "zero-invocation", "pid-zero", "exec-pid", "gone", "swap"):
             with self.subTest(case=case):
                 obj = FixtureRelease(self.args)
-                if case == "invocation":
-                    obj.unit_invocation = "n/a"
-                elif case == "start":
-                    obj.launch_us = "n/a"
-                boots = iter([release.boot_id(), "other-boot"])
                 with contextlib.ExitStack() as stack:
                     if case == "boot":
-                        stack.enter_context(patch("hass.runtime_release.boot_id", side_effect=lambda: next(boots)))
-                    stack.enter_context(contextlib.redirect_stdout(self.out))
-                    self.assertEqual(obj.run(), 1)
-                self.assertEqual(self.phase(obj), "rolled-back")
-                self.assert_old()
+                        boots = iter([REAL_BOOT, REAL_BOOT])
+                        stack.enter_context(patch("hass.runtime_release.boot_id",
+                                                  side_effect=lambda: next(boots, "other-boot")))
+                    elif case == "invocation":
+                        obj.unit_invocation = "n/a"
+                    elif case == "zero-invocation":
+                        obj.unit_invocation = "0" * 32
+                    elif case == "pid-zero":
+                        obj.launch_pid = 0
+                    elif case == "exec-pid":
+                        obj.exec_pid = "1"
+                    elif case == "gone":
+                        child = subprocess.Popen(["true"])
+                        child.wait()
+                        obj.launch_pid = child.pid  # exited: no kernel start time to read
+                    else:
+                        obj.launch_hook = swap_pid(obj)
+                    self.rolls_back(obj)
+                self.assertEqual("unit-launch" in obj.calls, case != "boot")
 
-    def test_backup_invocation_unreadable_refuses_before_stop(self):
-        for value in ("", "n/a", "B" * 32, "b" * 31):
-            with self.subTest(value=value):
+    def test_backup_not_proven_this_runs_refuses_before_stop(self):
+        def later_run(obj):
+            def hook(label):
+                if label == "backup-result":
+                    obj.backup_run("c" * 32)  # timer/manual run after this run's start returned
+            return hook
+        cases = {"null-id": dict(backup_invocation="0" * 32), "bad-id": dict(backup_invocation="B" * 32),
+                 "same-as-before": dict(backup_invocation="9" * 32), "busy": dict(backup_idle="activating"),
+                 "second-run-inside": dict(backup_extra=1), "journal-never": dict(journal_lag=99),
+                 "journal-other-run": dict(journal_extra=[{"_BOOT_ID": release.boot_id().replace("-", ""),
+                                                           "_SYSTEMD_INVOCATION_ID": "d" * 32,
+                                                           "__MONOTONIC_TIMESTAMP": str(2 ** 62)}]),
+                 "swapped-after-result": "hook"}
+        for case, settings in cases.items():
+            with self.subTest(case=case):
                 obj = FixtureRelease(self.args)
-                obj.backup_invocation = value
+                if settings == "hook":
+                    obj.pending_hook = later_run(obj)
+                else:
+                    for key, value in settings.items():
+                        setattr(obj, key, value)
                 with contextlib.redirect_stdout(self.out):
                     self.assertEqual(obj.run(), 1)
                 self.assertNotIn("stop", obj.calls)
+                self.assertNotIn("backup_invocation", obj.witness)
                 self.assert_old()
+
+    def test_backup_journal_lag_is_waited_for(self):
+        obj = FixtureRelease(self.args)
+        obj.journal_lag = 3
+        with contextlib.redirect_stdout(self.out):
+            self.assertEqual(obj.run(), 0)
+        self.assertEqual(obj.calls.count("backup-journal"), 4)
+        self.assertEqual(obj.witness["backup_invocation"], "b" * 32)
 
     def test_default_plan_opens_no_private_files_or_services(self):
         self.args.apply = False
@@ -239,7 +353,8 @@ class TransactionTests(unittest.TestCase):
         self.assert_old()
 
     def test_pre_stop_failures_never_switch_or_stop(self):
-        for label in ("selftest", "host-check", "inbox", "acceptance", "tests", "backup", "backup-result"):
+        for label in ("selftest", "host-check", "inbox", "acceptance", "tests", "backup-before", "backup",
+                      "backup-result", "backup-journal"):
             with self.subTest(label=label):
                 obj, code = self.run_release([label])
                 self.assertEqual(code, 1)

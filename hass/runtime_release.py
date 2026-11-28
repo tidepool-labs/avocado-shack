@@ -24,6 +24,8 @@ UNITS = ("hass-receiver.service", "hass-worker.service", "hass-health.timer")
 PENDING_WORK_ZERO = {"outbox_unsent 0", "relay_unacked 0", "card_receipt_pending 0", "inbound_pending 0"}
 STAGING_BUDGET_SECONDS = 5400  # >= 1.5x the measured on-host acceptance + run_parallel time (docs)
 INVOCATION = re.compile(r"[0-9a-f]{32}\Z")  # systemd InvocationID
+BACKUP = "hass-backup.service"
+TICK_NS = 1_000_000_000 // os.sysconf("SC_CLK_TCK")  # /proc/<pid>/stat starttime unit
 
 
 class Refused(Exception):
@@ -32,6 +34,25 @@ class Refused(Exception):
 
 def boot_id():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def invocation_ok(value):
+    return bool(INVOCATION.fullmatch(value)) and value != "0" * 32
+
+
+def monotonic_us():
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000
+
+
+def process_start_ticks(pid):
+    """Kernel start of the process (CLOCK_BOOTTIME, truncated to clock ticks)."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        raise Refused("unit-launch") from None
+    if len(fields) < 20 or not fields[19].isdigit():
+        raise Refused("unit-launch")
+    return int(fields[19])
 
 
 def private_read(path):
@@ -165,25 +186,108 @@ class Release:
         time.sleep(30)
         self.units(True)
 
+    def unit_show(self, label, unit, keys):
+        """One `systemctl show` snapshot with exactly these properties."""
+        out = self.command(label, ["systemctl", "--user", "show", *(f"--property={key}" for key in keys), unit])
+        fields: dict[str, str] = {}
+        for line in str(out).splitlines():
+            key, _, value = line.partition("=")
+            fields[key] = value
+        if set(fields) != set(keys):
+            raise Refused(label)
+        return fields
+
     def unit_launches(self):
-        """Each service's current main process launched after the pin, same boot."""
-        if boot_id() != self.witness["boot_id"]:
-            raise Refused("unit-launch-boot")
+        """Each service's current main process was forked after the pin, same boot.
+
+        The fork time is the kernel's own start time of the stable current main PID
+        (CLOCK_BOOTTIME, rounded DOWN to a tick, so it is a lower bound), compared with
+        CLOCK_BOOTTIME read after the pin replace returned. systemd's ExecMain stamp is
+        not used: it can be later than the fork. No wall-clock value is compared.
+        """
+        keys = ("InvocationID", "MainPID", "ExecMainPID", "NRestarts", "ActiveState")
         launched = {}
         for unit in UNITS[:2]:
-            out = self.command("unit-launch", ["systemctl", "--user", "show", "-p", "InvocationID",
-                                               "-p", "ExecMainStartTimestampMonotonic", unit])
-            fields = {}
-            for line in str(out).splitlines():
-                key, _, value = line.partition("=")
-                fields[key] = value
-            invocation, start = fields.get("InvocationID", ""), fields.get("ExecMainStartTimestampMonotonic", "")
-            if not INVOCATION.fullmatch(invocation) or not start.isdigit():
+            if boot_id() != self.witness["boot_id"]:
+                raise Refused("unit-launch-boot")
+            first = self.unit_show("unit-launch", unit, keys)
+            pid = first["MainPID"]
+            if (not invocation_ok(first["InvocationID"]) or not pid.isdigit() or int(pid) <= 0
+                    or first["ExecMainPID"] != pid or first["NRestarts"] != "0" or first["ActiveState"] != "active"):
                 raise Refused("unit-launch")
-            if int(start) <= self.witness["pinned_monotonic_us"]:
+            ticks = process_start_ticks(int(pid))
+            # Same invocation, same main PID before and after the kernel read: the
+            # ticks belong to this invocation's process, not a reused PID.
+            if self.unit_show("unit-launch", unit, keys) != first or boot_id() != self.witness["boot_id"]:
+                raise Refused("unit-launch-unstable")
+            launch_min_ns = ticks * TICK_NS
+            if launch_min_ns <= self.witness["pinned_boottime_ns"]:
                 raise Refused("unit-launch-before-pin")
-            launched[unit] = {"invocation": invocation, "start_monotonic_us": int(start)}
+            launched[unit] = {"invocation": first["InvocationID"], "launch_boottime_min_ns": launch_min_ns}
         self.witness["units"] = launched
+
+    def backup(self):
+        """Run the state backup and bind THIS run's completed invocation (before any stop).
+
+        Positive evidence: the unit was idle when this run asked; afterwards it reports a
+        new successful invocation whose main process ran inside [asked, returned] on the
+        monotonic clock; and the journal holds exactly one start job of the unit since
+        `asked`, done, for that same invocation. Anything else is ambiguous: refuse.
+        """
+        self.witness["boot_id"] = boot_id()
+        asked = monotonic_us()
+        idle = self.unit_show("backup-before", BACKUP, ("ActiveState", "InvocationID"))
+        if idle["ActiveState"] not in ("inactive", "failed"):
+            raise Refused("backup-busy")
+        self.command("backup", ["systemctl", "--user", "start", BACKUP], timeout=120)
+        returned = monotonic_us()
+        done = self.unit_show("backup-result", BACKUP, ("Result", "ActiveState", "ExecMainStatus", "InvocationID",
+                              "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"))
+        if done["Result"] != "success" or done["ActiveState"] != "inactive" or done["ExecMainStatus"] != "0":
+            raise Refused("backup-result")
+        invocation = done["InvocationID"]
+        if not invocation_ok(invocation) or invocation == idle["InvocationID"]:
+            raise Refused("backup-invocation")
+        began, ended = done["ExecMainStartTimestampMonotonic"], done["ExecMainExitTimestampMonotonic"]
+        if not (began.isdigit() and ended.isdigit() and asked < int(began) <= int(ended) <= returned):
+            raise Refused("backup-window")
+        job = self.backup_job(asked)
+        for _ in range(10):  # the journal may trail the job by a moment
+            if job is not None:
+                break
+            time.sleep(0.2)
+            job = self.backup_job(asked)
+        if job is None or job[0] != invocation:
+            raise Refused("backup-ambiguous")
+        self.witness["backup_invocation"] = invocation
+        self.witness["backup_job"] = job[1]
+
+    def backup_job(self, since_us):
+        """(invocation, job id) of the ONE completed start job since since_us, else None/refuse."""
+        out = self.command("backup-journal", ["journalctl", "--user", "-b", "0", "-u", BACKUP, "-n", "200",
+                                              "-o", "json", "--output-fields=JOB_ID,JOB_TYPE,JOB_RESULT,"
+                                              "USER_UNIT,USER_INVOCATION_ID,_SYSTEMD_INVOCATION_ID,_BOOT_ID"])
+        starts, dones, seen = [], [], set()
+        for line in str(out).splitlines():
+            try:
+                entry = json.loads(line)
+                stamp = int(entry["__MONOTONIC_TIMESTAMP"])
+            except (ValueError, KeyError, TypeError):
+                raise Refused("backup-journal") from None
+            if entry.get("_BOOT_ID") != self.witness["boot_id"].replace("-", "") or stamp <= since_us:
+                continue
+            for key in ("USER_INVOCATION_ID", "_SYSTEMD_INVOCATION_ID"):  # any other run = ambiguous
+                if entry.get(key) is not None:
+                    seen.add(entry[key])
+            if entry.get("USER_UNIT") == BACKUP and entry.get("JOB_TYPE") == "start":
+                (dones if "JOB_RESULT" in entry else starts).append(entry)
+        if not dones:
+            return None
+        if len(starts) != 1 or len(dones) != 1 or len(seen) != 1 or dones[0].get("JOB_RESULT") != "done":
+            raise Refused("backup-ambiguous")
+        if starts[0].get("JOB_ID") != dones[0].get("JOB_ID") or not str(dones[0].get("JOB_ID", "")).isdigit():
+            raise Refused("backup-ambiguous")
+        return dones[0]["USER_INVOCATION_ID"], int(dones[0]["JOB_ID"])
 
     def selftest(self):
         assert self.run_dir is not None
@@ -295,14 +399,7 @@ class Release:
             self.deadline = work_deadline + (time.monotonic() - staging_start)
             stage_tmp, self.stage_tmp = self.stage_tmp, None
             shutil.rmtree(stage_tmp, ignore_errors=True)
-        self.command("backup", ["systemctl", "--user", "start", "hass-backup.service"], timeout=120)
-        if self.command("backup-result", ["systemctl", "--user", "show", "-p", "Result", "--value", "hass-backup.service"]) != "success":
-            raise Refused("backup-result")
-        backup = self.command("backup-invocation", ["systemctl", "--user", "show", "-p", "InvocationID", "--value",
-                                                    "hass-backup.service"])
-        if not INVOCATION.fullmatch(backup):
-            raise Refused("backup-invocation")
-        self.witness["backup_invocation"] = backup
+        self.backup()
         private_write(self.run_dir / "host.before", self.old_host)
         self.record("prepared")
 
@@ -336,10 +433,12 @@ class Release:
             raise Refused("host-changed")
         assert self.new_host is not None
         private_write(self.a.host, self.new_host)
-        # Taken after the atomic replace returned: any later launch on this boot's
-        # monotonic clock saw the new pin. Wall-clock steps cannot reorder it.
-        self.witness["boot_id"] = boot_id()
-        self.witness["pinned_monotonic_us"] = time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000
+        # Taken after the atomic replace returned: any process the kernel forked later
+        # on this boot saw the new pin. CLOCK_BOOTTIME is the clock of /proc/<pid>/stat
+        # starttime; wall-clock steps cannot reorder it.
+        self.witness["pinned_boottime_ns"] = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+        if boot_id() != self.witness["boot_id"]:
+            raise Refused("unit-launch-boot")
         self.host_check()
         self.start_units()
         self.selftest()

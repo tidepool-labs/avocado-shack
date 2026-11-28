@@ -89,11 +89,22 @@ before recovery. The backup timer is left alone; no units are installed/reloaded
   promise that the stop succeeded**. The operator must inspect actual unit state.
 
 Private receipts: `~/.local/state/hass-releases/run-*/receipt.json` contain only
-phase, commit IDs, paths, elapsed seconds and a `witness`: the InvocationID of the
-backup this run started, the boot ID and the monotonic time (microseconds) taken
-after the host pin was replaced, and each service's InvocationID and monotonic
-launch time. A launch not after the pin, or on another boot, rolls the move back;
-readers compare on that one clock, never wall time. `host.before` is private config,
+phase, commit IDs, paths, elapsed seconds and a `witness`:
+- `backup_invocation` + `backup_job`: the backup this run started. Before any stop the
+  unit must have been idle when asked, then report a new successful InvocationID (not
+  the all-zero ID) whose main process ran between the ask and the return of
+  `systemctl start` (monotonic clock), and the user journal must hold exactly one start
+  job of the unit since the ask, done, for that same invocation. A second or concurrent
+  run, a journal that never shows the done record, or any other value refuses.
+- `boot_id` and `pinned_boottime_ns`: CLOCK_BOOTTIME read after the host pin replace
+  returned.
+- `units`: for receiver and worker, the InvocationID and `launch_boottime_min_ns` = the
+  kernel's start time of the current main PID (`/proc/<pid>/stat` starttime, rounded
+  down to a clock tick, so a lower bound). MainPID must equal ExecMainPID, NRestarts 0,
+  and the snapshot must be unchanged around the kernel read. A launch not after the pin,
+  another boot, or an unstable/unreadable process rolls the move back. systemd's
+  ExecMain timestamps are not used for this order (they can trail the fork), and no
+  wall-clock value is compared. `host.before` is private config,
 not a report attachment: never paste, commit or export it. Keep the same receipt
 root. Staging cleanup is best-effort, never forced.
 

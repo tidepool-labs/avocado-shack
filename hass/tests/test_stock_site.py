@@ -28,7 +28,7 @@ class FakeLive:
     def prepare(self, ops):
         return editor.prepare({'ops': ops}, state=self.case.repo.state, now=self.case.now)
 
-    def baseline(self, books, cid):
+    def locked_baseline(self, books, cid):
         if self.unsettled: raise ValueError('baseline')
 
     def load(self): return {}, []
@@ -457,6 +457,14 @@ class StockCase(unittest.TestCase):
         with patch.object(self.live, 'prepare', return_value={'result': 'refused'}) as undo:
             self.live.revert_last()
             self.assertEqual(undo.call_args.args[0], [{'op': 'history.revert', 'args': {'changeId': cid}}])
+        # DEMO-LOCK-1: a job admitted before `demo-lock on` (marker written after its startup check) reads no site checkout.
+        site, inner, calls = fixture.site.resolve(), self.live.git_runner, []
+        self.live.git_runner = lambda cwd, *a: (calls.append(a) if Path(cwd).resolve() == site else None, inner(cwd, *a))[1]
+        (fixture.hostdir / release_journal.DEMO_MARKER).write_text('x')
+        self.pull(**{self.ids[0]: 2})
+        self.assertEqual((self.runq(), calls, fixture.push_calls), ('publish-refused', [], 1))
+        (fixture.hostdir / release_journal.DEMO_MARKER).unlink()  # negative control: the same run reads the checkout again
+        self.pull(); self.runq(); self.assertTrue(calls)
 
 
 if __name__ == '__main__': unittest.main()

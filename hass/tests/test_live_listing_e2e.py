@@ -11,14 +11,17 @@ and previewer from test_npp_undo_journey. Nothing here touches the live site, ho
 Run: python3 -B -m unittest hass.tests.test_live_listing_e2e -v
 """
 from datetime import timedelta
+import hashlib
 from pathlib import Path
 
-from hass import conversation, editor
+from hass import conversation, editor, preview
+from hass.npp import picture
+from hass.npp.job import Card
 from hass.tests import test_live_add as la
 from hass.tests.test_conversation import CHAT, OWNER
 from hass.tests.test_editor import git
 from hass.tests.test_npp_job import Scheduler
-from hass.tests.test_npp_undo_journey import NAME, PRICE, _ChatTransport, _HidePreviewer, _ListingStages
+from hass.tests.test_npp_undo_journey import ALT, MAKER, NAME, PRICE, _ChatTransport, _HidePreviewer, _ListingStages
 from hass.tests.test_photo_draft import JPG
 
 COST, STOCK = "6.17", "23"  # said in the photo caption; neither may reach the website or any reply
@@ -29,6 +32,45 @@ CHANGED = {"catalog-products.js", "producers.js"}  # plus the new picture; every
 class _Photos:
     def fetch(self, provider_id, count):
         return [JPG][:count]
+
+
+class _CardPreviewer(preview.Previewer):
+    def capture(self, files, target, out_png, assets=None, **kwargs):
+        target = {**target, "cardOnly": True, "price": f"${PRICE} each"}
+        return super().capture(files, target, out_png, assets=assets, **kwargs)
+
+
+class _RenderedListingStages(_ListingStages):
+    """Keep the deterministic identification fixture, but capture the actual draft card."""
+    def __init__(self, conv, engine, root, worktree):
+        super().__init__(engine, root, True)
+        self.conv = conv
+        self.previewer = _CardPreviewer(worktree, viewports=("phone",))
+        self.shot = None
+
+    def render(self, work, listing):
+        out = self.editor.prepare([
+            {"op": "maker.add", "args": MAKER},
+            {"op": "product.add", "args": {
+                "name": NAME, "brand": MAKER["name"], "producerKey": MAKER["key"], "category": "pantry",
+                "description": "Quince jelly.", "sellingPrice": f"{listing['price']} each",
+                "photo": work.request["attachments"][0], "imageAlt": ALT,
+            }},
+        ])
+        if out["result"] != "ok":
+            raise AssertionError(out)
+        draft = out["draft"]
+        (path, digest), = draft["assets"].items()
+        old = self.conv.previewer
+        try:
+            self.conv.previewer = self.previewer
+            self.shot = self.conv._capture(draft)
+        finally:
+            self.conv.previewer = old
+        if not self.shot.get("ok"):
+            raise AssertionError(self.shot)
+        return Card(draft, Path(self.shot["png"]).read_bytes(), "raw", path,
+                    digest.removeprefix("sha256:"), "picture: your own photo")
 
 
 class FirstListingEndToEnd(la.LiveAddEndToEnd):
@@ -43,6 +85,8 @@ class FirstListingEndToEnd(la.LiveAddEndToEnd):
             self.repo.state, self.live, conversation.FixtureInterpreter({}), lambda: self.now, _HidePreviewer(),
             photos=_Photos(), npp_stages=_ListingStages(self.live, self.repo.media, True), npp_executor=self.scheduler,
             npp_receipt_for=self.transport.receipt_for)
+        self.stages = _RenderedListingStages(self.conv, self.live, self.repo.media, self.repo.wt)
+        self.conv.npp.stages = self.stages
         self.addCleanup(self.conv.db.close)
         self.live.conv = self.conv  # as host.make_worker does
 
@@ -83,8 +127,22 @@ class FirstListingEndToEnd(la.LiveAddEndToEnd):
         self.transport.receipts[version["outbox_id"]] = dict(
             state="confirmed", png_sha256=version["card_png_sha"], provider_guid="fixture-card", confirmed_at=self.now.isoformat())
         self.sent()
-        (card_text, _png, _digest), = self.transport.cards.values()
+        (card_text, png, digest), = self.transport.cards.values()
         self.assertIn(f"yes {job}-1", card_text)
+        shot = self.stages.shot
+        evidence = shot["cardEvidence"]
+        self.assertEqual(hashlib.sha256(png).hexdigest(), evidence["pngSha256"])
+        self.assertEqual(digest, evidence["pngSha256"])
+        fragments = [part["text"] for part in evidence["fragments"]]
+        self.assertIn(NAME, fragments)
+        self.assertIn("Quince jelly.", fragments)
+        self.assertEqual(fragments[evidence["priceIndex"]], f"${PRICE} each")
+        ocr = picture.read_text(png)
+        self.assertIsNotNone(ocr, "OCR of delivered card failed")
+        for value in (COST, STOCK):
+            self.assertNotIn(value, shot["cardText"])
+            self.assertNotIn(value, " ".join(fragments))
+            self.assertNotIn(value, ocr)
         return job, version["change_id"]
 
     def assert_private_numbers_stay_private(self):

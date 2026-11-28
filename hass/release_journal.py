@@ -176,6 +176,31 @@ def decide(state, facts):
     return state, None
 
 
+DEMO_MARKER = 'demo-lock'  # DEMO-LOCK-1: written and removed only by `host.py demo-lock`, under publish_lock
+
+
+@contextlib.contextmanager
+def publish_lock(root):
+    """The bare release interlock (non-blocking). Books.lock adds the demo marker check; host.py demo-lock uses this one."""
+    fd = os.open(Path(root) / 'publish.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): raise BooksError('release-books')
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally: os.close(fd)
+
+
+def demo_marked(root):
+    """True unless the demo marker is confirmed absent: any lookup error counts as present."""
+    try: os.lstat(Path(root) / DEMO_MARKER)
+    except FileNotFoundError: return False
+    except OSError: return True
+    return True
+
+
 class Books:
     def __init__(self, root):
         self.root = Path(root)
@@ -183,15 +208,10 @@ class Books:
 
     @contextlib.contextmanager
     def lock(self):
-        fd = os.open(self.root / 'publish.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode): raise BooksError('release-books')
-            try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                yield False
-                return
-            yield True
-        finally: os.close(fd)
+        """Every release step (apply, reconcile, operator commands) runs under this lock. While the demo lock marker is
+        present (or its absence cannot be confirmed) the lock is never granted, so no release work touches the site checkout."""
+        with publish_lock(self.root) as held:
+            yield held and not demo_marked(self.root)
 
     def journals(self):
         result = []

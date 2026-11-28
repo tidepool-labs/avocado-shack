@@ -13,6 +13,7 @@ TARGETS = frozenset(('site', 'till', 'local'))
 OFF = re.compile(r'[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?')
 LOCK = re.compile(r'[a-z0-9][a-z0-9-]{0,31}')  # demoLock id; absent demoLock = off
 TREE = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
+ACTIVATION = re.compile(r'[0-9a-f]{32}')  # random per `demo-lock on`
 
 
 class ModeError(ValueError):
@@ -32,12 +33,12 @@ def policy(raw):
         raise ModeError('mode_gen')
     if raw.get('approvals') not in ('hold', 'private', 'live'):
         raise ModeError('approvals')
-    lock = raw.get('demoLock')  # {id, tree}: written only by `host.py demo-lock on`
+    lock = raw.get('demoLock')  # {id, tree, activation}: written only by `host.py demo-lock on`
     if lock is not None:
-        if not (isinstance(lock, dict) and set(lock) == {'id', 'tree'} and all(isinstance(lock[k], str) for k in lock)
-                and LOCK.fullmatch(lock['id']) and TREE.fullmatch(lock['tree'])):
+        if not (isinstance(lock, dict) and set(lock) == {'id', 'tree', 'activation'} and all(isinstance(lock[k], str) for k in lock)
+                and LOCK.fullmatch(lock['id']) and TREE.fullmatch(lock['tree']) and ACTIVATION.fullmatch(lock['activation'])):
             raise ModeError('demoLock')
-        lock = lock['id']
+        lock = lock['id'] + '/' + lock['activation']  # bindings name this one activation, never a reusable label
     return {'live': sorted(live), 'off': sorted(off), 'mode_gen': gen, 'hold': raw['approvals'] == 'hold', 'lock': lock}
 
 

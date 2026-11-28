@@ -12,7 +12,8 @@
   demo-lock    on --id ID | off: DEMO-LOCK-1, the private-demo lock on this one instance (no unit swap). While on, every new draft
                goes to the private writer, only this lock's own private drafts can be undone, and nothing fetches, resets or pushes
                the release site checkout. `on` refuses unless every release journal is settled, no private change is half-applied
-               and Clover writes are off; `off` refuses until the writer tree is back to the tree recorded at `on`.
+               and Clover writes are off; `off` refuses until the writer tree is back to the tree recorded at `on`. Both hold the
+               release interlock; while the `demo-lock` marker beside host.json exists no release step is admitted.
 Exit 0 ok, 2 config / secret / start point / runtime refused (one JSON line, field names only), 1 any other error.
 Nothing prints message text, a sender, a chat id, a URL, a secret or a path.
 """
@@ -561,15 +562,32 @@ def _replace_host(path, updated):
 
 
 def set_demo_lock(path, on, lock_id=None) -> dict:
-    """DEMO-LOCK-1 (see the module docstring). Holds the host lock and the private writer's lock, so no apply runs meanwhile.
+    """DEMO-LOCK-1 (see the module docstring). Holds the host lock, the private writer's lock and the release interlock
+    (publish.lock), so no private apply and no release step runs meanwhile. Release steps take that same interlock and are
+    refused while the marker file beside host.json exists, so a step admitted before `on` has finished before the switch.
     Refusals change nothing and name one fixed reason."""
+    from hass import release_journal
     _private_json(path)
     with editor_mod._writer_lock(Path(path).resolve().parent) as held:
         if not held: return {'result': 'busy'}
         cfg = load_host(path)
         sdir, _ecfg, wt = editor_mod._load(cfg['state'], create=False)
-        with editor_mod._writer_lock(sdir) as writer:
-            return _set_demo_lock(path, cfg, sdir, wt, on, lock_id) if writer else {'result': 'busy'}
+        with editor_mod._writer_lock(sdir) as writer, release_journal.publish_lock(cfg['hostDir']) as release:
+            return _set_demo_lock(path, cfg, sdir, wt, on, lock_id) if writer and release else {'result': 'busy'}
+
+
+def _journal_state(directory, *, files_only):
+    """'absent' | 'empty' | 'entries' | 'unreadable'. Only a confirmed missing path is absent; a path that is not a plain
+    directory, cannot be listed, or (files_only) holds anything but plain files is unreadable."""
+    try: st = os.lstat(directory)
+    except FileNotFoundError: return 'absent'
+    except OSError: return 'unreadable'
+    if not stat.S_ISDIR(st.st_mode): return 'unreadable'
+    try:
+        with os.scandir(directory) as it: entries = list(it)
+        if files_only and not all(e.is_file(follow_symlinks=False) for e in entries): return 'unreadable'
+    except OSError: return 'unreadable'
+    return 'entries' if entries else 'empty'
 
 
 def _writer_tree(wt):
@@ -580,29 +598,51 @@ def _writer_tree(wt):
 
 
 def _set_demo_lock(path, cfg, sdir, wt, on, lock_id):
-    raw = _private_json(path)
-    lock = raw.get('demoLock')
+    from hass import release_journal
+    raw = _private_json(path)  # re-read under all three locks
+    lock, hdir = raw.get('demoLock'), Path(cfg['hostDir'])
+    marker = hdir / release_journal.DEMO_MARKER
     refuse = lambda reason: Refuse({'result': 'refused', 'reason': reason})  # noqa: E731
-    if any((sdir / 'journal').glob('chg-*.json')): raise refuse('private-change-unsettled')
+    private = _journal_state(sdir / 'journal', files_only=True)  # a settled private apply leaves no journal file at all
+    if private == 'unreadable': raise refuse('private-journal')
+    if private == 'entries': raise refuse('private-change-unsettled')
     tree = _writer_tree(wt)
     if tree is None: raise refuse('writer-tree')
-    if on:
-        if lock is not None: raise refuse('already-on')
-        if not isinstance(lock_id, str) or not sandbox.LOCK.fullmatch(lock_id): raise refuse('lock-id')
-        if (cfg.get('clover') or {}).get('writeMode') is not None: raise refuse('clover-writes')
-        if (Path(cfg['hostDir']) / 'releases').exists():
-            from hass import release_journal
-            try: entries = release_journal.Books(cfg['hostDir']).journals()
-            except (release_journal.BooksError, OSError, ValueError): raise refuse('release-books') from None
-            if any(j['state'] not in release_journal.CLOSED for j in entries): raise refuse('release-unsettled')
-        updated = {**raw, 'demoLock': {'id': lock_id, 'tree': tree}}
-    else:
-        if lock is None: raise refuse('already-off')
+    if not on:
+        if lock is None:
+            if not release_journal.demo_marked(hdir): raise refuse('already-off')
+            marker.unlink()  # an `off` interrupted after host.json was written: finish it
+            return {"result": "ok", "demoLock": "off", "next": "systemctl --user restart hass-worker"}
         if tree != lock['tree']: raise refuse('demo-change-present')
         updated = {k: v for k, v in raw.items() if k != 'demoLock'}
-    updated['mode_gen'] = sandbox.policy(raw)['mode_gen'] + 1  # every waiting draft must be prepared again
-    _replace_host(path, updated)
-    return {"result": "ok", "demoLock": "on" if on else "off", "next": "systemctl --user restart hass-worker"}
+        updated['mode_gen'] = sandbox.policy(raw)['mode_gen'] + 1
+        _replace_host(path, updated)  # routing back first; the release interlock opens only after that
+        marker.unlink(missing_ok=True)
+        return {"result": "ok", "demoLock": "off", "next": "systemctl --user restart hass-worker"}
+    if lock is not None: raise refuse('already-on')
+    if release_journal.demo_marked(hdir): raise refuse('demo-marker')
+    if not isinstance(lock_id, str) or not sandbox.LOCK.fullmatch(lock_id): raise refuse('lock-id')
+    if (cfg.get('clover') or {}).get('writeMode') is not None: raise refuse('clover-writes')
+    releases = _journal_state(hdir / 'releases', files_only=False)
+    if releases == 'unreadable': raise refuse('release-books')
+    if releases != 'absent':
+        try: entries = release_journal.Books(hdir).journals()
+        except (release_journal.BooksError, OSError, ValueError): raise refuse('release-books') from None
+        if any(j['state'] not in release_journal.CLOSED for j in entries): raise refuse('release-unsettled')
+    activation = secrets.token_hex(16)  # this activation only: a later `on` with the same id is a different lock
+    updated = {**raw, 'demoLock': {'id': lock_id, 'tree': tree, 'activation': activation},
+               'mode_gen': sandbox.policy(raw)['mode_gen'] + 1}  # every waiting draft must be prepared again
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)  # interlock first, then routing
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(activation + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        _replace_host(path, updated)
+    except BaseException:
+        with contextlib.suppress(OSError): marker.unlink()
+        raise
+    return {"result": "ok", "demoLock": "on", "next": "systemctl --user restart hass-worker"}
 
 
 def _run(args, root, clock):

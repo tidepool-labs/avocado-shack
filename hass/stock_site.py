@@ -287,19 +287,22 @@ def decision(state, code, owner, yes):
 def approve(state, code, owner): return decision(state, code, owner, True)
 def decline(state, code, owner): return decision(state, code, owner, False)
 
-def main():
-    from hass import host, publish_live, sandbox
+def main(argv=None):
+    from hass import host, publish_live, release_journal, sandbox
     from hass.clover.config import from_settings
     from hass.sandbox_editor import SiteEditor
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('command', choices=['run']); ap.add_argument('--host', required=True)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     try:
         cfg = host.load_host(args.host)
         clover = from_settings(cfg['clover'])
         if clover.site_stock == 'off': return 0
         mode = sandbox.policy(cfg)
         if mode['hold'] or 'site' not in mode['live']: return 0
+        # DEMO-LOCK-1: nothing below may run while the demo lock is on (or half switched): the release engine is never built,
+        # so no reconcile, baseline or apply reads or changes the release site checkout.
+        if mode['lock'] or release_journal.demo_marked(cfg['hostDir']): return 0
         live = publish_live.LiveEditor(cfg['state'], cfg['release'], Path(args.host).resolve().parent)
         site = SiteEditor(cfg['state'], host.site_gate(cfg), lambda: live)
         live.environment_guard = site.check_environment

@@ -9,6 +9,11 @@
                `clover` block and its token file by stat only ("clover": "not configured" | "ok" | one problem word).
   mode         MODE: HASS-LIVE-PLAN-1, the one-line switch: rewrites `approvals` (hold | private | live) in host.json, keeping it 0600,
                and refuses (changing nothing) if the result would not load. Then `systemctl --user restart hass-worker`.
+  demo-lock    on --id ID | off: DEMO-LOCK-1, the private-demo lock on this one instance (no unit swap). While on, every new draft
+               goes to the private writer, only this lock's own private drafts can be undone, and nothing fetches, resets or pushes
+               the release site checkout. `on` refuses unless every release journal is settled, no private change is half-applied
+               and Clover writes are off; `off` refuses until the writer tree is back to the tree recorded at `on`. Both hold the
+               release interlock; while the `demo-lock` marker beside host.json exists no release step is admitted.
 Exit 0 ok, 2 config / secret / start point / runtime refused (one JSON line, field names only), 1 any other error.
 Nothing prints message text, a sender, a chat id, a URL, a secret or a path.
 """
@@ -28,8 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG = logging.getLogger("hass.host")
 MAX_HOST_JSON, MAX_BODY, ROUTES = 64 * 1024, 64 * 1024, ("/v1/inbound", "/v1/relay", "/v1/photo")
 METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"})  # a logged method is one of these, never client text
-KEYS = {"state", "secretFile", "listen", "allowedPeers", "approvals", "interpreter", "previewer", "runtimeCommit", "pictures", "photos", "release", "clover", "live", "off", "mode_gen", "looks"}
-OPTIONAL = {"previewer", "pictures", "photos", "release", "clover", "live", "off", "mode_gen", "looks"}  # HASS-CLOVER-2: `clover` absent = Clover not configured; nothing else changes
+KEYS = {"state", "secretFile", "listen", "allowedPeers", "approvals", "interpreter", "previewer", "runtimeCommit", "pictures", "photos", "release", "clover", "live", "off", "mode_gen", "looks", "demoLock"}
+OPTIONAL = {"previewer", "pictures", "photos", "release", "clover", "live", "off", "mode_gen", "looks", "demoLock"}  # HASS-CLOVER-2: `clover` absent = Clover not configured; nothing else changes
 PHOTO_BODY, PHOTOS_PER_MIN = 12 * 1024 * 1024, 8
 PICTURES_PER_MIN = 10  # HASS-ATTACH-1: more picture requests in a minute get `gone` with no data
 TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
@@ -538,6 +543,12 @@ def _set_mode(path, mode, target) -> dict:
     elif mode != 'hold': live.discard(target)
     approvals = 'hold' if mode == 'hold' else ('live' if 'site' in live else 'private')
     updated = {**raw, 'approvals': approvals, 'live': sorted(live), 'mode_gen': current['mode_gen'] + 1}
+    _replace_host(path, updated)
+    return {"result": "ok", "approvals": approvals, "next": "systemctl --user restart hass-worker"}
+
+
+def _replace_host(path, updated):
+    """Write host.json atomically (same folder, 0600, replaced in one step); the new file must load or the old one stays."""
     target = Path(path)
     tmp = target.with_name(target.name + ".mode.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -548,11 +559,98 @@ def _set_mode(path, mode, target) -> dict:
     except BaseException:
         with contextlib.suppress(OSError): os.unlink(tmp)
         raise
-    return {"result": "ok", "approvals": approvals, "next": "systemctl --user restart hass-worker"}
+
+
+def set_demo_lock(path, on, lock_id=None) -> dict:
+    """DEMO-LOCK-1 (see the module docstring). Holds the host lock, the private writer's lock and the release interlock
+    (publish.lock), so no private apply and no release step runs meanwhile. Release steps take that same interlock and are
+    refused while the marker file beside host.json exists, so a step admitted before `on` has finished before the switch.
+    Refusals change nothing and name one fixed reason."""
+    from hass import release_journal
+    _private_json(path)
+    with editor_mod._writer_lock(Path(path).resolve().parent) as held:
+        if not held: return {'result': 'busy'}
+        cfg = load_host(path)
+        sdir, _ecfg, wt = editor_mod._load(cfg['state'], create=False)
+        with editor_mod._writer_lock(sdir) as writer, release_journal.publish_lock(cfg['hostDir']) as release:
+            return _set_demo_lock(path, cfg, sdir, wt, on, lock_id) if writer and release else {'result': 'busy'}
+
+
+def _journal_state(directory, *, files_only):
+    """'absent' | 'empty' | 'entries' | 'unreadable'. Only a confirmed missing path is absent; a path that is not a plain
+    directory, cannot be listed, or (files_only) holds anything but plain files is unreadable."""
+    try: st = os.lstat(directory)
+    except FileNotFoundError: return 'absent'
+    except OSError: return 'unreadable'
+    if not stat.S_ISDIR(st.st_mode): return 'unreadable'
+    try:
+        with os.scandir(directory) as it: entries = list(it)
+        if files_only and not all(e.is_file(follow_symlinks=False) for e in entries): return 'unreadable'
+    except OSError: return 'unreadable'
+    return 'entries' if entries else 'empty'
+
+
+def _writer_tree(wt):
+    """The private writer's committed tree, only when its worktree is clean (else None)."""
+    def git(*args): return subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True)
+    status, tree = git("status", "--porcelain", "--untracked-files=all"), git("rev-parse", "HEAD^{tree}")
+    return tree.stdout.strip() if status.returncode == 0 and not status.stdout and tree.returncode == 0 else None
+
+
+def _set_demo_lock(path, cfg, sdir, wt, on, lock_id):
+    from hass import release_journal
+    raw = _private_json(path)  # re-read under all three locks
+    lock, hdir = raw.get('demoLock'), Path(cfg['hostDir'])
+    marker = hdir / release_journal.DEMO_MARKER
+    refuse = lambda reason: Refuse({'result': 'refused', 'reason': reason})  # noqa: E731
+    private = _journal_state(sdir / 'journal', files_only=True)  # a settled private apply leaves no journal file at all
+    if private == 'unreadable': raise refuse('private-journal')
+    if private == 'entries': raise refuse('private-change-unsettled')
+    tree = _writer_tree(wt)
+    if tree is None: raise refuse('writer-tree')
+    if not on:
+        if lock is None:
+            if not release_journal.demo_marked(hdir): raise refuse('already-off')
+            marker.unlink()  # an `off` interrupted after host.json was written: finish it
+            return {"result": "ok", "demoLock": "off", "next": "systemctl --user restart hass-worker"}
+        if tree != lock['tree']: raise refuse('demo-change-present')
+        updated = {k: v for k, v in raw.items() if k != 'demoLock'}
+        updated['mode_gen'] = sandbox.policy(raw)['mode_gen'] + 1
+        _replace_host(path, updated)  # routing back first; the release interlock opens only after that
+        marker.unlink(missing_ok=True)
+        return {"result": "ok", "demoLock": "off", "next": "systemctl --user restart hass-worker"}
+    if lock is not None: raise refuse('already-on')
+    if release_journal.demo_marked(hdir): raise refuse('demo-marker')
+    if not isinstance(lock_id, str) or not sandbox.LOCK.fullmatch(lock_id): raise refuse('lock-id')
+    if (cfg.get('clover') or {}).get('writeMode') is not None: raise refuse('clover-writes')
+    releases = _journal_state(hdir / 'releases', files_only=False)
+    if releases == 'unreadable': raise refuse('release-books')
+    if releases != 'absent':
+        try: entries = release_journal.Books(hdir).journals()
+        except (release_journal.BooksError, OSError, ValueError): raise refuse('release-books') from None
+        if any(j['state'] not in release_journal.CLOSED for j in entries): raise refuse('release-unsettled')
+    activation = secrets.token_hex(16)  # this activation only: a later `on` with the same id is a different lock
+    updated = {**raw, 'demoLock': {'id': lock_id, 'tree': tree, 'activation': activation},
+               'mode_gen': sandbox.policy(raw)['mode_gen'] + 1}  # every waiting draft must be prepared again
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)  # interlock first, then routing
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(activation + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        _replace_host(path, updated)
+    except BaseException:
+        # Reopen the interlock only when host.json is confirmed back without a demo lock; an `on` interrupted after the
+        # replace (or an unreadable host.json) keeps the marker, and `off` finishes the switch.
+        with contextlib.suppress(Exception):
+            if 'demoLock' not in _private_json(path): marker.unlink()
+        raise
+    return {"result": "ok", "demoLock": "on", "next": "systemctl --user restart hass-worker"}
 
 
 def _run(args, root, clock):
     if args.cmd == "mode": return set_mode(args.host, args.value, args.target)
+    if args.cmd == "demo-lock": return set_demo_lock(args.host, args.value == "on", args.id)
     if args.cmd == "start-point":
         cfg = load_host(args.host)
         _worktree(cfg)
@@ -588,11 +686,14 @@ def _run(args, root, clock):
 def main(argv=None, *, root=ROOT, clock=_now) -> int:
     ap = argparse.ArgumentParser(prog="hass/host.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("serve", "work", "check", "start-point", "mode"):
+    for name in ("serve", "work", "check", "start-point", "mode", "demo-lock"):
         p = sub.add_parser(name)
         if name == "mode":
             p.add_argument("value", choices=("hold", "private", "sandbox", "live"))
             p.add_argument("--target", choices=("site", "till"), default="site")
+        if name == "demo-lock":
+            p.add_argument("value", choices=("on", "off"))
+            p.add_argument("--id")
         p.add_argument("--host", required=True)
         if name == "start-point": p.add_argument("--at", required=True)
     args = ap.parse_args(argv)

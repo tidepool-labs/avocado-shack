@@ -176,12 +176,12 @@ def decide(state, facts):
     return state, None
 
 
-DEMO_MARKER = 'demo-lock'  # DEMO-LOCK-1 release pause beside host.json: no release step is admitted while it exists
+DEMO_MARKER = 'demo-lock'  # DEMO-LOCK-1: written and removed only by `host.py demo-lock`, under publish_lock
 
 
 @contextlib.contextmanager
 def publish_lock(root):
-    """The bare release interlock (non-blocking). Books.lock adds the pause-marker check; the demo-lock switch uses this one."""
+    """The bare release interlock (non-blocking). Books.lock adds the demo marker check; host.py demo-lock uses this one."""
     fd = os.open(Path(root) / 'publish.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode): raise BooksError('release-books')

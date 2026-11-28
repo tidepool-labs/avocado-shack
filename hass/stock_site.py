@@ -300,8 +300,9 @@ def main(argv=None):
         if clover.site_stock == 'off': return 0
         mode = sandbox.policy(cfg)
         if mode['hold'] or 'site' not in mode['live']: return 0
-        # DEMO-LOCK-1: while the release pause marker exists (or its absence is unconfirmed) the release engine is never built.
-        if release_journal.demo_marked(cfg['hostDir']): return 0
+        # DEMO-LOCK-1: nothing below may run while the demo lock is on (or half switched): the release engine is never built,
+        # so no reconcile, baseline or apply reads or changes the release site checkout.
+        if mode['lock'] or release_journal.demo_marked(cfg['hostDir']): return 0
         live = publish_live.LiveEditor(cfg['state'], cfg['release'], Path(args.host).resolve().parent)
         site = SiteEditor(cfg['state'], host.site_gate(cfg), lambda: live)
         live.environment_guard = site.check_environment

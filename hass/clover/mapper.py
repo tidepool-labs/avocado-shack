@@ -12,7 +12,7 @@ curly apostrophes ignored; nothing else), and only when exactly one item answers
 import re
 import unicodedata
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import MAX_EMAX, MIN_EMIN, ROUND_DOWN, ROUND_HALF_UP, Context, Decimal, InvalidOperation
 
 from hass.content_model import SELLING_PRICE_RE
 
@@ -21,6 +21,9 @@ AVAILABILITY = ("yes", "limited", "no")                                         
 PRICE_TYPES = ("FIXED", "VARIABLE", "PER_UNIT")
 MAX_PRICE_CENTS = 100_000          # $1,000.00: a typo guard (a misread number), changed in config, not a business rule
 MAX_NAME = 100
+MAX_PLAIN_DIGITS = 1000            # a till count prints in exact plain digits up to this many; longer prints in exponent form (format_quantity)
+ARITH = Context(prec=28, Emax=MAX_EMAX, Emin=MIN_EMIN, traps=[])   # sums and differences of till counts: a huge count (1E+2000000) never overflows into a traceback
+_BOUNDED = Context(prec=MAX_PLAIN_DIGITS, rounding=ROUND_DOWN, Emax=MAX_EMAX, Emin=MIN_EMIN, traps=[])   # exponent form: no overflow, no trap
 
 
 class MapError(ValueError):
@@ -65,9 +68,33 @@ def pct_change(old_cents, new_cents):
     return (Decimal(new_cents - old_cents) * 100 / Decimal(old_cents)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
+def plain_length(d):
+    """Characters of digits in the exact plain (no exponent) form of a finite Decimal; computed from the tuple, so no huge string is built."""
+    _, digits, exp = d.as_tuple()
+    return len(digits) + exp if exp >= 0 else max(len(digits), -exp) + 1
+
+
 def format_quantity(q):
-    """12, 12.5 (never 12.0, never an exponent)."""
-    return format(Decimal(q).quantize(Decimal("0.001")).normalize(), "f")
+    """12, 12.5 (never 12.0). Rounds to three places, but a nonzero count that would round to 0 (or -0) prints its exact plain digits
+    instead (0.0004 -> '0.0004'; 1E+64 -> 1 and 64 zeros; 4E-300 -> 0. 299 zeros 4). Zero of either sign, whatever its exponent, is '0'.
+    A finite count whose plain form is longer than MAX_PLAIN_DIGITS (1E+1000, 4E-1000) is never expanded (that would build a string as long
+    as the exponent): it prints exactly in exponent form (1E+1000), by its tuple and without a long string, so the answer stays short; only a
+    count carrying more than MAX_PLAIN_DIGITS significant digits is cut (toward zero) to that many. Never raises for a finite count."""
+    d = Decimal(q)
+    if not d.is_finite():
+        return format(d.quantize(Decimal("0.001")).normalize(), "f")    # NaN / Infinity: refused as before
+    if not d:
+        return "0"
+    if plain_length(d) > MAX_PLAIN_DIGITS:
+        return format(_BOUNDED.normalize(d), "E")
+    try:
+        rounded = d.quantize(Decimal("0.001"))
+    except InvalidOperation:            # more digits than the default context holds
+        rounded = None
+    if rounded:                         # nonzero after rounding: unchanged behaviour (0.0006 -> '0.001')
+        return format(rounded.normalize(), "f")
+    text = format(d, "f")               # exact digits, no rounding, no exponent
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 # ---------------------------------------------------------------------------------------------------------- names
@@ -129,6 +156,8 @@ def _decimal(v):
         d = Decimal(str(v))
     except InvalidOperation:
         return None
+    # Not finite: no usable count, like a missing one. Every finite count is kept (zero of any exponent is still sold out); format_quantity
+    # prints a very long one in bounded exponent form.
     return d if d.is_finite() else None
 
 

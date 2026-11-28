@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from hass.clover import reads
+from hass.clover import mapper, reads
 from hass.tests.test_clover_mapper import item, items
 
 PT = reads.PACIFIC
@@ -76,6 +76,39 @@ class HowManyTests(unittest.TestCase):
         self.assertIn("More than one item is called that", got)
         self.assertIn("SKU none", got)
         self.assertIn("SKU S-9", got)
+
+    # Contract: reads answer for every count the mapper admits (spec: exact digits for huge and tiny counts; never a traceback). Bug caught:
+    # a length cap in format_quantity raised InvalidOperation out of in_stock / how_many / low_stock for 1E+64 and 4E-64, and a lossy
+    # fallback printed 4E-300 as '4E-300'.
+    def test_in_stock_answers_for_huge_and_tiny_counts(self):
+        edge = Decimal("1E+%d" % (mapper.MAX_PLAIN_DIGITS - 1))
+        for raw, shown in (("1E+64", "1" + "0" * 64), ("4E-64", "0." + "0" * 63 + "4"), ("-4E-64", None), ("4E-300", "0." + "0" * 299 + "4"),
+                           ("1.234567890123456789E+300", "1234567890123456789" + "0" * 282), (str(edge), "1" + "0" * (int(edge.adjusted()))), ):
+            with self.subTest(raw=raw[:24]):
+                s = snap(extra=[item(id="X9", name="Saffron", stock=Decimal(raw))])
+                got = reads.in_stock("saffron", s, NOW)
+                if shown is None:
+                    self.assertEqual(got, "No, Saffron is sold out in the till.")    # negative: sold out, no number printed
+                else:
+                    self.assertEqual(got, f"Yes, Saffron: {shown} in the till.")
+                self.assertTrue(reads.how_many("saffron", s, NOW).startswith("Saffron: "))
+                self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+1000")))
+
+    # Contract: a count past the plain-digit boundary is still the till's count: answered in bounded exponent form, never "the till keeps no
+    # count"; zero of any exponent is sold out. Bug caught: admission by plain length reported 1E+1000 and 0E-1000 as untracked.
+    def test_counts_past_the_plain_digit_boundary_and_zero_exponents_answer_truthfully(self):
+        edge = mapper.MAX_PLAIN_DIGITS
+        for raw, got in (("1E+%d" % edge, "Yes, Saffron: 1E+%d in the till." % edge), ("1E+1000", "Yes, Saffron: 1E+1000 in the till."),
+                         ("4E-1000", "Yes, Saffron: 4E-1000 in the till."), ("1.5E+2000000", "Yes, Saffron: 1.5E+2000000 in the till."),
+                         ("4E-999999999999999999", "Yes, Saffron: 4E-999999999999999999 in the till."),
+                         ("1E+999999999999999999", "Yes, Saffron: 1E+999999999999999999 in the till."),
+                         ("0E-1000", "No, Saffron is sold out in the till."), ("0E+1000", "No, Saffron is sold out in the till."),
+                         ("-0E+999999999999999999", "No, Saffron is sold out in the till.")):
+            with self.subTest(raw=raw):
+                s = snap(extra=[mapper.parse_item({"id": "X9", "name": "Saffron", "itemStock": {"quantity": raw}})])
+                self.assertEqual(reads.in_stock("saffron", s, NOW), got)
+                self.assertNotIn("keeps no count", reads.how_many("saffron", s, NOW))
+                self.assertIn("Saffron", reads.low_stock(s, NOW, Decimal("1E+999999999999999999")))
 
 
 def mugs(n, minutes_old=5):

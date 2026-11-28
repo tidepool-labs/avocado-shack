@@ -1,5 +1,20 @@
 import {productDetails} from './product-details.mjs';
 // Interpretation only. Commerce arithmetic and authorization never run in the interpreter.
+const detailLabels={description:'description', 'package size':'package_size',ingredients:'ingredients',allergens:'allergens',handling:'handling',category:'category'};
+const detailField=new RegExp(String.raw`^\s*(?:${Object.keys(detailLabels).join('|')})\s*[:=]`,'i');
+
+function stockCue(words) {
+ const cue=String.raw`\b(?:${words})\b`;
+ const units='(?:each|jars?|bottles?|bags?|loaf|loaves|bunch(?:es)?|box(?:es)?)';
+ return new RegExp([
+  String.raw`\b\d+\s*(?:${units}\s+)?(?:(?:is|are)\s+)?${cue}`, // 12 new jars; 12 jars total
+  String.raw`${cue}\s*(?:of\s+|[:=]\s*)?\d+\b`, // received 12; total of 12
+  String.raw`(?:^|[;,\n])\s*(?:(?:a|the)\s+)?${cue}(?:\s+for\s+online(?:\s+pickup)?)?\s*[.!]?\s*(?=$|[;,\n])` // direct stock reply
+ ].join('|'),'i');
+}
+const receiptCue=stockCue(String.raw`new(?:\s+(?:arrival|stock))?|received|arrival`);
+const recountCue=stockCue(String.raw`(?:total\s+)?(?:now\s+)?available|total|recount`);
+
 export function interpret(message, previous={}) {
  const f={...previous}; const t=message.trim();
  // Prefer explicitly delimited identity; never name a shelf as a product.
@@ -11,16 +26,20 @@ export function interpret(message, previous={}) {
  const price=t.match(/\$\s*(\d+(?:\.\d{1,2})?)(?![\d.]|,\d)(?:\s*(?:\/|per\s+)?(each|jar|bottle|bag|loaf|bunch|box|lb|pound)\b)?/i);
  if(price){f.price_minor=Math.round(Number(price[1])*100);if(price[2])f.unit=price[2].toLowerCase();}
  const unit=t.match(/(?:unit)\s*[:=]\s*(each|jar|bottle|bag|loaf|bunch|box|lb|pound)\b/i);if(unit)f.unit=unit[1].toLowerCase();
- const stockText=t.replace(/\$\s*\d+[\d.,]*(?:\s*(?:\/|per\s+)?(?:each|jar|bottle|bag|loaf|bunch|box|lb|pound)\b)?/gi,' ');
- if(/(?:quantity|qty)\s*[:=]|[\d.,-]+\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i.test(t))delete f.quantity;
+ const listing=simple||namedPrice;
+ const stockText=t.split(/[;\n]/).map((part,index)=>{
+  if(detailField.test(part))return '';
+  if(index===0&&listing)return part.slice(listing[1].length);
+  return part.replace(/^\s*(?:product|name)\s*[:=][^,$]*/i,'');
+ }).join(';').replace(/\$\s*[+-]?[\d.,]*\d/g,'$'); // Keep $ so a price total is not a standalone stock reply.
+ if(/(?:quantity|qty)\s*[:=]|\d[\d.,-]*\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i.test(stockText))delete f.quantity;
  const qty=stockText.match(/(?:quantity|qty)\s*[:=]\s*(\d+)(?![\d.,])(?=\s|;|$)/i)||stockText.match(/(?<![\d.,-])(\d+)\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i);
  if(qty)f.quantity=Number(qty[1]);
  if(/(?:online\s+(?:pickup|stock|bin)|for\s+online)/i.test(t)) f.stock_pool='online';
- if(/\b(new|received|arrival)\b/i.test(t)) f.stock_action='receipt';
- else if(/\b(total|available|recount)\b/i.test(t))f.stock_action='recount';
  const action=t.match(/(?:action)\s*[:=]\s*(receipt|recount|transfer|correction)/i);
  if(action)f.stock_action=action[1].toLowerCase();
- const detailLabels={description:'description', 'package size':'package_size',ingredients:'ingredients',allergens:'allergens',handling:'handling',category:'category'};
+ else if(receiptCue.test(stockText))f.stock_action='receipt';
+ else if(recountCue.test(stockText))f.stock_action='recount';
  for(const [label,key] of Object.entries(detailLabels)){const match=t.match(new RegExp('(?:^|[;\\n])\\s*'+label+'\\s*[:=]\\s*([^;\\n]*)','i'));if(match)f[key]=match[1].trim();}
  Object.assign(f,productDetails(f));if(f.category!==undefined&&(typeof f.category!=='string'||!f.category||f.category.length>80))throw Object.assign(new Error('Use a category name between 1 and 80 characters.'),{status:422});
  if(/\b(?:cider|alcohol|wine|beer)\b/i.test(f.name||''))f.restricted=true;

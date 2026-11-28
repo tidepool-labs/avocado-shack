@@ -5,6 +5,11 @@ export function pickupCommand(message){
 }
 
 export function assertPickupWindows(proposed,current){
- const expected=new Map(proposed.map(s=>[s.id,s.version]));
- if(!current.length||expected.size!==proposed.length||current.length!==expected.size||current.some(s=>expected.get(s.id)!==s.version))throw Object.assign(new Error('The pickup windows changed or expired. Send a new request and review it.'),{status:409});
+ const remaining=new Map(proposed.map(s=>[s.id,s.version]));
+ const conflict=()=>Object.assign(new Error('The pickup windows changed or expired. Send a new request and review it.'),{status:409});
+ if(!current.length||remaining.size!==proposed.length||current.length!==remaining.size)throw conflict();
+ for(const {id,version} of current){
+  if(!remaining.has(id)||remaining.get(id)!==version)throw conflict();
+  remaining.delete(id);
+ }
 }

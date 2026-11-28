@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare NPP golden cards with an offline copy of the product catalog."""
+"""Compare NPP golden-card fields with an offline catalog copy; no rendering."""
 
 import argparse
 import json
@@ -74,6 +74,8 @@ def main(argv=None):
         failures.append("unreadable products")
 
     goldens = sorted(args.golden.glob("*.json"))
+    if not goldens:
+        failures.append("no-goldens")
     matched = 0
     for path in goldens:
         try:

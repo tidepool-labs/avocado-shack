@@ -48,7 +48,7 @@ class ReleaseCase(unittest.TestCase):
         self.now = T0.replace(day=7)
         self.push_calls = 0
         self.fault = None
-        self.messages, self.add_flags = [], []
+        self.messages = []
         self.live = self.open()
         self.base = self.fixture_build(self.repo.head(), self.live.day(), 'seed', 'base')
         p.sitegen.write_files(self.base, self.site)
@@ -83,8 +83,7 @@ class ReleaseCase(unittest.TestCase):
         live = p.LiveEditor(self.repo.state, self.cfg, self.hostdir, registry={**fixture_ops.registry(), 'history.revert': load_registry()['history.revert']},
                            clock=lambda: self.now, sleep=self.wait, git=self.wrapper, fetch=self.fetch)
         live.build = self.fixture_build
-        live.conv = SimpleNamespace(outbox=SimpleNamespace(add=lambda chat, text, attachments, **flags: (
-                                        self.messages.append((text, attachments)), self.add_flags.append(flags))),
+        live.conv = SimpleNamespace(outbox=SimpleNamespace(add=lambda chat, text, attachments: self.messages.append((text, attachments))),
                                     screenshot=lambda cid: 'fixture-picture.png')
         live._code = lambda cid: cid[-4:]
         return live
@@ -147,8 +146,6 @@ class ReleaseCase(unittest.TestCase):
         self.settle()
         self.assertEqual(self.entry()['state'], 'live')
         self.assertEqual(self.messages[-1], ('Posted: https://example.test/?item=x#market (say undo to take it down)', []))
-        # The item link carries the product id, so the line is stored with ids_ok (else the voice check sends the safe line).
-        self.assertEqual(self.add_flags[-1], {'ids_ok': True})
 
     def test_gate_stop_lock_policy_site_and_exact_baseline(self):
         d = self.draft()

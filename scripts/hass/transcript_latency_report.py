@@ -40,7 +40,7 @@ def figures(values):
     return values[(n - 1) // 2], values[(9 * n - 1) // 10], values[-1]
 
 
-def report(db, since, until):
+def report(db, since, until, *, require_latency=False):
     count = unparsed = null_latency = bad_latency = 0
     values = []
     by_kind = {}
@@ -74,7 +74,12 @@ def report(db, since, until):
     for label, group in sorted(by_kind.items()):
         p50, p90, maximum = figures(group)
         print(f"kind {label} p50_ms {p50} p90_ms {p90} max_ms {maximum}")
-    return f"bad-latency {bad_latency}" if bad_latency else None
+    findings = []
+    if bad_latency:
+        findings.append(f"bad-latency {bad_latency}")
+    if require_latency and count > 0 and not values:
+        findings.append("no-latency-samples")
+    return findings
 
 
 def _temp_candidates():
@@ -122,25 +127,25 @@ def _open_snapshot(path, temp_parent):
             yield db
 
 
-def check_store(path, since, until, state):
+def check_store(path, since, until, state, *, require_latency=False):
     try:
         mode = os.lstat(path).st_mode
     except FileNotFoundError:
-        return f"missing-db {DB_NAME}"
+        return [f"missing-db {DB_NAME}"]
     except (OSError, ValueError):
-        return f"not-sqlite {DB_NAME}"
+        return [f"not-sqlite {DB_NAME}"]
     if not stat.S_ISREG(mode):
-        return f"unsafe-db {DB_NAME}"
+        return [f"unsafe-db {DB_NAME}"]
     if since is None or until is None:
-        return None
+        return []
     try:
         temp_parent = _private_temp_parent((state, path.parent))
         if temp_parent is None:
-            return "temp-unavailable"
+            return ["temp-unavailable"]
         with _open_snapshot(path, temp_parent) as db:
-            return report(db, since, until)
+            return report(db, since, until, require_latency=require_latency)
     except (OSError, ValueError, sqlite3.Error):
-        return f"not-sqlite {DB_NAME}"
+        return [f"not-sqlite {DB_NAME}"]
 
 
 def main(argv=None):
@@ -148,6 +153,8 @@ def main(argv=None):
     parser.add_argument("--state", type=Path, required=True, help="directory containing the transcript")
     parser.add_argument("--since", required=True, help="inclusive timezone-aware ISO timestamp")
     parser.add_argument("--until", required=True, help="exclusive timezone-aware ISO timestamp")
+    parser.add_argument("--require-latency", action="store_true",
+                        help="fail if the window has inbound events but no measured latency")
     args = parser.parse_args(argv)
 
     since, until = aware_time(args.since), aware_time(args.until)
@@ -155,9 +162,8 @@ def main(argv=None):
     if since is None or until is None or since >= until:
         findings.append("bad-window")
         since = until = None
-    finding = check_store(args.state / DB_NAME, since, until, args.state)
-    if finding:
-        findings.append(finding)
+    findings.extend(check_store(args.state / DB_NAME, since, until, args.state,
+                                require_latency=args.require_latency))
     for finding in findings:
         print(f"FAIL {finding}")
     print(f"{'FAIL' if findings else 'PASS'} {NAME}")

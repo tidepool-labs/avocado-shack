@@ -39,8 +39,9 @@ class TranscriptLatencyReportTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], cwd=self.root,
                               capture_output=True, text=True, timeout=10)
 
-    def invoke(self, since=SINCE, until=UNTIL):
-        return self.run_cli("--state", str(self.state), "--since", since, "--until", until)
+    def invoke(self, since=SINCE, until=UNTIL, *, require_latency=False):
+        extra = ("--require-latency",) if require_latency else ()
+        return self.run_cli("--state", str(self.state), "--since", since, "--until", until, *extra)
 
     def assert_outcome(self, result, code, last):
         self.assertEqual(result.returncode, code, result.stderr)
@@ -135,6 +136,10 @@ class TranscriptLatencyReportTests(unittest.TestCase):
         self.assertCountEqual(lines[:-1], ["count 6", "unparsed 1", "null-latency 1", "p50_ms 0",
                                           "p90_ms 0", "max_ms 0", "kind text p50_ms 0 p90_ms 0 max_ms 0",
                                           "FAIL bad-latency 4"])
+        self.assert_findings(self.invoke(require_latency=True), "bad-latency 4")
+        self.db.unlink()
+        self.create([(SINCE, "in", "text", -1)])
+        self.assert_findings(self.invoke(require_latency=True), "bad-latency 1", "no-latency-samples")
 
     def test_c3_usage_exit_2(self):
         # Keep malformed CLI shape in argparse, not in the report findings protocol.
@@ -306,6 +311,28 @@ class TranscriptLatencyReportTests(unittest.TestCase):
         lines = self.assert_outcome(self.invoke(), 0, PASS)
         self.assertCountEqual(lines[:-1], ["count 11", "unparsed 0", "null-latency 1", "p50_ms 8",
                                           "p90_ms 90", "max_ms 100", "kind text p50_ms 8 p90_ms 90 max_ms 100"])
+        mixed = self.assert_outcome(self.invoke(require_latency=True), 0, PASS)
+        self.assertEqual(mixed, lines)
+
+        # An active all-NULL window used to pass. Neither an outbound measurement
+        # nor one at the exclusive end can make it a valid trend sample.
+        self.db.unlink()
+        self.create([(SINCE, "in", "text", None), (SINCE, "out", "text", 17), (UNTIL, "in", "text", 17)])
+        legacy = self.assert_outcome(self.invoke(), 0, PASS)
+        self.assertIn("count 1", legacy)
+        self.assertIn("null-latency 1", legacy)
+        self.assertIn("p50_ms none", legacy)
+        missing = self.assert_findings(self.invoke(require_latency=True), "no-latency-samples")
+        self.assertEqual(missing[:-2], legacy[:-1])
+
+        empty = self.assert_outcome(self.invoke(since="2030-03-01T12:01:00Z", require_latency=True), 0, PASS)
+        self.assertEqual(empty, ["count 0", "unparsed 0", "null-latency 0",
+                                 "p50_ms none", "p90_ms none", "max_ms none", PASS])
+        self.db.unlink()
+        self.create([(SINCE, "in", "text", 0)])
+        zero = self.assert_outcome(self.invoke(require_latency=True), 0, PASS)
+        self.assertIn("null-latency 0", zero)
+        self.assertIn("p50_ms 0", zero)
 
 
 if __name__ == "__main__":

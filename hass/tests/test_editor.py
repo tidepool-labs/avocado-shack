@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hass import editor, migration_check, sitegen, template_compat
 from hass.content_model import REPO_ROOT, SITE_DIR, load_and_validate
@@ -220,6 +221,24 @@ class TemplateCompatTests(EditorTestCase):
 class FailClosedTests(EditorTestCase):
     def assertUnchanged(self, repo, head, status):
         self.assertEqual((repo.head(), repo.status()), (head, status))
+
+    def test_apply_refuses_when_git_status_fails(self):
+        repo = self.repo()
+        draft = repo.prepare(_req((HOURS, {"hours": NEW_HOURS})))["draft"]
+        head = repo.head()
+        real_git = editor._git
+
+        def fake_git(wt, *args):
+            if args == ("status", "--porcelain"):
+                return subprocess.CompletedProcess(args, 128, stdout="", stderr="simulated status failure")
+            return real_git(wt, *args)
+
+        with patch.object(editor, "_git", fake_git):
+            result = repo.apply(draft)
+        self.assertEqual(result, {"result": "refused", "problems": ["git status failed"]})
+        self.assertUnchanged(repo, head, "")
+        self.assertFalse((repo.state / "journal").exists())
+        self.assertFalse((repo.state / "changes").exists())
 
     def test_older_draft_is_stale_after_products_change(self):
         repo = self.repo()

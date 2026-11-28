@@ -36,11 +36,16 @@ export function interpret(message, previous={}) {
   return part.replace(/^\s*(?:product|name)\s*[:=][^,$]*/i,'');
  }).join(';').replace(/\$\s*[+-]?[\d.,]*\d/g,'$'); // Keep $ so a price total is not a standalone stock reply.
  const cueCount=stockText.match(cueFirstCount);
- if(cueCount){delete f.quantity;if(/^\d+$/.test(cueCount[1]))f.quantity=Number(cueCount[1]);}
+ const explicitQty=/(?:quantity|qty)\s*[:=]/i.test(stockText);
+ const qty=stockText.match(/(?:quantity|qty)\s*[:=]\s*(\d+)(?![\d.,])(?=\s|;|$)/i);
+ if(explicitQty){
+  delete f.quantity;
+  if(qty&&(!cueCount||(/^\d+$/.test(cueCount[1])&&Number(qty[1])===Number(cueCount[1]))))f.quantity=Number(qty[1]);
+ } else if(cueCount){delete f.quantity;if(/^\d+$/.test(cueCount[1]))f.quantity=Number(cueCount[1]);}
  else {
-  if(/(?:quantity|qty)\s*[:=]|\d[\d.,-]*\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i.test(stockText))delete f.quantity;
-  const qty=stockText.match(/(?:quantity|qty)\s*[:=]\s*(\d+)(?![\d.,])(?=\s|;|$)/i)||stockText.match(/(?<![\d.,-])(\d+)\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i);
-  if(qty)f.quantity=Number(qty[1]);
+  if(/\d[\d.,-]*\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i.test(stockText))delete f.quantity;
+  const counted=stockText.match(/(?<![\d.,-])(\d+)\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i);
+  if(counted)f.quantity=Number(counted[1]);
  }
  if(/(?:online\s+(?:pickup|stock|bin)|for\s+online)/i.test(t)) f.stock_pool='online';
  const action=t.match(/(?:action)\s*[:=]\s*(receipt|recount|transfer|correction)/i);

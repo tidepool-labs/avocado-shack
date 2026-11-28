@@ -42,6 +42,19 @@ test('stock cues followed by a count replace or invalidate a previous quantity',
   assert.ok(result.questions.some(q=>q.includes('How many')),text);
  }
 });
+test('explicit quantities and cue-first counts must agree and be valid',()=>{
+ const previous={name:'Jar',unit:'jar',price_minor:200,quantity:7,stock_pool:'online',stock_action:'recount'};
+ for(const text of ['received 12; qty: -20','qty: 12.5; received 12','received 12; qty: 20','qty: 20; received 12','received 12.5; qty: 12']){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,undefined,text);
+  assert.ok(result.questions.some(q=>q.includes('How many')),text);
+ }
+ for(const text of ['received 12; qty: 12','qty: 12; received 12']){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,12,text);
+  assert.deepEqual(result.questions,[],text);
+ }
+});
 test('an explicit action stays authoritative before conflicting stock wording',()=>{
  const {fields}=interpret('action: correction; New potatoes; 12 available');
  assert.equal(fields.stock_action,'correction');

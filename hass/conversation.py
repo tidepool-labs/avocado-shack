@@ -1546,7 +1546,8 @@ class Conversation(CorePack, SitePack, ReportsPack):  # AVB-12: the pack command
         elif (match := listing_jobs.NO.fullmatch(text)) and (match[1] is None or match[1].lower() == active["job_id"]):
             jobs.turn(active["job_id"], msg, "other", accepted or now)
             jobs.close(active, "cancelled", now)
-            jobs.reply(active, "Okay, I've cancelled that. Nothing changed.", msg.provider_id)
+            if not self._paused():
+                jobs.reply(active, "Okay, I've cancelled that. Nothing changed.", msg.provider_id)
             disposition = "cancelled"
         elif text.casefold() == "yes":
             self._reply(jobs.replies["guards"]["not_ready"])

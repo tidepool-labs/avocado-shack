@@ -392,7 +392,8 @@ class Jobs:
 
     def pump(self):
         """Advance durable work without waiting on the executor. A late result has no live segment/revision to commit to."""
-        if self.stages is None:
+        # Leave any in-flight result on its ticket until resume; do not queue a reply or start another stage.
+        if self.stages is None or self.c._paused():
             return
         now = self.c._now()
         for sha, deadline in list(self.polishing.items()):
@@ -464,6 +465,10 @@ class Jobs:
         """Only an explicit tracked sender may see a card. False means leave the outbox row alone."""
         v = self.one("SELECT v.*,j.state AS job_state,j.current_version,j.chat FROM npp_versions v "
                      "JOIN npp_jobs j USING(job_id) WHERE outbox_id=?", row["id"])
+        # Stop holds job replies, not ordinary conversation replies or synchronous coded-yes guards.
+        if self.c._paused() and (v is not None or self.one(
+                "SELECT 1 FROM npp_turns WHERE reply_outbox_id=? AND kind!='yes'", row["id"])):
+            return False
         if v is None:
             adapter.send(row["chat"], text, json.loads(row["attachments"]))
             return True
@@ -484,7 +489,7 @@ class Jobs:
         return True
 
     def refresh_receipts(self):
-        if self.receipt_for is None:
+        if self.receipt_for is None or self.c._paused():
             return
         now = self.c._now()
         with self.c._tx():

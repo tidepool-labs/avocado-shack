@@ -28,6 +28,20 @@ test('counted stock phrases and direct stock replies still set the action',()=>{
   assert.equal(interpret(text).fields.stock_action,action,text);
  }
 });
+test('stock cues followed by a count replace or invalidate a previous quantity',()=>{
+ const previous={name:'Jar',unit:'jar',price_minor:200,quantity:7,stock_pool:'online',stock_action:'recount'};
+ for(const [text,action] of [['received 12','receipt'],['total of 12','recount']]){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,12,text);
+  assert.equal(result.fields.stock_action,action,text);
+  assert.deepEqual(result.questions,[],text);
+ }
+ for(const text of ['received 12.5','total of 1,200','received -12']){
+  const result=interpret(text,previous);
+  assert.equal(result.fields.quantity,undefined,text);
+  assert.ok(result.questions.some(q=>q.includes('How many')),text);
+ }
+});
 test('an explicit action stays authoritative before conflicting stock wording',()=>{
  const {fields}=interpret('action: correction; New potatoes; 12 available');
  assert.equal(fields.stock_action,'correction');

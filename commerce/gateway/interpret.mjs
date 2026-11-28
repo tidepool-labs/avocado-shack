@@ -12,8 +12,11 @@ function stockCue(words) {
   String.raw`(?:^|[;,\n])\s*(?:(?:a|the)\s+)?${cue}(?:\s+for\s+online(?:\s+pickup)?)?\s*[.!]?\s*(?=$|[;,\n])` // direct stock reply
  ].join('|'),'i');
 }
-const receiptCue=stockCue(String.raw`new(?:\s+(?:arrival|stock))?|received|arrival`);
-const recountCue=stockCue(String.raw`(?:total\s+)?(?:now\s+)?available|total|recount`);
+const receiptWords=String.raw`new(?:\s+(?:arrival|stock))?|received|arrival`;
+const recountWords=String.raw`(?:total\s+)?(?:now\s+)?available|total|recount`;
+const receiptCue=stockCue(receiptWords);
+const recountCue=stockCue(recountWords);
+const cueFirstCount=new RegExp(String.raw`\b(?:${receiptWords}|${recountWords})\b\s*(?:of\s+|[:=]\s*)?([+-]?\d[\d.,-]*)`,'i');
 
 export function interpret(message, previous={}) {
  const f={...previous}; const t=message.trim();
@@ -32,9 +35,13 @@ export function interpret(message, previous={}) {
   if(index===0&&listing)return part.slice(listing[1].length);
   return part.replace(/^\s*(?:product|name)\s*[:=][^,$]*/i,'');
  }).join(';').replace(/\$\s*[+-]?[\d.,]*\d/g,'$'); // Keep $ so a price total is not a standalone stock reply.
- if(/(?:quantity|qty)\s*[:=]|\d[\d.,-]*\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i.test(stockText))delete f.quantity;
- const qty=stockText.match(/(?:quantity|qty)\s*[:=]\s*(\d+)(?![\d.,])(?=\s|;|$)/i)||stockText.match(/(?<![\d.,-])(\d+)\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i);
- if(qty)f.quantity=Number(qty[1]);
+ const cueCount=stockText.match(cueFirstCount);
+ if(cueCount){delete f.quantity;if(/^\d+$/.test(cueCount[1]))f.quantity=Number(cueCount[1]);}
+ else {
+  if(/(?:quantity|qty)\s*[:=]|\d[\d.,-]*\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i.test(stockText))delete f.quantity;
+  const qty=stockText.match(/(?:quantity|qty)\s*[:=]\s*(\d+)(?![\d.,])(?=\s|;|$)/i)||stockText.match(/(?<![\d.,-])(\d+)\s*(?:available|total|new|jars|bottles|bags|loaves|bunches|boxes|each)\b/i);
+  if(qty)f.quantity=Number(qty[1]);
+ }
  if(/(?:online\s+(?:pickup|stock|bin)|for\s+online)/i.test(t)) f.stock_pool='online';
  const action=t.match(/(?:action)\s*[:=]\s*(receipt|recount|transfer|correction)/i);
  if(action)f.stock_action=action[1].toLowerCase();
